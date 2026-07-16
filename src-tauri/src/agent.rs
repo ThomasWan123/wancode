@@ -572,6 +572,37 @@ pub async fn agent_rewind(
     .await
 }
 
+/// Rename any stored session (`x.ai/session/rename`). Needs a live engine.
+#[tauri::command]
+pub async fn agent_session_rename(
+    state: State<'_, AgentState>,
+    session_id: String,
+    title: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/session/rename",
+        serde_json::json!({ "sessionId": session_id, "title": title, "cwd": workspace }),
+    )
+    .await
+}
+
+/// Delete any stored session (`x.ai/session/delete`). Needs a live engine.
+#[tauri::command]
+pub async fn agent_session_delete(
+    state: State<'_, AgentState>,
+    session_id: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/session/delete",
+        serde_json::json!({ "sessionId": session_id, "cwd": workspace }),
+    )
+    .await
+}
+
 /// Interrupt the current turn.
 #[tauri::command]
 pub async fn agent_cancel(state: State<'_, AgentState>) -> Result<(), String> {

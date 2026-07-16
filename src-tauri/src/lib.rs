@@ -57,6 +57,8 @@ pub fn run() {
             agent::agent_session_info,
             agent::agent_rewind_points,
             agent::agent_rewind,
+            agent::agent_session_rename,
+            agent::agent_session_delete,
             agent::mcp_config_list,
             agent::mcp_config_upsert,
             agent::mcp_config_remove,

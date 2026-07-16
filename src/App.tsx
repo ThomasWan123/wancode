@@ -595,7 +595,55 @@ function App() {
                 onClick={() => !starting && startSession(s.session_id)}
                 title={s.session_id}
               >
-                <div className="session-title">{s.title}</div>
+                <div className="session-row">
+                  <div className="session-title">{s.title}</div>
+                  <div className="session-actions">
+                    <span
+                      title={t.renameSession}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const title = window.prompt(t.renameSession, s.title);
+                        if (!title?.trim()) return;
+                        try {
+                          if (!sessionId) await startSession();
+                          await invoke("agent_session_rename", {
+                            sessionId: s.session_id,
+                            title: title.trim(),
+                            workspace,
+                          });
+                          refreshSessions(workspace);
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                      }}
+                    >
+                      ✏
+                    </span>
+                    <span
+                      title={t.deleteSession}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!window.confirm(t.deleteConfirm(s.title))) return;
+                        try {
+                          if (!sessionId) await startSession();
+                          await invoke("agent_session_delete", {
+                            sessionId: s.session_id,
+                            workspace,
+                          });
+                          if (s.session_id === sessionId) {
+                            setSessionId("");
+                            setItems([]);
+                          }
+                          refreshSessions(workspace);
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                      }}
+                    >
+                      🗑
+                    </span>
+                  </div>
+                </div>
                 <div className="session-meta">
                   {s.updated_at.slice(0, 16).replace("T", " ")} · {s.num_messages} {t.messagesUnit}
                   {s.model_id ? ` · ${s.model_id}` : ""}

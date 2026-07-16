@@ -254,12 +254,41 @@ button.ghost.small {
   border-color: var(--border);
 }
 
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
 .session-title {
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.session-actions {
+  display: none;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.session-item:hover .session-actions {
+  display: flex;
+}
+
+.session-actions span {
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.session-actions span:hover {
+  opacity: 1;
 }
 
 .session-meta {
