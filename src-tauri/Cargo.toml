@@ -1,0 +1,40 @@
+[package]
+name = "wancode"
+version = "0.2.0"
+description = "WanCode - multi-model desktop AI coding agent"
+authors = ["WanCode"]
+edition = "2021"
+# This crate is a member of the grok-build workspace (see ../../grok-build/Cargo.toml)
+# so it can consume grok-build crates that use `workspace = true` dependency inheritance.
+workspace = "../../grok-build"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "wancode_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+toml_edit = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+agent-client-protocol = { workspace = true }
+xai-acp-lib = { path = "../../grok-build/crates/codegen/xai-acp-lib" }
+xai-grok-paths = { path = "../../grok-build/crates/codegen/xai-grok-paths" }
+xai-grok-pager = { path = "../../grok-build/crates/codegen/xai-grok-pager" }
+xai-grok-shell = { path = "../../grok-build/crates/codegen/xai-grok-shell" }
+xai-grok-tools = { path = "../../grok-build/crates/codegen/xai-grok-tools" }
+

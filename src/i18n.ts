@@ -1,0 +1,167 @@
+// 轻量双语字典。t 由 useLang() 返回，key 全部集中在此。
+
+export type Lang = "zh" | "en";
+
+const zh = {
+  appTagline: "你的 AI 编码搭档",
+  emptySubReady: "会话已就绪，把任务交给我吧",
+  emptySubStart: "选择一个项目文件夹，点击「打开工作区」开始",
+  emptyHint:
+    "支持智谱 GLM-5 · DeepSeek · 任意 OpenAI 兼容模型 ｜ 每次文件修改都需要你的批准",
+  examples: [
+    "总结这个项目的结构",
+    "读取 notes.md 并告诉我要点",
+    "写一个快速排序的 Python 脚本并运行",
+    "检查代码里有没有明显的 bug",
+  ],
+  workspacePlaceholder: "工作区文件夹路径…",
+  browseFolder: "浏览文件夹",
+  pickFolderTitle: "选择项目文件夹",
+  openWorkspace: "打开工作区",
+  starting: "启动中…",
+  connected: "已连接",
+  sessions: "会话",
+  newSession: "新会话",
+  noSessions: "此工作区暂无历史会话",
+  untitledSession: "(未命名会话)",
+  messagesUnit: "条",
+  mcpFooter: "MCP 服务器：",
+  notConfigured: "未配置",
+  thinking: "思考过程",
+  thinkingNow: "思考中…",
+  output: "输出",
+  toolCall: "工具调用",
+  needApproval: "需要批准：",
+  deny: "拒绝",
+  composerPlaceholder: "输入任务…（Enter 发送，Shift+Enter 换行）",
+  composerLocked: "先打开工作区",
+  send: "发送 ↗",
+  stop: "⏹ 停止",
+  stopTitle: "停止当前回合",
+  ctxLabel: (pct: number, used: number, total: number) =>
+    `上下文 ${pct}%（${used}k / ${total}k）`,
+  rewindTitle: "⏪ 回滚到检查点",
+  rewindTooltip: "回滚到之前的检查点",
+  rewindWhat: "回滚内容",
+  rewindAll: "全部（对话 + 文件）",
+  rewindConversation: "仅对话",
+  rewindFiles: "仅文件",
+  noCheckpoints: "本会话暂无检查点（每个提问会自动创建）",
+  fileSnapshots: "个文件快照",
+  noPreview: "(无预览)",
+  cancel: "取消",
+  rewindConflicts: (n: number) =>
+    `有 ${n} 个文件在快照后被外部修改，回滚会覆盖这些改动。继续？`,
+  rewindFailed: "回滚失败: ",
+  rewindDone: (n: number, files: string) =>
+    `⏪ 已回滚 ${n} 个文件${n ? "：" + files : ""}`,
+  settings: "设置",
+  settingsTitle: "设置",
+  availableModels: (n: number) => `可用模型（${n} 个）`,
+  mcpSection: "MCP 服务器（保存后重开会话生效）",
+  mcpName: "名称，如 filesystem",
+  mcpCommand: "命令，如 npx",
+  mcpArgs: "参数（空格分隔），如 -y @modelcontextprotocol/server-filesystem D:\\proj",
+  mcpUrl: "或 HTTP/SSE URL（与命令二选一）",
+  mcpAdd: "添加 / 更新",
+  mcpDelete: "删除",
+  configFile: "配置文件",
+  configHelp:
+    "%USERPROFILE%\\.grok\\config.toml —— 在此添加模型（[model.\"…\"] 段）与 MCP 服务器（[mcp_servers.…] 段），保存后重开会话生效。API Key 通过环境变量引用（env_key），不落明文。",
+  projectMemory: "项目记忆",
+  projectMemoryHelp:
+    "在工作区根目录放 AGENTS.md（兼容 CLAUDE.md、.grok/rules/*.md），内容会自动注入每个会话作为项目级指令。",
+  language: "界面语言",
+  version: "版本",
+  checkUpdate: "检查更新",
+  close: "关闭",
+  unknownError: "未知错误",
+  noPermissionTitle: "工具调用请求",
+};
+
+const en: typeof zh = {
+  appTagline: "Your AI coding partner",
+  emptySubReady: "Session ready — give me a task",
+  emptySubStart: "Pick a project folder and click “Open Workspace”",
+  emptyHint:
+    "Zhipu GLM-5 · DeepSeek · any OpenAI-compatible model | every file edit needs your approval",
+  examples: [
+    "Summarize this project's structure",
+    "Read notes.md and give me the key points",
+    "Write a quicksort in Python and run it",
+    "Check the code for obvious bugs",
+  ],
+  workspacePlaceholder: "Workspace folder path…",
+  browseFolder: "Browse folder",
+  pickFolderTitle: "Choose a project folder",
+  openWorkspace: "Open Workspace",
+  starting: "Starting…",
+  connected: "Connected",
+  sessions: "Sessions",
+  newSession: "New session",
+  noSessions: "No sessions in this workspace yet",
+  untitledSession: "(untitled session)",
+  messagesUnit: "msgs",
+  mcpFooter: "MCP servers: ",
+  notConfigured: "none",
+  thinking: "Thinking",
+  thinkingNow: "Thinking…",
+  output: "Output",
+  toolCall: "Tool call",
+  needApproval: "Approval needed: ",
+  deny: "Deny",
+  composerPlaceholder: "Type a task… (Enter to send, Shift+Enter for newline)",
+  composerLocked: "Open a workspace first",
+  send: "Send ↗",
+  stop: "⏹ Stop",
+  stopTitle: "Stop the current turn",
+  ctxLabel: (pct: number, used: number, total: number) =>
+    `Context ${pct}% (${used}k / ${total}k)`,
+  rewindTitle: "⏪ Rewind to checkpoint",
+  rewindTooltip: "Rewind to an earlier checkpoint",
+  rewindWhat: "What to rewind",
+  rewindAll: "Everything (conversation + files)",
+  rewindConversation: "Conversation only",
+  rewindFiles: "Files only",
+  noCheckpoints: "No checkpoints yet (one is created per prompt)",
+  fileSnapshots: "file snapshot(s)",
+  noPreview: "(no preview)",
+  cancel: "Cancel",
+  rewindConflicts: (n: number) =>
+    `${n} file(s) were modified externally after the snapshot; rewinding will overwrite them. Continue?`,
+  rewindFailed: "Rewind failed: ",
+  rewindDone: (n: number, files: string) =>
+    `⏪ Reverted ${n} file(s)${n ? ": " + files : ""}`,
+  settings: "Settings",
+  settingsTitle: "Settings",
+  availableModels: (n: number) => `Available models (${n})`,
+  mcpSection: "MCP servers (takes effect on next session)",
+  mcpName: "Name, e.g. filesystem",
+  mcpCommand: "Command, e.g. npx",
+  mcpArgs: "Args (space-separated), e.g. -y @modelcontextprotocol/server-filesystem D:\\proj",
+  mcpUrl: "or HTTP/SSE URL (instead of command)",
+  mcpAdd: "Add / Update",
+  mcpDelete: "Delete",
+  configFile: "Config file",
+  configHelp:
+    "%USERPROFILE%\\.grok\\config.toml — add models ([model.\"…\"]) and MCP servers ([mcp_servers.…]) here; reopen the session to apply. API keys are referenced via env vars (env_key), never stored in plain text.",
+  projectMemory: "Project memory",
+  projectMemoryHelp:
+    "Put an AGENTS.md at the workspace root (CLAUDE.md and .grok/rules/*.md also work); it is injected into every session as project-level instructions.",
+  language: "Language",
+  version: "Version",
+  checkUpdate: "Check for updates",
+  close: "Close",
+  unknownError: "Unknown error",
+  noPermissionTitle: "Tool call request",
+};
+
+export const STRINGS: Record<Lang, typeof zh> = { zh, en };
+
+export function loadLang(): Lang {
+  return (localStorage.getItem("wancode-lang") as Lang) || "zh";
+}
+
+export function saveLang(l: Lang) {
+  localStorage.setItem("wancode-lang", l);
+}
