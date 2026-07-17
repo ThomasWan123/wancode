@@ -63,6 +63,7 @@ pub fn run() {
             agent::agent_session_delete,
             agent::agent_session_search,
             agent::list_workspace_files,
+            agent::git_status,
             agent::mcp_config_list,
             agent::mcp_config_upsert,
             agent::mcp_config_remove,

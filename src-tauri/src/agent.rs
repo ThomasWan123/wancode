@@ -368,19 +368,31 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     }
 }
 
-/// Send one user prompt; resolves when the turn completes.
+/// A pasted image: base64 data + mime type.
+#[derive(serde::Deserialize)]
+pub struct PromptImage {
+    pub data: String,
+    pub mime: String,
+}
+
+/// Send one user prompt (optionally with pasted images for vision models);
+/// resolves when the turn completes.
 #[tauri::command]
 pub async fn agent_prompt(
     app: AppHandle,
     state: State<'_, AgentState>,
     text: String,
+    images: Option<Vec<PromptImage>>,
 ) -> Result<(), String> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
-    let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+    let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+    for img in images.unwrap_or_default() {
+        blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(img.data, img.mime)));
+    }
     let request = acp::PromptRequest::new(session_id, blocks);
     let result: Result<acp::PromptResponse, _> = acp_send(request, &acp_tx).await;
     let payload = match &result {
@@ -570,6 +582,36 @@ pub async fn agent_rewind(
         }),
     )
     .await
+}
+
+/// Git status of the workspace: (branch, [(xy, path)]). Empty list = clean.
+#[tauri::command]
+pub async fn git_status(workspace: String) -> Result<serde_json::Value, String> {
+    let run = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let is_repo = run(&["rev-parse", "--is-inside-work-tree"])
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+    if !is_repo {
+        return Ok(serde_json::json!({ "isRepo": false }));
+    }
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let porcelain = run(&["status", "--porcelain"]).unwrap_or_default();
+    let files: Vec<serde_json::Value> = porcelain
+        .lines()
+        .filter(|l| l.len() > 3)
+        .map(|l| serde_json::json!({ "xy": l[..2].trim().to_string(), "path": l[3..].to_string() }))
+        .collect();
+    Ok(serde_json::json!({ "isRepo": true, "branch": branch, "files": files }))
 }
 
 /// List workspace files (relative paths) for @-mention autocomplete.

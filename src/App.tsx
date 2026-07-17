@@ -66,6 +66,53 @@ function DiffView({ diff }: { diff: ToolDiff }) {
   );
 }
 
+type TreeNode = { name: string; path: string; children?: Record<string, TreeNode> };
+
+function buildTree(paths: string[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", children: {} };
+  for (const p of paths) {
+    const parts = p.split("/");
+    let node = root;
+    let acc = "";
+    for (let i = 0; i < parts.length; i++) {
+      acc = acc ? `${acc}/${parts[i]}` : parts[i];
+      node.children ??= {};
+      node.children[parts[i]] ??= { name: parts[i], path: acc, children: i < parts.length - 1 ? {} : undefined };
+      node = node.children[parts[i]];
+    }
+  }
+  return root;
+}
+
+function TreeView({ node, onPick, depth = 0 }: { node: TreeNode; onPick: (p: string) => void; depth?: number }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const entries = Object.values(node.children ?? {}).sort((a, b) => {
+    const ad = !!a.children, bd = !!b.children;
+    if (ad !== bd) return ad ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return (
+    <>
+      {entries.map((c) => {
+        const isDir = !!c.children;
+        return (
+          <div key={c.path}>
+            <div
+              className="tree-row"
+              style={{ paddingLeft: 8 + depth * 12 }}
+              onClick={() => (isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path))}
+            >
+              <span className="tree-icon">{isDir ? (open[c.path] ? "📂" : "📁") : "📄"}</span>
+              <span className="tree-name">{c.name}</span>
+            </div>
+            {isDir && open[c.path] && <TreeView node={c} onPick={onPick} depth={depth + 1} />}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
@@ -111,6 +158,19 @@ function App() {
   const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
+  const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
+  const [gitInfo, setGitInfo] = useState<any>(null);
+  const [showGit, setShowGit] = useState(false);
+  const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
+
+  async function refreshGit() {
+    try {
+      setGitInfo(await invoke<any>("git_status", { workspace }));
+    } catch {
+      setGitInfo(null);
+    }
+  }
   const taRef = useRef<HTMLTextAreaElement>(null);
   const t = STRINGS[lang];
 
@@ -275,7 +335,15 @@ function App() {
       listen<any>("agent://update", (e) => {
         const u = e.payload;
         if (!u || typeof u !== "object") return;
-        if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
+        if (u.sessionUpdate === "plan") {
+          const entries = u.entries ?? u.plan?.entries ?? [];
+          setPlanSteps(
+            entries.map((e: any) => ({
+              content: e.content ?? e.title ?? String(e),
+              status: e.status,
+            })),
+          );
+        } else if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
           appendStream("assistant", u.content.text);
         } else if (u.sessionUpdate === "user_message_chunk" && u.content?.type === "text") {
           // Skip the engine echo of the message we just sent locally;
@@ -398,6 +466,7 @@ function App() {
       invoke<string[]>("list_workspace_files", { workspace })
         .then(setFileList)
         .catch(() => {});
+      refreshGit();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -405,14 +474,19 @@ function App() {
     }
   }
 
-  function sendText(text: string) {
+  function sendText(text: string, imgs: { data: string; mime: string; preview: string }[] = []) {
     const t = text.trim();
-    if (!t || busy || !sessionId) return;
+    if ((!t && imgs.length === 0) || busy || !sessionId) return;
     setError("");
     lastSentRef.current = t;
-    setItems((prev) => [...prev, { kind: "user", text: t }]);
+    setPlanSteps([]);
+    const label = imgs.length ? `${t}${t ? "  " : ""}🖼️×${imgs.length}` : t;
+    setItems((prev) => [...prev, { kind: "user", text: label }]);
     setBusy(true);
-    invoke("agent_prompt", { text: t }).catch((e) => {
+    invoke("agent_prompt", {
+      text: t,
+      images: imgs.length ? imgs.map((i) => ({ data: i.data, mime: i.mime })) : null,
+    }).catch((e) => {
       setError(String(e));
       setBusy(false);
     });
@@ -421,9 +495,28 @@ function App() {
   function send() {
     if (popup) return;
     const text = input.trim();
-    if (!text) return;
+    if (!text && pastedImages.length === 0) return;
+    const imgs = pastedImages;
     setInput("");
-    sendText(text);
+    setPastedImages([]);
+    sendText(text, imgs);
+  }
+
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(e.clipboardData.items).filter((i) => i.type.startsWith("image/"));
+    if (!items.length) return;
+    e.preventDefault();
+    for (const it of items) {
+      const file = it.getAsFile();
+      if (!file) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result);
+        const base64 = dataUrl.split(",")[1] ?? "";
+        setPastedImages((prev) => [...prev, { data: base64, mime: file.type, preview: dataUrl }]);
+      };
+      reader.readAsDataURL(file);
+    }
   }
 
   // ── @ file-mention / slash-command popup ──────────────────────────
@@ -546,6 +639,18 @@ function App() {
         {sessionId && (
           <button className="ghost" title={t.rewindTooltip} onClick={openRewind}>
             ⏪
+          </button>
+        )}
+        {sessionId && (
+          <button
+            className="ghost"
+            title={t.git}
+            onClick={() => {
+              refreshGit();
+              setShowGit(true);
+            }}
+          >
+            ⑂
           </button>
         )}
         <button
@@ -724,21 +829,100 @@ function App() {
         </div>
       )}
 
+      {showGit && (
+        <div className="modal-mask" onClick={() => setShowGit(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">⑂ {t.git}</div>
+            {gitInfo?.isRepo === false || !gitInfo ? (
+              <div className="modal-body">{t.gitNotRepo}</div>
+            ) : (
+              <>
+                <div className="modal-section">
+                  <div className="modal-label">{gitInfo.branch}</div>
+                  <div className="git-files">
+                    {(!gitInfo.files || gitInfo.files.length === 0) && (
+                      <div className="sidebar-empty">{t.gitClean}</div>
+                    )}
+                    {(gitInfo.files ?? []).map((f: any) => (
+                      <div key={f.path} className="git-file">
+                        <span className="git-xy">{f.xy || "??"}</span>
+                        <span className="git-path">{f.path}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="git-actions">
+                  <button
+                    disabled={!gitInfo.files?.length}
+                    onClick={() => {
+                      setShowGit(false);
+                      sendText(
+                        "Review the git diff of my uncommitted changes, then create a well-formed git commit with a clear message.",
+                      );
+                    }}
+                  >
+                    {t.gitCommit}
+                  </button>
+                  <button
+                    className="ghost"
+                    disabled={!gitInfo.files?.length}
+                    onClick={() => {
+                      setShowGit(false);
+                      sendText("Review my uncommitted changes for bugs and summarize what changed.");
+                    }}
+                  >
+                    {t.gitReview}
+                  </button>
+                </div>
+              </>
+            )}
+            <div className="modal-footer">
+              <span />
+              <button onClick={() => setShowGit(false)}>{t.close}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="body-row">
         <aside className="sidebar">
-          <div className="sidebar-head">
-            <span>{t.sessions}</span>
+          <div className="sidebar-tabs">
             <button
-              className="ghost small"
-              title={t.newSession}
-              onClick={() => {
-                setSessionId("");
-                setItems([]);
-              }}
+              className={`tab ${sidebarTab === "sessions" ? "active" : ""}`}
+              onClick={() => setSidebarTab("sessions")}
             >
-              ＋
+              {t.tabSessions}
             </button>
+            <button
+              className={`tab ${sidebarTab === "files" ? "active" : ""}`}
+              onClick={() => setSidebarTab("files")}
+            >
+              {t.tabFiles}
+            </button>
+            {sidebarTab === "sessions" && (
+              <button
+                className="ghost small"
+                title={t.newSession}
+                onClick={() => {
+                  setSessionId("");
+                  setItems([]);
+                }}
+              >
+                ＋
+              </button>
+            )}
           </div>
+
+          {sidebarTab === "files" ? (
+            <div className="session-list tree-list">
+              {fileList.length === 0 ? (
+                <div className="sidebar-empty">{sessionId ? "—" : t.emptySubStart}</div>
+              ) : (
+                <TreeView node={buildTree(fileList)} onPick={(p) => setInput((v) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + p + " ")} />
+              )}
+            </div>
+          ) : (
+          <>
           <input
             className="session-search"
             value={searchQuery}
@@ -815,6 +999,8 @@ function App() {
               </div>
             ))}
           </div>
+          </>
+          )}
           <div className="sidebar-foot">
             {t.mcpFooter}
             {mcpServers.length ? mcpServers.join("、") : t.notConfigured}
@@ -839,6 +1025,20 @@ function App() {
             ))}
           </div>
           <div className="empty-hint">{t.emptyHint}</div>
+        </div>
+      )}
+
+      {planSteps.length > 0 && (
+        <div className="plan-panel">
+          <div className="plan-head">📋 {t.planTitle}</div>
+          {planSteps.map((p, i) => (
+            <div key={i} className={`plan-step ${p.status ?? ""}`}>
+              <span className="plan-mark">
+                {p.status === "completed" ? "✅" : p.status === "in_progress" ? "▶" : "○"}
+              </span>
+              <span>{p.content}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -942,6 +1142,21 @@ function App() {
 
       <footer className="composer">
         <div className="composer-input-wrap">
+          {pastedImages.length > 0 && (
+            <div className="image-strip">
+              {pastedImages.map((im, i) => (
+                <div key={i} className="image-thumb">
+                  <img src={im.preview} alt="" />
+                  <button
+                    title={t.removeImage}
+                    onClick={() => setPastedImages((prev) => prev.filter((_, j) => j !== i))}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {popup && popupItems.length > 0 && (
             <div className="mention-popup">
               {popupItems.map((it, idx) => (
@@ -963,6 +1178,7 @@ function App() {
             ref={taRef}
             value={input}
             onChange={(e) => onComposerChange(e.currentTarget.value)}
+            onPaste={onPaste}
             onKeyDown={(e) => {
               if (popup && popupItems.length > 0) {
                 if (e.key === "ArrowDown") {
@@ -1016,7 +1232,7 @@ function App() {
             {t.stop}
           </button>
         ) : (
-          <button className="send" onClick={send} disabled={!sessionId || !input.trim()}>
+          <button className="send" onClick={send} disabled={!sessionId || (!input.trim() && pastedImages.length === 0)}>
             {t.send}
           </button>
         )}

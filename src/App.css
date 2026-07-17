@@ -223,6 +223,175 @@ button.ghost.small {
   letter-spacing: 0.5px;
 }
 
+.sidebar-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 12px 6px;
+}
+
+.sidebar-tabs .tab {
+  background: transparent;
+  border: none;
+  color: var(--faint);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 7px;
+}
+
+.sidebar-tabs .tab.active {
+  color: var(--text);
+  background: var(--bg3);
+}
+
+.sidebar-tabs .tab:hover:not(.active) {
+  color: var(--muted);
+  filter: none;
+}
+
+.sidebar-tabs .ghost.small {
+  margin-left: auto;
+}
+
+.tree-list {
+  padding: 4px 4px 4px 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tree-row:hover {
+  background: var(--bg2);
+}
+
+.tree-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* git 面板 */
+.git-files {
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.git-file {
+  display: flex;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.git-xy {
+  color: var(--warn);
+  width: 20px;
+  flex-shrink: 0;
+}
+
+.git-path {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+/* plan 面板 */
+.plan-panel {
+  margin: 0 10% 8px;
+  background: rgba(109, 124, 255, 0.06);
+  border: 1px solid rgba(109, 124, 255, 0.25);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+
+.plan-head {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #a5b4fc;
+  margin-bottom: 8px;
+}
+
+.plan-step {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  padding: 3px 0;
+  color: var(--muted);
+}
+
+.plan-step.completed {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+.plan-step.in_progress {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.plan-mark {
+  flex-shrink: 0;
+}
+
+/* 图片缩略 */
+.image-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.image-thumb {
+  position: relative;
+}
+
+.image-thumb img {
+  height: 60px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.image-thumb button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--err);
+  color: white;
+  font-size: 10px;
+  line-height: 1;
+}
+
 .session-search {
   margin: 0 10px 8px;
   background: var(--bg2);
