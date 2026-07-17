@@ -23,6 +23,28 @@
   font-size: 14px;
 }
 
+/* 浅色主题 */
+:root[data-theme="light"] {
+  --bg0: #f5f6f8;
+  --bg1: #ffffff;
+  --bg2: #eef0f4;
+  --bg3: #e2e6ec;
+  --border: #d3d8e0;
+  --border-soft: #e3e7ee;
+  --text: #1a1d24;
+  --muted: #5c6474;
+  --faint: #99a0ae;
+  --accent: #5563e8;
+  --accent2: #0891b2;
+  --ok: #059669;
+  --err: #dc2626;
+  --warn: #d97706;
+}
+
+:root[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c4cad4;
+}
+
 * {
   box-sizing: border-box;
 }

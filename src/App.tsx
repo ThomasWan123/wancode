@@ -150,7 +150,15 @@ function App() {
   >([]);
   const [mcpForm, setMcpForm] = useState({ name: "", command: "", args: "", url: "" });
   const [lang, setLang] = useState<Lang>(loadLang());
+  const [theme, setTheme] = useState<"dark" | "light">(
+    (localStorage.getItem("wancode-theme") as "dark" | "light") || "dark",
+  );
   const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("wancode-theme", theme);
+  }, [theme]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SessionEntry[] | null>(null);
   const [updateMsg, setUpdateMsg] = useState("");
@@ -653,6 +661,13 @@ function App() {
             ⑂
           </button>
         )}
+        <button
+          className="ghost"
+          title={t.toggleTheme}
+          onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
+        >
+          {theme === "dark" ? "☀" : "🌙"}
+        </button>
         <button
           className="ghost"
           title={t.settings}

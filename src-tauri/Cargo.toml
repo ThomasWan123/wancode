@@ -1,6 +1,6 @@
 [package]
 name = "wancode"
-version = "0.5.0"
+version = "0.6.0"
 description = "WanCode - multi-model desktop AI coding agent"
 authors = ["WanCode"]
 edition = "2021"
