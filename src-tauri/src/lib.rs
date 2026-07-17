@@ -36,6 +36,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(agent::AgentState::default())
         .setup(|app| {
             if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
@@ -59,6 +61,8 @@ pub fn run() {
             agent::agent_rewind,
             agent::agent_session_rename,
             agent::agent_session_delete,
+            agent::agent_session_search,
+            agent::list_workspace_files,
             agent::mcp_config_list,
             agent::mcp_config_upsert,
             agent::mcp_config_remove,

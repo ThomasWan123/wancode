@@ -223,6 +223,21 @@ button.ghost.small {
   letter-spacing: 0.5px;
 }
 
+.session-search {
+  margin: 0 10px 8px;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 11px;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.session-search:focus {
+  border-color: var(--accent);
+}
+
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -532,6 +547,49 @@ button.ghost.small {
   color: #f89b9b;
 }
 
+.msg.tool.awaiting {
+  border-left-color: var(--warn);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.25);
+}
+
+.inline-approval {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.inline-approval-label {
+  font-size: 12.5px;
+  color: #fde68a;
+  font-weight: 600;
+  font-family: var(--font, inherit);
+}
+
+.inline-approval button {
+  padding: 6px 13px;
+  font-size: 12px;
+}
+
+.inline-approval button.deny {
+  background: transparent;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: var(--err);
+}
+
+.inline-approval button.deny:hover {
+  background: rgba(248, 113, 113, 0.12);
+  filter: none;
+}
+
+.update-msg {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 .tool-output summary {
   cursor: pointer;
   color: var(--faint);
@@ -799,6 +857,107 @@ button.ghost.small {
   text-underline-offset: 3px;
 }
 
+/* ── 终端面板 ─────────────────────────────────────── */
+
+.terminal-panel {
+  margin: 0 10% 8px;
+  background: #0a0c10;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 260px;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.terminal-head > div {
+  display: flex;
+  gap: 4px;
+}
+
+.terminal-body {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #b8e6c0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.term-toggle {
+  flex-shrink: 0;
+  font-family: Consolas, monospace;
+  font-weight: 700;
+}
+
+/* ── @ / slash 弹窗 ───────────────────────────────── */
+
+.composer-input-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
+
+.mention-popup {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+  z-index: 30;
+}
+
+.mention-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.mention-item.active,
+.mention-item:hover {
+  background: var(--bg3);
+}
+
+.mention-label {
+  color: var(--text);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mention-desc {
+  color: var(--faint);
+  font-size: 12px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 /* ── 输入区 ───────────────────────────────────────── */
 
 .composer {
@@ -820,6 +979,7 @@ button.ghost.small {
 
 .composer textarea {
   flex: 1;
+  width: 100%;
   resize: none;
   background: transparent;
   border: none;

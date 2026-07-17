@@ -572,6 +572,70 @@ pub async fn agent_rewind(
     .await
 }
 
+/// List workspace files (relative paths) for @-mention autocomplete.
+/// Skips common heavy/ignored dirs; capped to keep it snappy.
+#[tauri::command]
+pub async fn list_workspace_files(workspace: String) -> Result<Vec<String>, String> {
+    const SKIP: &[&str] = &[
+        "node_modules", ".git", "target", "dist", "build", ".next",
+        ".venv", "venv", "__pycache__", ".idea", ".vscode", "vendor",
+    ];
+    const MAX: usize = 4000;
+    let root = PathBuf::from(&workspace);
+    if !root.is_dir() {
+        return Err("工作区不存在".into());
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= MAX {
+            break;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if SKIP.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(&root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+                if out.len() >= MAX {
+                    break;
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Full-text search over stored sessions (`x.ai/session/search`).
+#[tauri::command]
+pub async fn agent_session_search(
+    state: State<'_, AgentState>,
+    query: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/session/search",
+        serde_json::json!({
+            "query": query,
+            "cwd": workspace,
+            "limit": 30,
+            "includeContent": true,
+        }),
+    )
+    .await
+}
+
 /// Rename any stored session (`x.ai/session/rename`). Needs a live engine.
 #[tauri::command]
 pub async fn agent_session_rename(

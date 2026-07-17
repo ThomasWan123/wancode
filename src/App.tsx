@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import ReactMarkdown from "react-markdown";
 import { STRINGS, loadLang, saveLang, type Lang } from "./i18n";
 import "./App.css";
@@ -74,6 +75,7 @@ type ChatItem =
 type PermissionRequest = {
   id: number;
   title: string;
+  toolCallId?: string;
   options: { optionId: string; name: string; kind: string }[];
 };
 
@@ -102,7 +104,67 @@ function App() {
   const [mcpForm, setMcpForm] = useState({ name: "", command: "", args: "", url: "" });
   const [lang, setLang] = useState<Lang>(loadLang());
   const [version, setVersion] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchHits, setSearchHits] = useState<SessionEntry[] | null>(null);
+  const [updateMsg, setUpdateMsg] = useState("");
+  const [fileList, setFileList] = useState<string[]>([]);
+  const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
+  const [terminalLines, setTerminalLines] = useState<string[]>([]);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const taRef = useRef<HTMLTextAreaElement>(null);
   const t = STRINGS[lang];
+
+  const SLASH_COMMANDS = [
+    { cmd: "/commit", desc: lang === "zh" ? "让 AI 提交当前改动" : "Ask AI to commit changes", prompt: "Review the git diff, then create a well-formed git commit for the current changes." },
+    { cmd: "/review", desc: lang === "zh" ? "审查未提交的改动" : "Review uncommitted changes", prompt: "Review my uncommitted changes for bugs, and summarize what changed." },
+    { cmd: "/test", desc: lang === "zh" ? "运行测试" : "Run the test suite", prompt: "Detect and run this project's test suite, then report the results." },
+    { cmd: "/explain", desc: lang === "zh" ? "解释这个项目" : "Explain this project", prompt: "Explain this project's structure, entry points, and how the pieces fit together." },
+    { cmd: "/compact", desc: lang === "zh" ? "压缩上下文" : "Compact the context", action: "compact" as const },
+    { cmd: "/rewind", desc: lang === "zh" ? "打开回滚" : "Open rewind", action: "rewind" as const },
+    { cmd: "/clear", desc: lang === "zh" ? "开新会话" : "Start a new session", action: "clear" as const },
+  ];
+
+  async function runSearch(q: string) {
+    setSearchQuery(q);
+    if (!q.trim()) {
+      setSearchHits(null);
+      return;
+    }
+    try {
+      if (!sessionId) await startSession();
+      const r = await invoke<any>("agent_session_search", { query: q.trim(), workspace });
+      const hits = r?.result?.results ?? r?.results ?? [];
+      setSearchHits(
+        hits.map((h: any) => ({
+          session_id: h.sessionId ?? h.session_id,
+          title: h.summary || h.snippet || "(untitled)",
+          updated_at: h.updatedAt ?? h.updated_at ?? "",
+          num_messages: 0,
+          model_id: undefined,
+        })),
+      );
+    } catch (e) {
+      setError(String(e));
+      setSearchHits([]);
+    }
+  }
+
+  async function runUpdate() {
+    setUpdateMsg(t.checkingUpdate);
+    try {
+      const update = await checkUpdate();
+      if (!update) {
+        setUpdateMsg(t.upToDate(version));
+        return;
+      }
+      setUpdateMsg(t.updateAvailable(update.version));
+      await update.downloadAndInstall();
+      setUpdateMsg(t.updateInstalling);
+      await relaunch();
+    } catch (e) {
+      setUpdateMsg(t.updateFailed + String(e));
+    }
+  }
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion(""));
@@ -178,6 +240,7 @@ function App() {
   }
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastSentRef = useRef("");
+  const execIdsRef = useRef<Set<string>>(new Set());
 
   async function refreshSessions(ws: string) {
     try {
@@ -226,6 +289,14 @@ function App() {
           appendStream("thought", u.content.text);
         } else if (u.sessionUpdate === "tool_call") {
           const { diffs, output } = extractToolContent(u.content);
+          const isExec =
+            u.kind === "execute" || /^(execute|run)\b/i.test(u.title ?? "");
+          if (isExec) {
+            if (u.toolCallId) execIdsRef.current.add(u.toolCallId);
+            const cmd = u.title ?? "command";
+            setTerminalLines((prev) => [...prev, `$ ${cmd}`, ...(output ? [output] : [])]);
+            setShowTerminal(true);
+          }
           setItems((prev) => [
             ...prev,
             {
@@ -242,6 +313,12 @@ function App() {
           ]);
         } else if (u.sessionUpdate === "tool_call_update") {
           const { diffs, output } = extractToolContent(u.content);
+          if (output && u.toolCallId && execIdsRef.current.has(u.toolCallId)) {
+            setTerminalLines((prev) =>
+              prev[prev.length - 1] === output ? prev : [...prev, output],
+            );
+            setShowTerminal(true);
+          }
           setItems((prev) =>
             prev.map((it) =>
               it.kind === "tool" && it.call.toolCallId === u.toolCallId
@@ -268,6 +345,7 @@ function App() {
         setPermission({
           id: p.id,
           title: p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "工具调用请求",
+          toolCallId: p.request?.toolCall?.toolCallId,
           options: (p.request?.options ?? []).map((o: any) => ({
             optionId: o.optionId,
             name: o.name,
@@ -317,6 +395,9 @@ function App() {
       setSessionId(r.session_id);
       if (r.models?.length) setModels(r.models);
       refreshSessions(workspace);
+      invoke<string[]>("list_workspace_files", { workspace })
+        .then(setFileList)
+        .catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {
@@ -324,18 +405,94 @@ function App() {
     }
   }
 
-  async function send() {
-    const text = input.trim();
-    if (!text || busy || !sessionId) return;
-    setInput("");
+  function sendText(text: string) {
+    const t = text.trim();
+    if (!t || busy || !sessionId) return;
     setError("");
-    lastSentRef.current = text;
-    setItems((prev) => [...prev, { kind: "user", text }]);
+    lastSentRef.current = t;
+    setItems((prev) => [...prev, { kind: "user", text: t }]);
     setBusy(true);
-    invoke("agent_prompt", { text }).catch((e) => {
+    invoke("agent_prompt", { text: t }).catch((e) => {
       setError(String(e));
       setBusy(false);
     });
+  }
+
+  function send() {
+    if (popup) return;
+    const text = input.trim();
+    if (!text) return;
+    setInput("");
+    sendText(text);
+  }
+
+  // ── @ file-mention / slash-command popup ──────────────────────────
+  const popupItems: { label: string; desc?: string }[] =
+    popup?.kind === "at"
+      ? fileList
+          .filter((f) => f.toLowerCase().includes(popup.query.toLowerCase()))
+          .slice(0, 8)
+          .map((f) => ({ label: f }))
+      : popup?.kind === "slash"
+        ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + popup.query.replace(/^\//, ""))).map(
+            (c) => ({ label: c.cmd, desc: c.desc }),
+          )
+        : [];
+
+  function onComposerChange(v: string) {
+    setInput(v);
+    const caret = taRef.current?.selectionStart ?? v.length;
+    const before = v.slice(0, caret);
+    // slash: only when it's the very first char of the input
+    if (/^\/[\w-]*$/.test(before) && v === before) {
+      setPopup({ kind: "slash", query: before, sel: 0 });
+      return;
+    }
+    // @: token after a whitespace/start, no spaces inside
+    const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+    if (m) {
+      setPopup({ kind: "at", query: m[1], sel: 0 });
+    } else {
+      setPopup(null);
+    }
+  }
+
+  function acceptPopup(index: number) {
+    if (!popup) return;
+    if (popup.kind === "slash") {
+      const c = SLASH_COMMANDS.filter((c) =>
+        c.cmd.startsWith("/" + popup.query.replace(/^\//, "")),
+      )[index];
+      if (!c) return;
+      setPopup(null);
+      setInput("");
+      if ("action" in c && c.action) {
+        if (c.action === "clear") {
+          setSessionId("");
+          setItems([]);
+        } else if (c.action === "rewind") {
+          openRewind();
+        } else if (c.action === "compact") {
+          setInput("");
+          sendText("Please compact our conversation, preserving key decisions and current task state.");
+        }
+      } else if ("prompt" in c && c.prompt) {
+        sendText(c.prompt);
+      }
+      return;
+    }
+    // at
+    const files = fileList
+      .filter((f) => f.toLowerCase().includes(popup.query.toLowerCase()))
+      .slice(0, 8);
+    const picked = files[index];
+    if (!picked) return;
+    const caret = taRef.current?.selectionStart ?? input.length;
+    const before = input.slice(0, caret).replace(/@([^\s@]*)$/, "@" + picked + " ");
+    const after = input.slice(caret);
+    setInput(before + after);
+    setPopup(null);
+    taRef.current?.focus();
   }
 
   async function respondPermission(optionId: string | null) {
@@ -556,14 +713,10 @@ function App() {
             <div className="modal-footer">
               <span className="version-tag">
                 WanCode {version ? `v${version}` : ""}
-                <a
-                  className="update-link"
-                  onClick={() =>
-                    openUrl("https://github.com/ThomasWan123/grok-build").catch(() => {})
-                  }
-                >
+                <a className="update-link" onClick={runUpdate}>
                   {t.checkUpdate}
                 </a>
+                {updateMsg && <span className="update-msg">{updateMsg}</span>}
               </span>
               <button onClick={() => setShowSettings(false)}>{t.close}</button>
             </div>
@@ -586,9 +739,20 @@ function App() {
               ＋
             </button>
           </div>
+          <input
+            className="session-search"
+            value={searchQuery}
+            placeholder={t.searchPlaceholder}
+            onChange={(e) => runSearch(e.currentTarget.value)}
+          />
           <div className="session-list">
-            {sessions.length === 0 && <div className="sidebar-empty">{t.noSessions}</div>}
-            {sessions.map((s) => (
+            {searchHits !== null && searchHits.length === 0 && (
+              <div className="sidebar-empty">{t.searchNoResults}</div>
+            )}
+            {searchHits === null && sessions.length === 0 && (
+              <div className="sidebar-empty">{t.noSessions}</div>
+            )}
+            {(searchHits ?? sessions).map((s) => (
               <div
                 key={s.session_id}
                 className={`session-item ${s.session_id === sessionId ? "active" : ""}`}
@@ -699,8 +863,12 @@ function App() {
                 <ReactMarkdown>{it.text}</ReactMarkdown>
               </details>
             );
+          const inlinePerm =
+            permission && permission.toolCallId && permission.toolCallId === it.call.toolCallId
+              ? permission
+              : null;
           return (
-            <div key={i} className="msg tool">
+            <div key={i} className={`msg tool ${inlinePerm ? "awaiting" : ""}`}>
               🔧 {it.call.title ?? it.call.kind ?? t.toolCall}
               <span className={`status ${it.call.status ?? ""}`}> {it.call.status ?? ""}</span>
               {it.call.diffs.map((d, j) => (
@@ -712,6 +880,19 @@ function App() {
                   <pre>{it.call.output}</pre>
                 </details>
               )}
+              {inlinePerm && (
+                <div className="inline-approval">
+                  <span className="inline-approval-label">🔐 {t.needApproval}</span>
+                  {inlinePerm.options.map((o) => (
+                    <button key={o.optionId} onClick={() => respondPermission(o.optionId)}>
+                      {o.name}
+                    </button>
+                  ))}
+                  <button className="deny" onClick={() => respondPermission(null)}>
+                    {t.deny}
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -720,7 +901,11 @@ function App() {
         <div ref={bottomRef} />
       </section>
 
-      {permission && (
+      {permission &&
+        !(
+          permission.toolCallId &&
+          items.some((it) => it.kind === "tool" && it.call.toolCallId === permission.toolCallId)
+        ) && (
         <div className="permission-bar">
           <div className="permission-title">🔐 {t.needApproval}{permission.title}</div>
           <div className="permission-actions">
@@ -736,20 +921,92 @@ function App() {
         </div>
       )}
 
+      {showTerminal && (
+        <div className="terminal-panel">
+          <div className="terminal-head">
+            <span>▸ {lang === "zh" ? "终端" : "Terminal"}</span>
+            <div>
+              <button className="ghost small" title={lang === "zh" ? "清空" : "Clear"} onClick={() => setTerminalLines([])}>
+                🧹
+              </button>
+              <button className="ghost small" onClick={() => setShowTerminal(false)}>
+                ✕
+              </button>
+            </div>
+          </div>
+          <pre className="terminal-body">
+            {terminalLines.length ? terminalLines.join("\n") : lang === "zh" ? "（暂无命令输出）" : "(no command output yet)"}
+          </pre>
+        </div>
+      )}
+
       <footer className="composer">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
+        <div className="composer-input-wrap">
+          {popup && popupItems.length > 0 && (
+            <div className="mention-popup">
+              {popupItems.map((it, idx) => (
+                <div
+                  key={it.label}
+                  className={`mention-item ${idx === popup.sel ? "active" : ""}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    acceptPopup(idx);
+                  }}
+                >
+                  <span className="mention-label">{it.label}</span>
+                  {it.desc && <span className="mention-desc">{it.desc}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={taRef}
+            value={input}
+            onChange={(e) => onComposerChange(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (popup && popupItems.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setPopup({ ...popup, sel: (popup.sel + 1) % popupItems.length });
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setPopup({ ...popup, sel: (popup.sel - 1 + popupItems.length) % popupItems.length });
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault();
+                  acceptPopup(popup.sel);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setPopup(null);
+                  return;
+                }
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            placeholder={
+              sessionId ? t.composerPlaceholder + "  ·  @文件  /命令" : t.composerLocked
             }
-          }}
-          placeholder={sessionId ? t.composerPlaceholder : t.composerLocked}
-          disabled={!sessionId}
-          rows={3}
-        />
+            disabled={!sessionId}
+            rows={3}
+          />
+        </div>
+        {sessionId && (
+          <button
+            className="ghost term-toggle"
+            title={lang === "zh" ? "终端" : "Terminal"}
+            onClick={() => setShowTerminal((s) => !s)}
+          >
+            ▸_
+          </button>
+        )}
         {busy ? (
           <button
             className="send stop"
