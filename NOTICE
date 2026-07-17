@@ -1,0 +1,13 @@
+WanCode
+Copyright 2026 WanCode contributors
+
+This product includes software developed by SpaceXAI as part of grok-build
+(https://github.com/ThomasWan123/grok-build), licensed under the Apache
+License, Version 2.0.
+
+    grok-build
+    Copyright 2023-2026 SpaceXAI
+
+The WanCode desktop application embeds and builds upon grok-build's agent
+runtime, tools, workspace, and MCP crates. All grok-build source retains its
+original Apache License 2.0 terms; see LICENSE for the full license text.
