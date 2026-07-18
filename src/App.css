@@ -2220,3 +2220,52 @@ button.ghost.small {
   margin: 6px 0 10px;
 }
 .git-msg:focus { border-color: var(--accent); }
+
+/* ── 后台任务 / 子 Agent ──────────────────────────────── */
+.tasks-btn { position: relative; }
+.tasks-count {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 6px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.task-row:hover { background: var(--bg2); }
+.task-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.task-dot.run { background: var(--warn); }
+.task-dot.done { background: var(--ok); }
+.task-cmd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.task-exit {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}

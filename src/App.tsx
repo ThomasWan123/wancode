@@ -339,6 +339,9 @@ function App() {
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
   const [gitBranches, setGitBranches] = useState<string[]>([]);
+  const [bgTasks, setBgTasks] = useState<any[]>([]);
+  const [subagents, setSubagents] = useState<any[]>([]);
+  const [showTasks, setShowTasks] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
@@ -435,6 +438,27 @@ function App() {
         permModeRef.current = prev;
         localStorage.setItem("wancode-perm-mode", prev);
       });
+    }
+  }
+
+  // 引擎会推 task_backgrounded / task_completed 通知；收到就重新拉一次。
+  async function refreshTasks() {
+    if (!sessionIdRef.current) {
+      setBgTasks([]);
+      setSubagents([]);
+      return;
+    }
+    try {
+      const t = await invoke<any>("tasks_list");
+      setBgTasks((t?.result ?? t)?.tasks ?? []);
+    } catch {
+      setBgTasks([]);
+    }
+    try {
+      const s = await invoke<any>("subagents_list");
+      setSubagents((s?.result ?? s)?.subagents ?? []);
+    } catch {
+      setSubagents([]);
     }
   }
 
@@ -789,7 +813,13 @@ function App() {
     // 引擎广播的权威队列。排除正在执行的那条 —— 它已经在对话流里了。
     unsubs.push(
       listen<any>("agent://ext", (e) => {
-        if (e.payload?.method !== "x.ai/queue/changed") return;
+        const m = e.payload?.method;
+        // 后台任务开始/结束 —— 之前这两个通知被直接丢弃
+        if (m === "x.ai/task_backgrounded" || m === "x.ai/task_completed") {
+          refreshTasks();
+          return;
+        }
+        if (m !== "x.ai/queue/changed") return;
         const p = e.payload.params ?? {};
         const running = p.runningPromptId;
         setQueue(
@@ -816,6 +846,7 @@ function App() {
     unsubs.push(
       listen<any>("agent://turn-end", (e) => {
         setBusy(false);
+        refreshTasks();
         if (e.payload && e.payload.ok === false) {
           setError(String(e.payload.error ?? "未知错误"));
         }
@@ -860,6 +891,7 @@ function App() {
         .then(setFileList)
         .catch(() => {});
       refreshGit();
+      refreshTasks();
       // ↑ 历史（引擎按 cwd 维护，最近优先）
       invoke<string[]>("agent_prompt_history", { workspace: wsPath })
         .then((h) => {
@@ -1098,6 +1130,20 @@ function App() {
             <span className="dot" />
             {t.connected}
           </span>
+        )}
+        {/* 只在真有后台活动时出现 —— 平时不占位置 */}
+        {sessionId && bgTasks.length + subagents.length > 0 && (
+          <button
+            className="icon-btn tasks-btn"
+            title={t.tasksTitle}
+            onClick={() => {
+              refreshTasks();
+              setShowTasks(true);
+            }}
+          >
+            <IconTerminal size={15} />
+            <span className="tasks-count">{bgTasks.length + subagents.length}</span>
+          </button>
         )}
         {sessionId && (
           <button className="icon-btn" title={t.rewindTooltip} onClick={openRewind}>
@@ -1740,6 +1786,96 @@ function App() {
                   {t.save}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTasks && (
+        <div className="modal-mask" onClick={() => setShowTasks(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title panel-title">
+              <IconTerminal size={16} /> {t.tasksTitle}
+            </div>
+
+            {bgTasks.length === 0 && subagents.length === 0 && (
+              <div className="sidebar-empty">{t.tasksEmpty}</div>
+            )}
+
+            {bgTasks.length > 0 && (
+              <div className="git-group">
+                <div className="git-group-head">
+                  <span>{t.tasksBg(bgTasks.length)}</span>
+                </div>
+                {bgTasks.map((b) => {
+                  // TaskSnapshot 是 snake_case
+                  const id = b.task_id ?? b.taskId;
+                  const cmd = b.display_command ?? b.command ?? "";
+                  const done = b.completed === true;
+                  return (
+                    <div key={id} className="task-row">
+                      <span className={`task-dot ${done ? "done" : "run"}`} />
+                      <span className="task-cmd" title={cmd}>
+                        {cmd}
+                      </span>
+                      {done ? (
+                        <span className="task-exit">
+                          {b.exit_code === 0 ? "exit 0" : `exit ${b.exit_code ?? "?"}`}
+                        </span>
+                      ) : (
+                        <button
+                          className="git-mini danger"
+                          onClick={async () => {
+                            await invoke("task_kill", { taskId: id }).catch((e) =>
+                              setError(String(e)),
+                            );
+                            refreshTasks();
+                          }}
+                        >
+                          {t.taskKill}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {subagents.length > 0 && (
+              <div className="git-group">
+                <div className="git-group-head">
+                  <span>{t.tasksSub(subagents.length)}</span>
+                </div>
+                {subagents.map((sa) => (
+                  // SubagentLiveSnapshotDto 是 camelCase
+                  <div key={sa.subagentId} className="task-row">
+                    <span className="task-dot run" />
+                    <span className="task-cmd" title={sa.description}>
+                      <b>{sa.subagentType}</b> {sa.description}
+                    </span>
+                    <span className="task-exit">
+                      {Math.round((sa.durationMs ?? 0) / 1000)}s · {sa.turnCount ?? 0}
+                      {t.tasksTurns} · {sa.contextUsagePct ?? 0}%
+                    </span>
+                    <button
+                      className="git-mini danger"
+                      onClick={async () => {
+                        await invoke("subagent_cancel", { subagentId: sa.subagentId }).catch((e) =>
+                          setError(String(e)),
+                        );
+                        refreshTasks();
+                      }}
+                    >
+                      {t.taskCancel}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="modal-footer">
+              <span />
+              <button onClick={() => setShowTasks(false)}>{t.close}</button>
             </div>
           </div>
         </div>

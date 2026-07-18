@@ -1120,6 +1120,44 @@ pub async fn agent_compact(
     .await
 }
 
+// ── 后台任务 / 子 Agent ─────────────────────────────────────────
+//
+// 引擎一直在发 `x.ai/task_backgrounded` / `x.ai/task_completed` 通知，
+// WanCode 之前直接丢弃，用户无从知道后台还有东西在跑。
+
+/// Background shell tasks for this session (TaskSnapshot 用 snake_case)。
+#[tauri::command]
+pub async fn tasks_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/task/list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn task_kill(
+    state: State<'_, AgentState>,
+    task_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/task/kill", serde_json::json!({ "taskId": task_id })).await
+}
+
+/// Running subagents (DTO 用 camelCase)。
+#[tauri::command]
+pub async fn subagents_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/subagent/list_running", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn subagent_cancel(
+    state: State<'_, AgentState>,
+    subagent_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/subagent/cancel",
+        serde_json::json!({ "subagentId": subagent_id }),
+    )
+    .await
+}
+
 // ── Git（走引擎的 workspace ops，不再自己 shell 调 git）──────────
 //
 // 引擎已经处理了 gitRoot 解析、worktree、子模块、CREATE_NO_WINDOW 等；
