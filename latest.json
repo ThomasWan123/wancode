@@ -1,11 +1,11 @@
 {
-  "version": "0.8.6",
-  "notes": "修复 Markdown 表格从未渲染的 bug（缺 remark-gfm，表格被显示成一行管道符）；标题/列表/表格排版收敛到 Claude Code 的转录观感。",
+  "version": "0.8.7",
+  "notes": "修复 Windows 下每次启动闪黑框：git_status 的子进程未设 CREATE_NO_WINDOW，自 0.8.2 起因启动即自动建会话而每次必现。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFQ1LysrUXFENHZoRXNCYUpXRzNkSTFkc1orcHFxZUpCZE1uME04VDd1Y0owMDlDQVJOSHRaNmcyVy9PZHdWcHl2eVQrTWZESUE1VHZHM005L2IwVEF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU5NjU0CWZpbGU6d2FuY29kZV8wLjguNl94NjQtc2V0dXAuZXhlCnE3WGZrYkY1NVQxd1pGNzh4M2o3MkpoeDNtZXc4L3NNZTZmUGd4eDJjNWFDVDRvS3VhbVdzVFZIdFNpYnFqaEJGMDNVT2d0cWYyS0g1TG1KYlFxTUN3PT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.6/wancode_0.8.6_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFhlOEhWZFdVOS84VjN4b3poZ293clFqK2RiRDJpRUt6MVViVDJuQWxXaW9id004TUxSZEZ0U01EZVNpNGpuVENDU0xnNkZpL3ZzVlA3RG1iOXFTaWc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzYxMTk5CWZpbGU6d2FuY29kZV8wLjguN194NjQtc2V0dXAuZXhlCjNXZWlOSjFZSk1zNHJzbUNGU2s2WlViWWQwamNNb29OSjZ4UkNFWmx1amtLZ1RzMmZxUk5jYXhVTUxWenR0VGIrb25tVk9LWmloUjg5bExBemNBckJnPT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.7/wancode_0.8.7_x64-setup.exe"
     }
   }
 }
