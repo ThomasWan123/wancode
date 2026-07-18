@@ -1,11 +1,11 @@
 {
-  "version": "0.8.5",
-  "notes": "字体对标 Claude：内置 Inter（跨机一致的中性无衬线）+ 匹配字号/行高/字距；工具调用改扁平树状（● 状态点 + ⎿ 输出），去掉盒子卡片。",
+  "version": "0.8.6",
+  "notes": "修复 Markdown 表格从未渲染的 bug（缺 remark-gfm，表格被显示成一行管道符）；标题/列表/表格排版收敛到 Claude Code 的转录观感。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFpVZkpEUzBwYmlqdlZnbFUvUUZFM2ZFemFMTUF2dGE0YjlUc0RKc0ZDZnFwbDA4ekY0V2RvL0tFd05TV05DNkR0anlqTlFQTFdSak4wZmQ3Y0k0d1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU1OTA1CWZpbGU6d2FuY29kZV8wLjguNV94NjQtc2V0dXAuZXhlCmkwbHlBYnlRQXREZUM5Znd6R2hSQ0IrWGF3bWNZY0puR0ZxR1ZvNDJKSThtNjJkVWRwR3RsMUc0ZHpzaEJQSVkvNVRiMmdtSFJLcCs5YlRPOEZyMEFBPT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.5/wancode_0.8.5_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFQ1LysrUXFENHZoRXNCYUpXRzNkSTFkc1orcHFxZUpCZE1uME04VDd1Y0owMDlDQVJOSHRaNmcyVy9PZHdWcHl2eVQrTWZESUE1VHZHM005L2IwVEF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU5NjU0CWZpbGU6d2FuY29kZV8wLjguNl94NjQtc2V0dXAuZXhlCnE3WGZrYkY1NVQxd1pGNzh4M2o3MkpoeDNtZXc4L3NNZTZmUGd4eDJjNWFDVDRvS3VhbVdzVFZIdFNpYnFqaEJGMDNVT2d0cWYyS0g1TG1KYlFxTUN3PT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.6/wancode_0.8.6_x64-setup.exe"
     }
   }
 }
