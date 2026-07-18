@@ -11,6 +11,7 @@ import {
   IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconClipboard, IconTerminal, IconArrowUp, IconStop, IconPlus,
   IconX, IconPencil, IconTrash, IconWrench, IconFile, IconFolderClosed,
+  IconCheck, IconShield, IconChevron,
 } from "./icons";
 import "./App.css";
 
@@ -122,6 +123,7 @@ type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "thought"; text: string }
+  | { kind: "note"; text: string }
   | { kind: "tool"; call: ToolCallInfo };
 
 type PermissionRequest = {
@@ -130,6 +132,50 @@ type PermissionRequest = {
   toolCallId?: string;
   options: { optionId: string; name: string; kind: string }[];
 };
+
+// 权限模式 —— 决定"何时需要你点批准"，对标 Claude Code 的 Mode 菜单。
+// engineMode: 传给引擎的会话模式（plan=只读；其余=default）。
+type PermMode = "manual" | "acceptEdits" | "plan" | "auto" | "bypass";
+const MODE_ORDER: PermMode[] = ["manual", "acceptEdits", "plan", "auto", "bypass"];
+const MODE_ENGINE: Record<PermMode, string> = {
+  manual: "default",
+  acceptEdits: "default",
+  plan: "plan",
+  auto: "default",
+  bypass: "default",
+};
+
+// A tool call whose side effect is a file edit/write (vs. execute/delete/read).
+function isEditKind(kind: string): boolean {
+  return /edit|write|create|patch|modify|move|append/.test(kind.toLowerCase());
+}
+// Pick an option by its ACP PermissionOptionKind (allow_once / allow_always …).
+function pickOption(
+  options: { optionId: string; kind: string }[],
+  re: RegExp,
+): string | undefined {
+  return options.find((o) => re.test((o.kind || "").toLowerCase()))?.optionId;
+}
+// Given the mode + the tool kind + offered options, decide the option to
+// auto-select, or null to fall through to an interactive prompt.
+function autoApproveOption(
+  mode: PermMode,
+  toolKind: string,
+  options: { optionId: string; kind: string }[],
+): string | null {
+  const once = () => pickOption(options, /allow[_ ]?once/) ?? pickOption(options, /allow/);
+  const always = () => pickOption(options, /allow[_ ]?always/) ?? once();
+  switch (mode) {
+    case "acceptEdits":
+      return isEditKind(toolKind) ? once() ?? null : null;
+    case "auto":
+      return once() ?? null;
+    case "bypass":
+      return always() ?? null;
+    default: // manual, plan → always prompt
+      return null;
+  }
+}
 
 // ── 组件 ─────────────────────────────────────────────────────────
 
@@ -230,7 +276,11 @@ function App() {
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
-  const [planMode, setPlanMode] = useState(false);
+  const [permMode, setPermMode] = useState<PermMode>(
+    (localStorage.getItem("wancode-perm-mode") as PermMode) || "manual",
+  );
+  const permModeRef = useRef<PermMode>(permMode);
+  const [modeMenu, setModeMenu] = useState(false);
   const [plusMenu, setPlusMenu] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const didAutoStart = useRef(false);
@@ -306,13 +356,21 @@ function App() {
     await invoke("agent_plan_respond", { id, outcome, feedback: fb }).catch((e) => setError(String(e)));
   }
 
-  async function togglePlanMode() {
-    const next = !planMode;
-    setPlanMode(next);
-    await invoke("agent_set_mode", { mode: next ? "plan" : "default" }).catch((e) => {
-      setError(String(e));
-      setPlanMode(!next);
-    });
+  async function setMode(next: PermMode) {
+    const prev = permModeRef.current;
+    setPermMode(next);
+    permModeRef.current = next;
+    localStorage.setItem("wancode-perm-mode", next);
+    // Only the plan/default engine switch needs a round-trip; the auto-approval
+    // policy (acceptEdits/auto/bypass) lives entirely on the client.
+    if (sessionId && MODE_ENGINE[next] !== MODE_ENGINE[prev]) {
+      await invoke("agent_set_mode", { mode: MODE_ENGINE[next] }).catch((e) => {
+        setError(String(e));
+        setPermMode(prev);
+        permModeRef.current = prev;
+        localStorage.setItem("wancode-perm-mode", prev);
+      });
+    }
   }
 
   async function refreshGit() {
@@ -496,7 +554,15 @@ function App() {
         if (!u || typeof u !== "object") return;
         if (u.sessionUpdate === "current_mode_update" || u.sessionUpdate === "current_mode") {
           const m = u.currentModeId ?? u.current_mode_id;
-          if (m) setPlanMode(m === "plan");
+          // Engine only knows plan vs. default; reconcile without clobbering the
+          // client-only auto-approval modes (acceptEdits/auto/bypass).
+          if (m === "plan" && permModeRef.current !== "plan") {
+            setPermMode("plan");
+            permModeRef.current = "plan";
+          } else if (m && m !== "plan" && permModeRef.current === "plan") {
+            setPermMode("manual");
+            permModeRef.current = "manual";
+          }
         } else if (u.sessionUpdate === "plan") {
           const entries = u.entries ?? u.plan?.entries ?? [];
           setPlanSteps(
@@ -572,15 +638,26 @@ function App() {
     unsubs.push(
       listen<any>("agent://permission", (e) => {
         const p = e.payload;
+        const title = p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "工具调用请求";
+        const toolKind = String(p.request?.toolCall?.kind ?? "");
+        const options = (p.request?.options ?? []).map((o: any) => ({
+          optionId: o.optionId,
+          name: o.name,
+          kind: o.kind,
+        }));
+        // Permission-mode policy: auto-approve without prompting when the
+        // current mode allows it (acceptEdits/auto/bypass). Manual/plan prompt.
+        const auto = autoApproveOption(permModeRef.current, toolKind, options);
+        if (auto) {
+          invoke("agent_permission_respond", { id: p.id, optionId: auto }).catch(() => {});
+          setItems((prev) => [...prev, { kind: "note", text: STRINGS[loadLang()].modeAutoApproved(title) }]);
+          return;
+        }
         setPermission({
           id: p.id,
-          title: p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "工具调用请求",
+          title,
           toolCallId: p.request?.toolCall?.toolCallId,
-          options: (p.request?.options ?? []).map((o: any) => ({
-            optionId: o.optionId,
-            name: o.name,
-            kind: o.kind,
-          })),
+          options,
         });
       }),
     );
@@ -787,6 +864,13 @@ function App() {
   }
 
   const examples = t.examples;
+  const modeMeta: Record<PermMode, { label: string; desc: string }> = {
+    manual: { label: t.modeManual, desc: t.modeManualDesc },
+    acceptEdits: { label: t.modeAcceptEdits, desc: t.modeAcceptEditsDesc },
+    plan: { label: t.modePlan, desc: t.modePlanDesc },
+    auto: { label: t.modeAuto, desc: t.modeAutoDesc },
+    bypass: { label: t.modeBypass, desc: t.modeBypassDesc },
+  };
 
   return (
     <main className="chat-app">
@@ -801,15 +885,6 @@ function App() {
             <span className="dot" />
             {t.connected}
           </span>
-        )}
-        {sessionId && (
-          <button
-            className={`icon-btn plan-toggle ${planMode ? "on" : ""}`}
-            title={planMode ? t.planModeOn : t.planModeOff}
-            onClick={togglePlanMode}
-          >
-            <IconClipboard />
-          </button>
         )}
         {sessionId && (
           <button className="icon-btn" title={t.rewindTooltip} onClick={openRewind}>
@@ -1553,6 +1628,12 @@ function App() {
                 <ReactMarkdown>{it.text}</ReactMarkdown>
               </details>
             );
+          if (it.kind === "note")
+            return (
+              <div key={i} className="msg note">
+                <IconCheck size={13} /> {it.text}
+              </div>
+            );
           const inlinePerm =
             permission && permission.toolCallId && permission.toolCallId === it.call.toolCallId
               ? permission
@@ -1792,6 +1873,42 @@ function App() {
                   ),
                 )}
               </select>
+              <div className="mode-wrap">
+                <button
+                  className="mode-chip"
+                  data-mode={permMode}
+                  title={t.modeMenuTitle}
+                  onClick={() => setModeMenu((v) => !v)}
+                >
+                  <IconShield size={13} /> {modeMeta[permMode].label}
+                  <IconChevron size={12} />
+                </button>
+                {modeMenu && (
+                  <>
+                    <div className="plus-backdrop" onClick={() => setModeMenu(false)} />
+                    <div className="mode-menu">
+                      <div className="mode-menu-head">{t.modeMenuTitle}</div>
+                      {MODE_ORDER.map((m) => (
+                        <button
+                          key={m}
+                          className={`mode-item ${permMode === m ? "active" : ""}`}
+                          data-mode={m}
+                          onClick={() => {
+                            setModeMenu(false);
+                            setMode(m);
+                          }}
+                        >
+                          <span className="mode-item-text">
+                            <span className="mode-item-label">{modeMeta[m].label}</span>
+                            <span className="mode-item-desc">{modeMeta[m].desc}</span>
+                          </span>
+                          {permMode === m && <IconCheck size={15} className="mode-item-check" />}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
             <div className="composer-actions">
               {sessionId && (

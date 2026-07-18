@@ -67,3 +67,12 @@ export const IconFile = ({ size = 16, ...r }: P) => (
 export const IconFolderClosed = ({ size = 16, ...r }: P) => (
   <svg {...base(size)} {...r}><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
 );
+export const IconCheck = ({ size = 16, ...r }: P) => (
+  <svg {...base(size)} {...r}><path d="M20 6 9 17l-5-5" /></svg>
+);
+export const IconShield = ({ size = 16, ...r }: P) => (
+  <svg {...base(size)} {...r}><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /></svg>
+);
+export const IconChevron = ({ size = 16, ...r }: P) => (
+  <svg {...base(size)} {...r}><path d="m6 9 6 6 6-6" /></svg>
+);
