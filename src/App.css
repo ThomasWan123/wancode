@@ -193,6 +193,35 @@ button:disabled {
   background: var(--ok);
 }
 
+/* 细线图标按钮（顶栏）—— 对标 Claude Code 的极简 */
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 7px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
+  opacity: 1;
+}
+
+.icon-btn:disabled {
+  background: transparent;
+  color: var(--faint);
+  opacity: 0.5;
+}
+
+.icon-btn.plan-toggle.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 button.ghost {
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -447,10 +476,10 @@ button.ghost.small {
 }
 
 .session-item {
-  padding: 9px 10px;
-  border-radius: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
   cursor: pointer;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
   border: 1px solid transparent;
   transition: background 0.12s;
 }
@@ -499,6 +528,18 @@ button.ghost.small {
 
 .session-actions span:hover {
   opacity: 1;
+}
+
+.session-actions span {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.tool-wrench {
+  vertical-align: -2px;
+  color: var(--muted);
+  margin-right: 4px;
 }
 
 .session-meta {
@@ -1360,25 +1401,25 @@ button.ghost.small {
 
 /* ── 输入区 ───────────────────────────────────────── */
 
+/* 输入区：对标 Claude/ChatGPT —— 圆角容器，底部一行放模型选择+操作 */
 .composer {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  margin: 0 10% 18px;
-  padding: 12px 14px;
-  background: var(--bg2);
+  margin: 0 12% 18px;
+  padding: 10px 12px 8px;
+  background: var(--bg1);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 20px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .composer:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--faint);
+}
+
+.composer-input-wrap {
+  position: relative;
 }
 
 .composer textarea {
-  flex: 1;
   width: 100%;
   resize: none;
   background: transparent;
@@ -1386,28 +1427,66 @@ button.ghost.small {
   outline: none;
   color: var(--text);
   font-family: inherit;
-  font-size: 14px;
-  line-height: 1.5;
-  max-height: 160px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  max-height: 200px;
+  padding: 4px 6px;
 }
 
 .composer textarea::placeholder {
   color: var(--faint);
 }
 
-.composer .send {
-  border-radius: 12px;
-  padding: 9px 20px;
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.composer-model {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  outline: none;
+  max-width: 180px;
+}
+
+.composer-model:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 圆形发送按钮（ChatGPT 风格）*/
+.send-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
   flex-shrink: 0;
 }
 
-.composer .send.stop {
-  background: rgba(248, 113, 113, 0.15);
-  border: 1px solid rgba(248, 113, 113, 0.5);
-  color: var(--err);
+.send-btn:disabled {
+  background: var(--bg3);
+  color: var(--faint);
 }
 
-.composer .send.stop:hover {
-  background: rgba(248, 113, 113, 0.25);
-  filter: none;
+.send-btn.stop {
+  background: var(--text);
+  color: var(--bg0);
 }

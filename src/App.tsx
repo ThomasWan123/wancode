@@ -7,6 +7,11 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ReactMarkdown from "react-markdown";
 import { STRINGS, loadLang, saveLang, type Lang } from "./i18n";
+import {
+  IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
+  IconClipboard, IconTerminal, IconArrowUp, IconStop, IconPlus,
+  IconX, IconPencil, IconTrash, IconWrench, IconFile, IconFolderClosed,
+} from "./icons";
 import "./App.css";
 
 type SessionEntry = {
@@ -102,7 +107,7 @@ function TreeView({ node, onPick, depth = 0 }: { node: TreeNode; onPick: (p: str
               style={{ paddingLeft: 8 + depth * 12 }}
               onClick={() => (isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path))}
             >
-              <span className="tree-icon">{isDir ? (open[c.path] ? "📂" : "📁") : "📄"}</span>
+              <span className="tree-icon">{isDir ? <IconFolderClosed size={13} /> : <IconFile size={13} />}</span>
               <span className="tree-name">{c.name}</span>
             </div>
             {isDir && open[c.path] && <TreeView node={c} onPick={onPick} depth={depth + 1} />}
@@ -724,18 +729,9 @@ function App() {
           style={{ flex: 1 }}
           disabled={!!sessionId}
         />
-        <button className="ghost" onClick={pickFolder} disabled={!!sessionId} title={t.browseFolder}>
-          📁
+        <button className="icon-btn" onClick={pickFolder} disabled={!!sessionId} title={t.browseFolder}>
+          <IconFolder />
         </button>
-        <select value={model} onChange={(e) => setModel(e.currentTarget.value)} disabled={!!sessionId}>
-          {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
-            (m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ),
-          )}
-        </select>
         {sessionId ? (
           <span className="connected-pill">
             <span className="dot" />
@@ -748,46 +744,46 @@ function App() {
         )}
         {sessionId && (
           <button
-            className={`ghost plan-toggle ${planMode ? "on" : ""}`}
+            className={`icon-btn plan-toggle ${planMode ? "on" : ""}`}
             title={planMode ? t.planModeOn : t.planModeOff}
             onClick={togglePlanMode}
           >
-            📋 {t.planMode}
+            <IconClipboard />
           </button>
         )}
         {sessionId && (
-          <button className="ghost" title={t.rewindTooltip} onClick={openRewind}>
-            ⏪
+          <button className="icon-btn" title={t.rewindTooltip} onClick={openRewind}>
+            <IconRewind />
           </button>
         )}
         {sessionId && (
           <button
-            className="ghost"
+            className="icon-btn"
             title={t.git}
             onClick={() => {
               refreshGit();
               setShowGit(true);
             }}
           >
-            ⑂
+            <IconGitBranch />
           </button>
         )}
         <button
-          className="ghost"
+          className="icon-btn"
           title={t.toggleTheme}
           onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
         >
-          {theme === "dark" ? "☀" : "🌙"}
+          {theme === "dark" ? <IconSun /> : <IconMoon />}
         </button>
         <button
-          className="ghost"
+          className="icon-btn"
           title={t.settings}
           onClick={() => {
             refreshMcpConfig();
             setShowSettings(true);
           }}
         >
-          ⚙
+          <IconSettings />
         </button>
       </header>
 
@@ -911,7 +907,7 @@ function App() {
                         refreshModels();
                       }}
                     >
-                      ✕
+                      <IconX size={13} />
                     </button>
                   </div>
                 ))}
@@ -1002,7 +998,7 @@ function App() {
                         refreshSessions(workspace);
                       }}
                     >
-                      ✕
+                      <IconX size={13} />
                     </button>
                   </div>
                 ))}
@@ -1118,7 +1114,7 @@ function App() {
                       title={t.mcpDelete}
                       onClick={() => saveHooks(hooks.filter((_, j) => j !== i))}
                     >
-                      ✕
+                      <IconX size={13} />
                     </button>
                   </div>
                 ))}
@@ -1285,7 +1281,7 @@ function App() {
                   setItems([]);
                 }}
               >
-                ＋
+                <IconPlus size={16} />
               </button>
             )}
           </div>
@@ -1342,7 +1338,7 @@ function App() {
                         }
                       }}
                     >
-                      ✏
+                      <IconPencil size={13} />
                     </span>
                     <span
                       title={t.deleteSession}
@@ -1365,7 +1361,7 @@ function App() {
                         }
                       }}
                     >
-                      🗑
+                      <IconTrash size={13} />
                     </span>
                   </div>
                 </div>
@@ -1446,7 +1442,7 @@ function App() {
               : null;
           return (
             <div key={i} className={`msg tool ${inlinePerm ? "awaiting" : ""}`}>
-              🔧 {it.call.title ?? it.call.kind ?? t.toolCall}
+              <IconWrench size={14} className="tool-wrench" /> {it.call.title ?? it.call.kind ?? t.toolCall}
               <span className={`status ${it.call.status ?? ""}`}> {it.call.status ?? ""}</span>
               {it.call.diffs.map((d, j) => (
                 <DiffView key={j} diff={d} />
@@ -1528,7 +1524,7 @@ function App() {
                     title={t.removeImage}
                     onClick={() => setPastedImages((prev) => prev.filter((_, j) => j !== i))}
                   >
-                    ✕
+                    <IconX size={12} />
                   </button>
                 </div>
               ))}
@@ -1588,31 +1584,55 @@ function App() {
               sessionId ? t.composerPlaceholder + "  ·  @文件  /命令" : t.composerLocked
             }
             disabled={!sessionId}
-            rows={3}
+            rows={2}
           />
+          <div className="composer-bar">
+            <select
+              className="composer-model"
+              value={model}
+              onChange={(e) => setModel(e.currentTarget.value)}
+              disabled={!!sessionId}
+              title={sessionId ? t.connected : ""}
+            >
+              {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
+                (m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ),
+              )}
+            </select>
+            <div className="composer-actions">
+              {sessionId && (
+                <button
+                  className="icon-btn"
+                  title={lang === "zh" ? "终端" : "Terminal"}
+                  onClick={() => setShowTerminal((s) => !s)}
+                >
+                  <IconTerminal size={15} />
+                </button>
+              )}
+              {busy ? (
+                <button
+                  className="send-btn stop"
+                  onClick={() => invoke("agent_cancel").catch(() => {})}
+                  title={t.stopTitle}
+                >
+                  <IconStop size={16} />
+                </button>
+              ) : (
+                <button
+                  className="send-btn"
+                  onClick={send}
+                  disabled={!sessionId || (!input.trim() && pastedImages.length === 0)}
+                  title={t.send}
+                >
+                  <IconArrowUp size={16} />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
-        {sessionId && (
-          <button
-            className="ghost term-toggle"
-            title={lang === "zh" ? "终端" : "Terminal"}
-            onClick={() => setShowTerminal((s) => !s)}
-          >
-            ▸_
-          </button>
-        )}
-        {busy ? (
-          <button
-            className="send stop"
-            onClick={() => invoke("agent_cancel").catch(() => {})}
-            title={t.stopTitle}
-          >
-            {t.stop}
-          </button>
-        ) : (
-          <button className="send" onClick={send} disabled={!sessionId || (!input.trim() && pastedImages.length === 0)}>
-            {t.send}
-          </button>
-        )}
       </footer>
         </div>
       </div>
