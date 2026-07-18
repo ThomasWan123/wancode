@@ -1,11 +1,11 @@
 {
-  "version": "0.8.3",
-  "notes": "权限模式菜单（手动/接受编辑/计划/自动/绕过）——对标 Claude Code / Codex：由模式决定何时需要你点批准，会话中随时切换。",
+  "version": "0.8.4",
+  "notes": "聊天区对标 Claude Code：工具调用改为扁平树状（● 状态点 + ⎿ 连接输出），去掉盒子卡片与徽章，更紧凑清爽。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFM3aEJyUklkTWVwRGNhSDE5U1FtaVkxVDFscjZtVTRHa04vZGRxVi9aOHBHVWlSalZaQ1RkbXhMcDhIZkdubTc2c0c4QUI4VkJ0bDBERHV3cXBNOFFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzUyNDU2CWZpbGU6d2FuY29kZV8wLjguM194NjQtc2V0dXAuZXhlCm5ZWWdGVThwWkcyUXowbGgzdnpsZk96OWZ6V1R1ZDJBZ0RQbFhvTkk4L2lhRWtuaUxWV1h1YjlsR1lHWVQ5dENLRGpwM252WWhIdzFRY254cWh0ckNBPT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.3/wancode_0.8.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZGE3NkxnTURDdExGUzdrZ1R5L1QvdGp1dGxMaVdhc0dWelR6MEVKeEVLeXhkNU9ZelMvT2hwaHo1VDZkMWl1dWJrclpCcUhCU2pIdS9zSjFFSGtmNFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU0MTYyCWZpbGU6d2FuY29kZV8wLjguNF94NjQtc2V0dXAuZXhlClc0cjdGREFlS2oyenJLbUhMcFZ5UVQyMWlDZ2NkOXFzSzRMMksxc280V1JuZzJhR2NlMVpGT3FYODVEWHpVc1VZQlFOZ1FudkdqQWU0K3IzVVFBMkRBPT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.4/wancode_0.8.4_x64-setup.exe"
     }
   }
 }
