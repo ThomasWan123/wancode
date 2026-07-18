@@ -178,6 +178,44 @@ function autoApproveOption(
   }
 }
 
+// 首页建议：从**真实工作区**推导，而不是写死一串示例。
+// 之前固定的 "读取 notes.md…" 在多数项目里指向并不存在的文件。
+function detectKind(files: string[]): string {
+  const has = (name: string) => files.some((f) => f.toLowerCase() === name || f.toLowerCase().endsWith("/" + name));
+  if (has("cargo.toml")) return "Rust";
+  if (has("package.json")) return "Node";
+  if (has("go.mod")) return "Go";
+  if (has("pyproject.toml") || has("requirements.txt") || has("setup.py")) return "Python";
+  if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts")) return "JVM";
+  if (has("gemfile")) return "Ruby";
+  if (has("composer.json")) return "PHP";
+  return "";
+}
+
+function buildSuggestions(
+  files: string[],
+  git: any,
+  t: any,
+): { label: string; prompt: string }[] {
+  const out: { label: string; prompt: string }[] = [];
+  const lower = files.map((f) => f.toLowerCase());
+  const hasReadme = lower.some((f) => f === "readme.md" || f.endsWith("/readme.md"));
+  const hasTests = lower.some(
+    (f) => /(^|\/)(tests?|__tests__|spec)\//.test(f) || /\.(test|spec)\.[a-z]+$/.test(f),
+  );
+  const dirty = git?.isRepo ? (git.files?.length ?? 0) : 0;
+
+  if (dirty > 0) {
+    out.push({ label: t.sugReviewChanges, prompt: t.sugReviewChangesP });
+    out.push({ label: t.sugCommitMsg, prompt: t.sugCommitMsgP });
+  }
+  if (hasReadme) out.push({ label: t.sugSummarize, prompt: t.sugSummarizeP });
+  if (hasTests) out.push({ label: t.sugRunTests, prompt: t.sugRunTestsP });
+  out.push({ label: t.sugExplainStruct, prompt: t.sugExplainStructP });
+  out.push({ label: t.sugFindBugs, prompt: t.sugFindBugsP });
+  return out.slice(0, 4);
+}
+
 // ── 组件 ─────────────────────────────────────────────────────────
 
 function App() {
@@ -864,7 +902,6 @@ function App() {
     );
   }
 
-  const examples = t.examples;
   const modeMeta: Record<PermMode, { label: string; desc: string }> = {
     manual: { label: t.modeManual, desc: t.modeManualDesc },
     acceptEdits: { label: t.modeAcceptEdits, desc: t.modeAcceptEditsDesc },
@@ -1578,18 +1615,77 @@ function App() {
         <div className="empty-state">
           <div className="empty-logo">W</div>
           <div className="empty-title">{t.appTagline}</div>
-          <div className="empty-sub">{sessionId ? t.emptySubReady : t.emptySubStart}</div>
-          <div className="chips">
-            {examples.map((ex) => (
-              <div
-                key={ex}
-                className="chip"
-                onClick={() => sessionId && setInput(ex)}
-              >
-                {ex}
-              </div>
-            ))}
+
+          {/* 工作区实况：文件夹 / 技术栈 / 分支 / 改动数 —— 都是真实数据 */}
+          <div className="home-ws">
+            {sessionId ? (
+              <>
+                <span className="home-tag strong">
+                  <IconFolder size={13} />
+                  {workspace.split(/[\\/]/).filter(Boolean).pop()}
+                </span>
+                {detectKind(fileList) && <span className="home-tag">{detectKind(fileList)}</span>}
+                {gitInfo?.isRepo && (
+                  <span className="home-tag">
+                    <IconGitBranch size={12} /> {gitInfo.branch}
+                  </span>
+                )}
+                {gitInfo?.isRepo && (
+                  <span className={`home-tag ${(gitInfo.files?.length ?? 0) > 0 ? "warn" : ""}`}>
+                    {(gitInfo.files?.length ?? 0) > 0
+                      ? t.homeChanged(gitInfo.files.length)
+                      : t.homeClean}
+                  </span>
+                )}
+              </>
+            ) : (
+              <button className="home-tag strong" onClick={pickFolderAndConnect}>
+                <IconFolder size={13} /> {t.sugOpenFolder}
+              </button>
+            )}
           </div>
+
+          {/* 建议来自当前工作区（有改动就先建议审查改动，有 README 才建议总结…） */}
+          {sessionId && (
+            <div className="chips">
+              {buildSuggestions(fileList, gitInfo, t).map((s) => (
+                <button
+                  key={s.label}
+                  className="chip"
+                  onClick={() => {
+                    setInput(s.prompt);
+                    onComposerChange(s.prompt);
+                    taRef.current?.focus();
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 最近会话：一键继续 */}
+          {sessions.length > 0 && (
+            <div className="home-recent">
+              <div className="home-recent-head">{t.homeRecent}</div>
+              {sessions.slice(0, 4).map((s) => (
+                <button
+                  key={s.session_id}
+                  className="home-recent-row"
+                  disabled={starting}
+                  onClick={() => startSession(s.session_id)}
+                  title={s.title}
+                >
+                  <span className="home-recent-title">{s.title}</span>
+                  <span className="home-recent-meta">
+                    {t.homeMsgs(s.num_messages)}
+                    {s.model_id ? ` · ${s.model_id}` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="empty-hint">{t.emptyHint}</div>
         </div>
       )}
