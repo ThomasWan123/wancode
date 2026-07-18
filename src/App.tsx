@@ -10,7 +10,7 @@ import { STRINGS, loadLang, saveLang, type Lang } from "./i18n";
 import {
   IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconClipboard, IconTerminal, IconArrowUp, IconStop, IconPlus,
-  IconX, IconPencil, IconTrash, IconWrench, IconFile, IconFolderClosed,
+  IconX, IconPencil, IconTrash, IconFile, IconFolderClosed,
   IconCheck, IconShield, IconChevron,
 } from "./icons";
 import "./App.css";
@@ -1639,21 +1639,27 @@ function App() {
               ? permission
               : null;
           return (
-            <div key={i} className={`msg tool ${inlinePerm ? "awaiting" : ""}`}>
-              <IconWrench size={14} className="tool-wrench" /> {it.call.title ?? it.call.kind ?? t.toolCall}
-              <span className={`status ${it.call.status ?? ""}`}> {it.call.status ?? ""}</span>
+            <div key={i} className={`tool-row ${it.call.status ?? ""} ${inlinePerm ? "awaiting" : ""}`}>
+              <div className="tool-head">
+                <span className="tool-dot" aria-hidden />
+                <span className="tool-title">{it.call.title ?? it.call.kind ?? t.toolCall}</span>
+              </div>
               {it.call.diffs.map((d, j) => (
                 <DiffView key={j} diff={d} />
               ))}
               {it.call.output && (
-                <details className="tool-output">
-                  <summary>{t.output}</summary>
+                <details className="tool-result">
+                  <summary>
+                    <span className="elbow" aria-hidden>⎿</span>
+                    {t.output}
+                  </summary>
                   <pre>{it.call.output}</pre>
                 </details>
               )}
               {inlinePerm && (
                 <div className="inline-approval">
-                  <span className="inline-approval-label">🔐 {t.needApproval}</span>
+                  <span className="elbow" aria-hidden>⎿</span>
+                  <span className="inline-approval-label">{t.needApproval}</span>
                   {inlinePerm.options.map((o) => (
                     <button key={o.optionId} onClick={() => respondPermission(o.optionId)}>
                       {o.name}
