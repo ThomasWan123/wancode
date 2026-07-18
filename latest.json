@@ -1,11 +1,11 @@
 {
-  "version": "0.8.2",
-  "notes": "打开即用：启动直接进入会话，无需先选工作区即可输入；模型可在会话中随时热切换（保留上下文），对标 Claude Code / Codex。",
+  "version": "0.8.3",
+  "notes": "权限模式菜单（手动/接受编辑/计划/自动/绕过）——对标 Claude Code / Codex：由模式决定何时需要你点批准，会话中随时切换。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFphM3JXUVZMZHpRMDdEYlNxakN6YUhrTXZKQlUrcUlydVlGR2hVZHRueHR4RGZRelVUZW1LRkNvVTByUDBIT05pcDU1RTBGODQrci9kUWU3SmJOZmdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzUxMzk5CWZpbGU6d2FuY29kZV8wLjguMl94NjQtc2V0dXAuZXhlCk9EdVlCc3ZiWlhudUJKWldtN0RHcnI5dWFpeDd2NnhrcXNGdXR5cDUvL2E1ODNCblVudU52bGlaYUR2RHIwOUlmUTFRMGhST294cEtVUlkwQ095akN3PT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.2/wancode_0.8.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFM3aEJyUklkTWVwRGNhSDE5U1FtaVkxVDFscjZtVTRHa04vZGRxVi9aOHBHVWlSalZaQ1RkbXhMcDhIZkdubTc2c0c4QUI4VkJ0bDBERHV3cXBNOFFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzUyNDU2CWZpbGU6d2FuY29kZV8wLjguM194NjQtc2V0dXAuZXhlCm5ZWWdGVThwWkcyUXowbGgzdnpsZk96OWZ6V1R1ZDJBZ0RQbFhvTkk4L2lhRWtuaUxWV1h1YjlsR1lHWVQ5dENLRGpwM252WWhIdzFRY254cWh0ckNBPT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.3/wancode_0.8.3_x64-setup.exe"
     }
   }
 }
