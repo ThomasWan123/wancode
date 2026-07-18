@@ -37,6 +37,8 @@ pub struct AgentState {
     handle: Mutex<Option<AgentHandle>>,
     pending_permissions: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
     next_permission_id: AtomicU64,
+    /// Pending `x.ai/exit_plan_mode` approvals → (outcome, feedback).
+    pending_plans: Mutex<HashMap<u64, oneshot::Sender<(String, Option<String>)>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -319,7 +321,60 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
             let _ = app.emit("agent://ext", payload);
             let _ = notif.response_tx.send(Ok(()));
         }
+        AcpClientMessage::ExtMethod(args) => {
+            if args.request.method.as_ref() == "x.ai/exit_plan_mode" {
+                let params: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).unwrap_or(serde_json::Value::Null);
+                let plan = params
+                    .get("planContent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let state: State<'_, AgentState> = app.state();
+                let id = state.next_permission_id.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = oneshot::channel::<(String, Option<String>)>();
+                state.pending_plans.lock().await.insert(id, tx);
+                let _ = app.emit(
+                    "agent://plan-approval",
+                    serde_json::json!({ "id": id, "planContent": plan }),
+                );
+                tauri::async_runtime::spawn(async move {
+                    let (outcome, feedback) =
+                        match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+                            Ok(Ok(v)) => v,
+                            _ => ("cancelled".to_string(), None),
+                        };
+                    let resp = serde_json::json!({ "outcome": outcome, "feedback": feedback });
+                    let raw = serde_json::value::to_raw_value(&resp).unwrap();
+                    let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+                });
+            } else {
+                // Unknown reverse ext-request: answer with empty ok so the
+                // agent-side tool call doesn't hang/fail.
+                let raw = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+            }
+        }
         _ => {}
+    }
+}
+
+/// Answer a pending plan-mode approval (`x.ai/exit_plan_mode`).
+/// `outcome`: "approved" | "cancelled" | "abandoned".
+#[tauri::command]
+pub async fn agent_plan_respond(
+    state: State<'_, AgentState>,
+    id: u64,
+    outcome: String,
+    feedback: Option<String>,
+) -> Result<(), String> {
+    let sender = state.pending_plans.lock().await.remove(&id);
+    match sender {
+        Some(tx) => {
+            let _ = tx.send((outcome, feedback));
+            Ok(())
+        }
+        None => Err(format!("没有待处理的计划审批 #{id}")),
     }
 }
 
@@ -434,6 +489,92 @@ pub struct McpServerEntry {
 
 fn user_config_path() -> PathBuf {
     xai_grok_shell::util::grok_home::grok_home().join("config.toml")
+}
+
+// ── Skills (~/.grok/skills/<name>/SKILL.md) ─────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+    pub path: String,
+}
+
+fn skills_dir() -> PathBuf {
+    xai_grok_shell::util::grok_home::grok_home().join("skills")
+}
+
+/// List skills discovered under ~/.grok/skills (each is a dir with SKILL.md).
+#[tauri::command]
+pub async fn skills_list() -> Result<Vec<SkillEntry>, String> {
+    let dir = skills_dir();
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(out), // no skills dir yet
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_md = path.join("SKILL.md");
+        if !skill_md.is_file() {
+            continue;
+        }
+        let body = std::fs::read_to_string(&skill_md).unwrap_or_default();
+        // description: YAML frontmatter `description:` or first non-heading line.
+        let description = body
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("description:").map(|d| d.trim().to_string()))
+            .or_else(|| {
+                body.lines()
+                    .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#') && !l.contains("---"))
+                    .map(|l| l.trim().to_string())
+            })
+            .unwrap_or_default();
+        out.push(SkillEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            description: description.chars().take(120).collect(),
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Ensure ~/.grok/skills exists and open it in the OS file manager.
+#[tauri::command]
+pub async fn skills_open() -> Result<(), String> {
+    let dir = skills_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Create a starter skill: ~/.grok/skills/<name>/SKILL.md with a template.
+#[tauri::command]
+pub async fn skills_create(name: String, description: String) -> Result<String, String> {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if safe.is_empty() {
+        return Err("名称无效".into());
+    }
+    let dir = skills_dir().join(&safe);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let md = format!(
+        "---\nname: {safe}\ndescription: {desc}\n---\n\n# {safe}\n\n{desc}\n\n## 使用说明\n\n在这里写这个 skill 的具体指令与步骤。\n",
+        safe = safe,
+        desc = if description.trim().is_empty() { "（填写这个 skill 的用途）" } else { description.trim() },
+    );
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, md).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 // ── Hooks (~/.grok/hooks/wancode.json, WanCode-managed) ──────────────

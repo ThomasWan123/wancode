@@ -174,6 +174,19 @@ function App() {
   const [showGit, setShowGit] = useState(false);
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [planMode, setPlanMode] = useState(false);
+  const [planApproval, setPlanApproval] = useState<{ id: number; planContent: string } | null>(null);
+  const [planFeedback, setPlanFeedback] = useState("");
+  const [skills, setSkills] = useState<{ name: string; description: string; path: string }[]>([]);
+  const [skillForm, setSkillForm] = useState({ name: "", description: "" });
+
+  async function respondPlan(outcome: string) {
+    if (!planApproval) return;
+    const id = planApproval.id;
+    const fb = planFeedback.trim() || null;
+    setPlanApproval(null);
+    setPlanFeedback("");
+    await invoke("agent_plan_respond", { id, outcome, feedback: fb }).catch((e) => setError(String(e)));
+  }
 
   async function togglePlanMode() {
     const next = !planMode;
@@ -270,6 +283,11 @@ function App() {
     }
     try {
       setHooks(await invoke<{ event: string; command: string }[]>("hooks_list"));
+    } catch {
+      /* ignore */
+    }
+    try {
+      setSkills(await invoke<{ name: string; description: string; path: string }[]>("skills_list"));
     } catch {
       /* ignore */
     }
@@ -453,6 +471,12 @@ function App() {
             kind: o.kind,
           })),
         });
+      }),
+    );
+
+    unsubs.push(
+      listen<any>("agent://plan-approval", (e) => {
+        setPlanApproval({ id: e.payload.id, planContent: e.payload.planContent ?? "" });
       }),
     );
 
@@ -857,6 +881,56 @@ function App() {
               </div>
             </div>
             <div className="modal-section">
+              <div className="modal-label">{t.skillsSection}</div>
+              <div className="mcp-list">
+                {skills.length === 0 && <div className="sidebar-empty">{t.skillsEmpty}</div>}
+                {skills.map((sk) => (
+                  <div key={sk.name} className="mcp-item">
+                    <div className="mcp-info">
+                      <b>{sk.name}</b>
+                      <span className="mcp-detail">{sk.description}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mcp-form">
+                <input
+                  placeholder={t.skillsName}
+                  value={skillForm.name}
+                  onChange={(e) => setSkillForm({ ...skillForm, name: e.currentTarget.value })}
+                />
+                <input
+                  placeholder={t.skillsDesc}
+                  value={skillForm.description}
+                  onChange={(e) => setSkillForm({ ...skillForm, description: e.currentTarget.value })}
+                />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    style={{ flex: 1 }}
+                    onClick={async () => {
+                      if (!skillForm.name.trim()) return;
+                      try {
+                        await invoke("skills_create", {
+                          name: skillForm.name.trim(),
+                          description: skillForm.description,
+                        });
+                        setSkillForm({ name: "", description: "" });
+                        setSkills(await invoke("skills_list"));
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    }}
+                  >
+                    {t.skillsCreate}
+                  </button>
+                  <button className="ghost" onClick={() => invoke("skills_open").catch((e) => setError(String(e)))}>
+                    {t.skillsOpen}
+                  </button>
+                </div>
+              </div>
+              <div className="modal-hint">{t.skillsHint}</div>
+            </div>
+            <div className="modal-section">
               <div className="modal-label">{t.hooksSection}</div>
               <div className="mcp-list">
                 {hooks.length === 0 && <div className="sidebar-empty">{t.hooksEmpty}</div>}
@@ -976,6 +1050,33 @@ function App() {
             <div className="modal-footer">
               <span />
               <button onClick={() => setShowGit(false)}>{t.close}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {planApproval && (
+        <div className="modal-mask">
+          <div className="modal plan-approval-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">{t.planApprovalTitle}</div>
+            <div className="plan-approval-body">
+              <ReactMarkdown>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
+            </div>
+            <textarea
+              className="plan-feedback"
+              value={planFeedback}
+              placeholder={t.planFeedbackPlaceholder}
+              onChange={(e) => setPlanFeedback(e.currentTarget.value)}
+              rows={2}
+            />
+            <div className="plan-approval-actions">
+              <button onClick={() => respondPlan("approved")}>{t.planApprove}</button>
+              <button className="ghost" onClick={() => respondPlan("cancelled")}>
+                {t.planRequestChanges}
+              </button>
+              <button className="deny" onClick={() => respondPlan("abandoned")}>
+                {t.planAbandon}
+              </button>
             </div>
           </div>
         </div>
