@@ -1021,6 +1021,72 @@ async fn ext_call(
     serde_json::from_str(resp.0.get()).map_err(|e| e.to_string())
 }
 
+/// Fire-and-forget ext *notification* (no response), e.g. the `x.ai/queue/*`
+/// edit operations — the engine handles those on the notification path, not
+/// as requests.
+async fn ext_notify(
+    state: &State<'_, AgentState>,
+    method: &str,
+    mut params: serde_json::Value,
+) -> Result<(), String> {
+    let (acp_tx, session_id) = {
+        let guard = state.handle.lock().await;
+        let h = guard.as_ref().ok_or("会话未启动")?;
+        (h.acp_tx.clone(), h.session_id.clone())
+    };
+    if let Some(obj) = params.as_object_mut() {
+        obj.entry("sessionId")
+            .or_insert(serde_json::Value::String(session_id.0.to_string()));
+        // Scopes remove/clear to our own items and records the editor.
+        obj.entry("owner")
+            .or_insert(serde_json::Value::String("wancode".into()));
+    }
+    let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
+    let _: () = acp_send(
+        acp::ExtNotification::new(method.to_string(), raw.into()),
+        &acp_tx,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop one queued prompt. `expected_version` guards against acting on a stale
+/// view (mismatch = benign no-op + the engine rebroadcasts the queue).
+#[tauri::command]
+pub async fn agent_queue_remove(
+    state: State<'_, AgentState>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/queue/remove",
+        serde_json::json!({ "id": id, "expectedVersion": expected_version }),
+    )
+    .await
+}
+
+/// Drop every prompt this client queued.
+#[tauri::command]
+pub async fn agent_queue_clear(state: State<'_, AgentState>) -> Result<(), String> {
+    ext_notify(&state, "x.ai/queue/clear", serde_json::json!({})).await
+}
+
+/// Compact the conversation to reclaim context (`x.ai/compact_conversation`).
+#[tauri::command]
+pub async fn agent_compact(
+    state: State<'_, AgentState>,
+    user_context: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/compact_conversation",
+        serde_json::json!({ "userContext": user_context }),
+    )
+    .await
+}
+
 /// Context/token usage snapshot (`x.ai/session/info`).
 #[tauri::command]
 pub async fn agent_session_info(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {

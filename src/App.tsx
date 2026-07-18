@@ -301,6 +301,9 @@ function App() {
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [compacting, setCompacting] = useState(false);
+  // 引擎权威队列（x.ai/queue/changed 广播），不含正在跑的那条
+  const [queue, setQueue] = useState<{ id: string; version: number; text: string }[]>([]);
   // 展开过的思考块索引；新回合开始时清空 —— 读完的思考不会一直摊在记录里
   const [openThoughts, setOpenThoughts] = useState<Set<number>>(new Set());
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
@@ -693,6 +696,20 @@ function App() {
       }),
     );
 
+    // 引擎广播的权威队列。排除正在执行的那条 —— 它已经在对话流里了。
+    unsubs.push(
+      listen<any>("agent://ext", (e) => {
+        if (e.payload?.method !== "x.ai/queue/changed") return;
+        const p = e.payload.params ?? {};
+        const running = p.runningPromptId;
+        setQueue(
+          (p.entries ?? [])
+            .filter((q: any) => q.id !== running)
+            .map((q: any) => ({ id: q.id, version: q.version ?? 0, text: q.text ?? "" })),
+        );
+      }),
+    );
+
     unsubs.push(
       listen<any>("agent://plan-approval", (e) => {
         setPlanApproval({ id: e.payload.id, planContent: e.payload.planContent ?? "" });
@@ -755,6 +772,21 @@ function App() {
     }
   }
 
+  async function runCompact() {
+    if (!sessionIdRef.current || compacting) return;
+    setCompacting(true);
+    setError("");
+    try {
+      await invoke("agent_compact", { userContext: null });
+      setItems((prev) => [...prev, { kind: "note", text: STRINGS[loadLang()].compactDone }]);
+      refreshCtx(); // 让上下文条立刻反映释放出的空间
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCompacting(false);
+    }
+  }
+
   async function copyMessage(text: string, idx: number) {
     try {
       await navigator.clipboard.writeText(text);
@@ -767,20 +799,28 @@ function App() {
 
   function sendText(text: string, imgs: { data: string; mime: string; preview: string }[] = []) {
     const t = text.trim();
-    if ((!t && imgs.length === 0) || busy || !sessionIdRef.current) return;
-    setOpenThoughts(new Set()); // 新回合：收起上一轮展开过的思考
+    if ((!t && imgs.length === 0) || !sessionIdRef.current) return;
     setError("");
-    lastSentRef.current = t;
-    setPlanSteps([]);
-    const label = imgs.length ? `${t}${t ? "  " : ""}🖼️×${imgs.length}` : t;
-    setItems((prev) => [...prev, { kind: "user", text: label }]);
-    setBusy(true);
+    // A turn is already running → the engine appends this to its own FIFO
+    // instead of starting a turn. Queued prompts must NOT be echoed locally:
+    // they show in the queue strip, and when the engine finally runs one it
+    // emits the normal user_message_chunk. Setting lastSentRef here would make
+    // that echo get deduped away and the message would vanish.
+    const queueing = busy;
+    if (!queueing) {
+      setOpenThoughts(new Set()); // 新回合：收起上一轮展开过的思考
+      lastSentRef.current = t;
+      setPlanSteps([]);
+      const label = imgs.length ? `${t}${t ? "  " : ""}🖼️×${imgs.length}` : t;
+      setItems((prev) => [...prev, { kind: "user", text: label }]);
+      setBusy(true);
+    }
     invoke("agent_prompt", {
       text: t,
       images: imgs.length ? imgs.map((i) => ({ data: i.data, mime: i.mime })) : null,
     }).catch((e) => {
       setError(String(e));
-      setBusy(false);
+      if (!queueing) setBusy(false);
     });
   }
 
@@ -874,8 +914,11 @@ function App() {
         } else if (c.action === "rewind") {
           openRewind();
         } else if (c.action === "compact") {
+          // 真压缩：走引擎的 compact_conversation 重写历史。
+          // 旧实现是给模型发一句"请压缩对话"——那只是又生成一轮回答，
+          // 上下文一点没少，反而更满了。
           setInput("");
-          sendText("Please compact our conversation, preserving key decisions and current task state.");
+          runCompact();
         }
       } else if ("prompt" in c && c.prompt) {
         sendText(c.prompt);
@@ -972,6 +1015,15 @@ function App() {
           <span className="ctx-label">
             {t.ctxLabel(ctx.pct, Math.round(ctx.used / 1000), Math.round(ctx.total / 1000))}
           </span>
+          {/* 上下文条本身就是压缩入口 —— 光有仪表盘没有刹车才是问题 */}
+          <button
+            className="ctx-compact"
+            title={t.compactTitle}
+            disabled={compacting || busy}
+            onClick={runCompact}
+          >
+            {compacting ? "…" : t.compactTitle}
+          </button>
         </div>
       )}
 
@@ -1865,6 +1917,37 @@ function App() {
         onChange={onPickImages}
       />
       <footer className="composer">
+        {/* 排队中的提示词：Agent 忙时输入不再被拦，引擎按 FIFO 依次执行 */}
+        {queue.length > 0 && (
+          <div className="queue-strip">
+            <div className="queue-head">
+              <span className="queue-title">{t.queueTitle(queue.length)}</span>
+              <button
+                className="queue-clear"
+                onClick={() => invoke("agent_queue_clear").catch((e) => setError(String(e)))}
+              >
+                {t.queueClear}
+              </button>
+            </div>
+            {queue.map((q, n) => (
+              <div key={q.id} className="queue-row">
+                <span className="queue-idx">{n + 1}</span>
+                <span className="queue-text">{q.text}</span>
+                <button
+                  className="icon-btn queue-x"
+                  title={t.queueRemove}
+                  onClick={() =>
+                    invoke("agent_queue_remove", { id: q.id, expectedVersion: q.version }).catch(
+                      (e) => setError(String(e)),
+                    )
+                  }
+                >
+                  <IconX size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="composer-input-wrap">
           {pastedImages.length > 0 && (
             <div className="image-strip">
@@ -1931,7 +2014,15 @@ function App() {
                 send();
               }
             }}
-            placeholder={sessionId ? t.composerPlaceholder : starting ? t.starting : t.composerHint}
+            placeholder={
+              busy
+                ? t.queueHint
+                : sessionId
+                  ? t.composerPlaceholder
+                  : starting
+                    ? t.starting
+                    : t.composerHint
+            }
             rows={2}
           />
           <div className="composer-bar">

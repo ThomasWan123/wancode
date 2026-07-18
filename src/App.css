@@ -807,6 +807,73 @@ button.ghost.small {
   white-space: pre-wrap;
 }
 
+/* ── 排队条（Agent 忙时发出的提示词） ─────────────────── */
+.queue-strip {
+  margin: 0 auto 8px;
+  width: 100%;
+  max-width: 860px;
+  background: var(--bg1);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 7px 8px;
+}
+.queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1px 4px 5px;
+}
+.queue-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.queue-clear {
+  background: transparent;
+  border: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.queue-clear:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
+  opacity: 1;
+}
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 5px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.queue-row:hover {
+  background: var(--bg2);
+}
+.queue-idx {
+  flex-shrink: 0;
+  width: 15px;
+  text-align: right;
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.queue-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-x {
+  padding: 3px;
+  flex-shrink: 0;
+}
+
 /* 助手消息 + 悬停显示的操作行（复制…）—— 对标 Claude Code 消息下方小按钮 */
 .msg-wrap {
   align-self: stretch;
@@ -1200,6 +1267,32 @@ button.ghost.small {
   background: var(--bg1);
   border-bottom: 1px solid var(--border-soft);
   overflow: hidden;
+}
+
+.ctx-compact {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  background: transparent;
+  border: none;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  line-height: 1.4;
+}
+.ctx-compact:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
+  opacity: 1;
+}
+.ctx-compact:disabled {
+  background: transparent;
+  color: var(--faint);
+  opacity: 0.5;
 }
 
 .ctx-fill {
