@@ -123,6 +123,9 @@ async fn start_inner(
     model: Option<String>,
     resume: Option<String>,
 ) -> Result<StartResult> {
+    // Make WanCode-managed API keys (stored in the OS keyring) visible to the
+    // engine's `env_key` resolution for this process.
+    inject_managed_keys();
     let cwd = PathBuf::from(&workspace);
     if !cwd.is_dir() {
         return Err(anyhow!("工作区目录不存在: {workspace}"));
@@ -489,6 +492,201 @@ pub struct McpServerEntry {
 
 fn user_config_path() -> PathBuf {
     xai_grok_shell::util::grok_home::grok_home().join("config.toml")
+}
+
+// ── Model / API providers (config.toml [model.*] + keyring) ─────────
+
+const KEYRING_SERVICE: &str = "wancode-models";
+
+#[derive(Serialize, Clone)]
+pub struct ModelEntry {
+    pub key: String,
+    pub name: String,
+    pub model: String,
+    pub base_url: String,
+    pub env_key: Option<String>,
+    pub has_key: bool,
+    /// True if this model's key lives in the WanCode keyring (editable here).
+    pub managed: bool,
+}
+
+fn wancode_env_key(key: &str) -> String {
+    let up: String = key
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect();
+    format!("WANCODE_KEY_{up}")
+}
+
+/// List model presets from config.toml.
+#[tauri::command]
+pub async fn model_list() -> Result<Vec<ModelEntry>, String> {
+    let path = user_config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(models) = doc.get("model").and_then(|v| v.as_table()) {
+        for (key, item) in models.iter() {
+            let t = item.as_table_like();
+            let get = |k: &str| {
+                t.and_then(|t| t.get(k))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            };
+            let env_key = get("env_key");
+            let managed = env_key.as_deref() == Some(wancode_env_key(key).as_str());
+            let has_key = if managed {
+                keyring::Entry::new(KEYRING_SERVICE, key)
+                    .ok()
+                    .and_then(|e| e.get_password().ok())
+                    .is_some()
+            } else {
+                env_key
+                    .as_deref()
+                    .map(|ek| std::env::var(ek).is_ok())
+                    .unwrap_or(false)
+                    || get("api_key").is_some()
+            };
+            out.push(ModelEntry {
+                name: get("name").unwrap_or_else(|| key.to_string()),
+                model: get("model").unwrap_or_else(|| key.to_string()),
+                base_url: get("base_url").unwrap_or_default(),
+                env_key,
+                has_key,
+                managed,
+                key: key.to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Add/update a model preset; stores the API key in the system keyring.
+#[tauri::command]
+pub async fn model_upsert(
+    key: String,
+    name: String,
+    model: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if key.is_empty() || model.trim().is_empty() || base_url.trim().is_empty() {
+        return Err("名称、模型 ID、base_url 都不能为空".into());
+    }
+    let env_key = wancode_env_key(&key);
+    if let Some(k) = api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+        keyring::Entry::new(KEYRING_SERVICE, &key)
+            .and_then(|e| e.set_password(k.trim()))
+            .map_err(|e| format!("保存密钥到钥匙串失败: {e}"))?;
+    }
+    let path = user_config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+    let models = doc["model"]
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("model 段类型异常")?;
+    let mut entry = toml_edit::Table::new();
+    entry["model"] = toml_edit::value(model.trim());
+    entry["name"] = toml_edit::value(name.trim());
+    entry["base_url"] = toml_edit::value(base_url.trim());
+    entry["env_key"] = toml_edit::value(&env_key);
+    entry["api_backend"] = toml_edit::value("chat_completions");
+    entry["context_window"] = toml_edit::value(128000i64);
+    models.insert(&key, toml_edit::Item::Table(entry));
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+}
+
+/// Remove a model preset and its keyring entry.
+#[tauri::command]
+pub async fn model_remove(key: String) -> Result<(), String> {
+    let _ = keyring::Entry::new(KEYRING_SERVICE, &key).and_then(|e| e.delete_credential());
+    let path = user_config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+    if let Some(models) = doc.get_mut("model").and_then(|v| v.as_table_mut()) {
+        models.remove(&key);
+    }
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+}
+
+/// Test a provider: minimal chat completion against base_url. Returns the
+/// model's reply text on success, or an error string.
+#[tauri::command]
+pub async fn model_test(
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    key: Option<String>,
+) -> Result<String, String> {
+    // Resolve the key: explicit api_key, else keyring by preset key.
+    let token = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => key
+            .and_then(|k| keyring::Entry::new(KEYRING_SERVICE, &k).ok())
+            .and_then(|e| e.get_password().ok())
+            .ok_or("没有可用的 API Key")?,
+    };
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "ping" }],
+        "max_tokens": 5,
+        "stream": false,
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .bearer_auth(token.trim())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let msg = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| text.chars().take(200).collect());
+        return Err(format!("HTTP {}: {}", status.as_u16(), msg));
+    }
+    let reply = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("choices")?
+                .get(0)?
+                .get("message")?
+                .get("content")?
+                .as_str()
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "(ok)".into());
+    Ok(reply.chars().take(80).collect())
+}
+
+/// Inject managed model keys from keyring into the process env so the engine's
+/// `env_key` lookup resolves them. Call before starting a session.
+fn inject_managed_keys() {
+    let path = user_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else { return };
+    if let Some(models) = doc.get("model").and_then(|v| v.as_table()) {
+        for (key, _item) in models.iter() {
+            let env_key = wancode_env_key(key);
+            if std::env::var(&env_key).is_ok() {
+                continue;
+            }
+            if let Some(pw) = keyring::Entry::new(KEYRING_SERVICE, key)
+                .ok()
+                .and_then(|e| e.get_password().ok())
+            {
+                // Safety: single-threaded startup path before session spawn.
+                unsafe { std::env::set_var(&env_key, pw) };
+            }
+        }
+    }
 }
 
 // ── Skills (~/.grok/skills/<name>/SKILL.md) ─────────────────────────

@@ -151,6 +151,57 @@ function App() {
   const [mcpForm, setMcpForm] = useState({ name: "", command: "", args: "", url: "" });
   const [hooks, setHooks] = useState<{ event: string; command: string }[]>([]);
   const [hookForm, setHookForm] = useState({ event: "PostToolUse", command: "" });
+  const [modelList, setModelList] = useState<any[]>([]);
+  const [modelForm, setModelForm] = useState({ key: "", name: "", model: "", base_url: "", api_key: "" });
+  const [modelTestMsg, setModelTestMsg] = useState("");
+
+  const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: string }> = {
+    DeepSeek: { name: "DeepSeek V3", model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
+    "智谱 GLM": { name: "智谱 GLM-4-Flash", model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+    OpenAI: { name: "GPT-4o", model: "gpt-4o", base_url: "https://api.openai.com/v1" },
+    Ollama: { name: "Ollama (本地)", model: "qwen2.5-coder", base_url: "http://localhost:11434/v1" },
+  };
+
+  async function refreshModels() {
+    try {
+      setModelList(await invoke<any[]>("model_list"));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function testModel() {
+    setModelTestMsg(t.modelTesting);
+    try {
+      const reply = await invoke<string>("model_test", {
+        baseUrl: modelForm.base_url,
+        model: modelForm.model,
+        apiKey: modelForm.api_key || null,
+        key: modelForm.key || null,
+      });
+      setModelTestMsg(t.modelTestOk(reply));
+    } catch (e) {
+      setModelTestMsg(t.modelTestFail(String(e)));
+    }
+  }
+
+  async function saveModel() {
+    if (!modelForm.key.trim() || !modelForm.model.trim() || !modelForm.base_url.trim()) return;
+    try {
+      await invoke("model_upsert", {
+        key: modelForm.key,
+        name: modelForm.name || modelForm.key,
+        model: modelForm.model,
+        baseUrl: modelForm.base_url,
+        apiKey: modelForm.api_key || null,
+      });
+      setModelForm({ key: "", name: "", model: "", base_url: "", api_key: "" });
+      setModelTestMsg("");
+      refreshModels();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   const [lang, setLang] = useState<Lang>(loadLang());
   const [theme, setTheme] = useState<"dark" | "light">(
     (localStorage.getItem("wancode-theme") as "dark" | "light") || "dark",
@@ -291,6 +342,7 @@ function App() {
     } catch {
       /* ignore */
     }
+    refreshModels();
   }
 
   async function saveHooks(next: { event: string; command: string }[]) {
@@ -807,10 +859,97 @@ function App() {
               </select>
             </div>
             <div className="modal-section">
-              <div className="modal-label">{t.availableModels(models.length || 5)}</div>
-              <div className="modal-body">
-                {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).join("、")}
+              <div className="modal-label">{t.modelsSection}</div>
+              <div className="mcp-list">
+                {modelList.length === 0 && <div className="sidebar-empty">{t.modelsEmpty}</div>}
+                {modelList.map((m) => (
+                  <div key={m.key} className="mcp-item">
+                    <div className="mcp-info">
+                      <b>
+                        {m.name}{" "}
+                        <span className={m.has_key ? "key-ok" : "key-warn"}>
+                          {m.has_key ? t.modelKeyStored : t.modelKeyMissing}
+                        </span>
+                      </b>
+                      <span className="mcp-detail">
+                        {m.model} · {m.base_url}
+                      </span>
+                    </div>
+                    <button
+                      className="ghost small"
+                      title={t.modelDelete}
+                      onClick={async () => {
+                        await invoke("model_remove", { key: m.key }).catch((e) => setError(String(e)));
+                        refreshModels();
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
               </div>
+              <div className="model-presets">
+                <span className="preset-label">{t.modelPreset}:</span>
+                {Object.entries(MODEL_PRESETS).map(([label, p]) => (
+                  <button
+                    key={label}
+                    className="chip preset-chip"
+                    onClick={() =>
+                      setModelForm({
+                        key: modelForm.key || label.toLowerCase().replace(/\s+/g, "-"),
+                        name: p.name,
+                        model: p.model,
+                        base_url: p.base_url,
+                        api_key: modelForm.api_key,
+                      })
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="mcp-form">
+                <input
+                  placeholder={t.modelKeyField}
+                  value={modelForm.key}
+                  onChange={(e) => setModelForm({ ...modelForm, key: e.currentTarget.value })}
+                />
+                <input
+                  placeholder={t.modelDisplayName}
+                  value={modelForm.name}
+                  onChange={(e) => setModelForm({ ...modelForm, name: e.currentTarget.value })}
+                />
+                <input
+                  placeholder={t.modelIdField}
+                  value={modelForm.model}
+                  onChange={(e) => setModelForm({ ...modelForm, model: e.currentTarget.value })}
+                />
+                <input
+                  placeholder={t.modelBaseUrl}
+                  value={modelForm.base_url}
+                  onChange={(e) => setModelForm({ ...modelForm, base_url: e.currentTarget.value })}
+                />
+                <input
+                  type="password"
+                  placeholder={t.modelApiKey}
+                  value={modelForm.api_key}
+                  onChange={(e) => setModelForm({ ...modelForm, api_key: e.currentTarget.value })}
+                />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button style={{ flex: 1 }} onClick={saveModel}>
+                    {t.modelSave}
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={testModel}
+                    disabled={!modelForm.base_url || !modelForm.model}
+                  >
+                    {t.modelTest}
+                  </button>
+                </div>
+                {modelTestMsg && <div className="model-test-msg">{modelTestMsg}</div>}
+              </div>
+              <div className="modal-hint">{t.modelsHint}</div>
             </div>
             <div className="modal-section">
               <div className="modal-label">{t.mcpSection}</div>
