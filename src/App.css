@@ -289,6 +289,131 @@ button.ghost.small {
   letter-spacing: 0.5px;
 }
 
+/* ── 左栏：新建 / 导航 / 最近 / 底部状态（对标 Claude Code） ─── */
+
+.side-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 10px 4px;
+  padding: 8px 11px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 9px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.side-new:hover:not(:disabled) {
+  background: var(--bg2);
+  opacity: 1;
+}
+
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px 8px;
+}
+
+.side-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.side-nav-item:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
+  opacity: 1;
+}
+.side-nav-item.active {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+.side-nav-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  background: var(--bg2);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.side-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 4px;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 2px;
+}
+.side-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.side-section-btn {
+  padding: 4px;
+}
+
+.side-foot {
+  border-top: 1px solid var(--border-soft);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.side-foot-ws {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.side-foot-ws:hover:not(:disabled) {
+  background: var(--bg2);
+  opacity: 1;
+}
+.side-foot-ws:disabled {
+  background: transparent;
+  color: var(--faint);
+}
+.side-foot-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-foot-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 2px;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
 .sidebar-tabs {
   display: flex;
   align-items: center;

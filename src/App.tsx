@@ -12,7 +12,7 @@ import {
   IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconClipboard, IconTerminal, IconArrowUp, IconStop, IconPlus,
   IconX, IconPencil, IconTrash, IconFile, IconFolderClosed,
-  IconCheck, IconShield, IconChevron,
+  IconCheck, IconShield, IconChevron, IconSearch,
 } from "./icons";
 import "./App.css";
 
@@ -180,16 +180,20 @@ function autoApproveOption(
 
 // 首页建议：从**真实工作区**推导，而不是写死一串示例。
 // 之前固定的 "读取 notes.md…" 在多数项目里指向并不存在的文件。
-function detectKind(files: string[]): string {
-  const has = (name: string) => files.some((f) => f.toLowerCase() === name || f.toLowerCase().endsWith("/" + name));
-  if (has("cargo.toml")) return "Rust";
-  if (has("package.json")) return "Node";
-  if (has("go.mod")) return "Go";
-  if (has("pyproject.toml") || has("requirements.txt") || has("setup.py")) return "Python";
-  if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts")) return "JVM";
-  if (has("gemfile")) return "Ruby";
-  if (has("composer.json")) return "PHP";
-  return "";
+// 多语言仓库很常见（比如 Android app + Python 网关），返回全部命中而不是
+// 只取第一个，否则会以偏概全地把混合项目标成单一技术栈。
+function detectKinds(files: string[]): string[] {
+  const has = (name: string) =>
+    files.some((f) => f.toLowerCase() === name || f.toLowerCase().endsWith("/" + name));
+  const kinds: string[] = [];
+  if (has("cargo.toml")) kinds.push("Rust");
+  if (has("package.json")) kinds.push("Node");
+  if (has("go.mod")) kinds.push("Go");
+  if (has("pyproject.toml") || has("requirements.txt") || has("setup.py")) kinds.push("Python");
+  if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts")) kinds.push("JVM");
+  if (has("gemfile")) kinds.push("Ruby");
+  if (has("composer.json")) kinds.push("PHP");
+  return kinds.slice(0, 3);
 }
 
 function buildSuggestions(
@@ -311,6 +315,7 @@ function App() {
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
+  const [showSearch, setShowSearch] = useState(false);
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
@@ -1487,33 +1492,61 @@ function App() {
 
       <div className="body-row">
         <aside className="sidebar">
-          <div className="sidebar-tabs">
+          {/* 新会话置顶 + 导航 + 最近 —— 层次对标 Claude Code 左栏 */}
+          <button
+            className="side-new"
+            onClick={() => {
+              setSessionId("");
+              sessionIdRef.current = "";
+              setItems([]);
+              setSidebarTab("sessions");
+            }}
+          >
+            <IconPlus size={15} /> {t.sidebarNewSession}
+          </button>
+
+          <nav className="side-nav">
             <button
-              className={`tab ${sidebarTab === "sessions" ? "active" : ""}`}
-              onClick={() => setSidebarTab("sessions")}
+              className={`side-nav-item ${sidebarTab === "files" ? "active" : ""}`}
+              onClick={() => setSidebarTab(sidebarTab === "files" ? "sessions" : "files")}
             >
-              {t.tabSessions}
+              <IconFolderClosed size={15} /> {t.tabFiles}
             </button>
             <button
-              className={`tab ${sidebarTab === "files" ? "active" : ""}`}
-              onClick={() => setSidebarTab("files")}
+              className="side-nav-item"
+              onClick={async () => {
+                setSettingsTab("skills");
+                setShowSettings(true);
+                setSkills(
+                  await invoke<{ name: string; description: string; path: string }[]>(
+                    "skills_list",
+                  ).catch(() => []),
+                );
+              }}
             >
-              {t.tabFiles}
+              <IconClipboard size={15} /> {t.navSkills}
             </button>
-            {sidebarTab === "sessions" && (
-              <button
-                className="ghost small"
-                title={t.newSession}
-                onClick={() => {
-                  setSessionId("");
-                  sessionIdRef.current = "";
-                  setItems([]);
-                }}
-              >
-                <IconPlus size={16} />
-              </button>
-            )}
-          </div>
+            <button
+              className="side-nav-item"
+              onClick={() => {
+                refreshMcpConfig();
+                setSettingsTab("mcp");
+                setShowSettings(true);
+              }}
+            >
+              <IconGitBranch size={15} /> {t.navMcp}
+              {mcpServers.length > 0 && <span className="side-nav-count">{mcpServers.length}</span>}
+            </button>
+            <button
+              className="side-nav-item"
+              onClick={() => {
+                setSettingsTab("general");
+                setShowSettings(true);
+              }}
+            >
+              <IconSettings size={15} /> {t.settings}
+            </button>
+          </nav>
 
           {sidebarTab === "files" ? (
             <div className="session-list tree-list">
@@ -1525,12 +1558,29 @@ function App() {
             </div>
           ) : (
           <>
-          <input
-            className="session-search"
-            value={searchQuery}
-            placeholder={t.searchPlaceholder}
-            onChange={(e) => runSearch(e.currentTarget.value)}
-          />
+          <div className="side-section">
+            <span className="side-section-title">{t.sidebarRecent}</span>
+            <button
+              className="icon-btn side-section-btn"
+              title={t.sidebarSearchToggle}
+              onClick={() => {
+                const next = !showSearch;
+                setShowSearch(next);
+                if (!next) runSearch("");
+              }}
+            >
+              <IconSearch size={14} />
+            </button>
+          </div>
+          {showSearch && (
+            <input
+              className="session-search"
+              autoFocus
+              value={searchQuery}
+              placeholder={t.searchPlaceholder}
+              onChange={(e) => runSearch(e.currentTarget.value)}
+            />
+          )}
           <div className="session-list">
             {searchHits !== null && searchHits.length === 0 && (
               <div className="sidebar-empty">{t.searchNoResults}</div>
@@ -1604,9 +1654,29 @@ function App() {
           </div>
           </>
           )}
-          <div className="sidebar-foot">
-            {t.mcpFooter}
-            {mcpServers.length ? mcpServers.join("、") : t.notConfigured}
+          {/* 底部工作区状态行（对应 Claude Code 左栏底部的账号行） */}
+          <div className="side-foot">
+            <button
+              className="side-foot-ws"
+              onClick={pickFolderAndConnect}
+              disabled={starting}
+              title={workspace || t.sugOpenFolder}
+            >
+              <IconFolder size={14} />
+              <span className="side-foot-name">
+                {workspace ? workspace.split(/[\\/]/).filter(Boolean).pop() : t.sugOpenFolder}
+              </span>
+            </button>
+            <div className="side-foot-meta">
+              {gitInfo?.isRepo ? (
+                <>
+                  <IconGitBranch size={11} /> {gitInfo.branch}
+                  {(gitInfo.files?.length ?? 0) > 0 && ` · ${t.homeChanged(gitInfo.files.length)}`}
+                </>
+              ) : workspace ? (
+                t.sidebarNoRepo
+              ) : null}
+            </div>
           </div>
         </aside>
 
@@ -1624,7 +1694,11 @@ function App() {
                   <IconFolder size={13} />
                   {workspace.split(/[\\/]/).filter(Boolean).pop()}
                 </span>
-                {detectKind(fileList) && <span className="home-tag">{detectKind(fileList)}</span>}
+                {detectKinds(fileList).map((k) => (
+                  <span key={k} className="home-tag">
+                    {k}
+                  </span>
+                ))}
                 {gitInfo?.isRepo && (
                   <span className="home-tag">
                     <IconGitBranch size={12} /> {gitInfo.branch}
@@ -1659,28 +1733,6 @@ function App() {
                   }}
                 >
                   {s.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* 最近会话：一键继续 */}
-          {sessions.length > 0 && (
-            <div className="home-recent">
-              <div className="home-recent-head">{t.homeRecent}</div>
-              {sessions.slice(0, 4).map((s) => (
-                <button
-                  key={s.session_id}
-                  className="home-recent-row"
-                  disabled={starting}
-                  onClick={() => startSession(s.session_id)}
-                  title={s.title}
-                >
-                  <span className="home-recent-title">{s.title}</span>
-                  <span className="home-recent-meta">
-                    {t.homeMsgs(s.num_messages)}
-                    {s.model_id ? ` · ${s.model_id}` : ""}
-                  </span>
                 </button>
               ))}
             </div>
