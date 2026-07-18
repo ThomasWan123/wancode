@@ -722,6 +722,79 @@ button.ghost.small {
   padding: 0;
 }
 
+/* Markdown 排版：聊天流里的标题要克制（浏览器默认 h1=2em 太大），
+   对标 Claude Code 的转录观感 */
+.msg.assistant h1,
+.msg.assistant h2,
+.msg.assistant h3,
+.msg.assistant h4,
+.msg.assistant h5,
+.msg.assistant h6 {
+  line-height: 1.35;
+  margin: 1.1em 0 0.5em;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+.msg.assistant h1 { font-size: 1.3em; }
+.msg.assistant h2 { font-size: 1.14em; }
+.msg.assistant h3 { font-size: 1.02em; }
+.msg.assistant h4,
+.msg.assistant h5,
+.msg.assistant h6 { font-size: 1em; }
+.msg.assistant > h1:first-child,
+.msg.assistant > h2:first-child,
+.msg.assistant > h3:first-child { margin-top: 0.2em; }
+
+.msg.assistant ul,
+.msg.assistant ol {
+  margin: 0.45em 0;
+  padding-left: 1.5em;
+}
+.msg.assistant li { margin: 0.2em 0; }
+.msg.assistant li > p { margin: 0.2em 0; }
+
+.msg.assistant blockquote {
+  margin: 0.6em 0;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+}
+
+.msg.assistant hr {
+  border: none;
+  border-top: 1px solid var(--border-soft);
+  margin: 1.1em 0;
+}
+
+/* GFM 表格（需 remark-gfm）：紧凑描边，宽表可横向滚动 */
+.msg.assistant table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.7em 0;
+  font-size: 13px;
+}
+.msg.assistant th,
+.msg.assistant td {
+  border: 1px solid var(--border-soft);
+  padding: 6px 11px;
+  text-align: left;
+  vertical-align: top;
+}
+.msg.assistant th {
+  background: var(--bg2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.msg.assistant tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg2) 45%, transparent);
+}
+.msg.assistant table code {
+  white-space: nowrap;
+}
+
 .msg.thought {
   align-self: stretch;
   background: transparent;

@@ -6,6 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { STRINGS, loadLang, saveLang, type Lang } from "./i18n";
 import {
   IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
@@ -1425,7 +1426,7 @@ function App() {
           <div className="modal plan-approval-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-title">{t.planApprovalTitle}</div>
             <div className="plan-approval-body">
-              <ReactMarkdown>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
             </div>
             <textarea
               className="plan-feedback"
@@ -1618,14 +1619,14 @@ function App() {
           if (it.kind === "assistant")
             return (
               <div key={i} className="msg assistant">
-                <ReactMarkdown>{it.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
               </div>
             );
           if (it.kind === "thought")
             return (
               <details key={i} className="msg thought">
                 <summary>{t.thinking}</summary>
-                <ReactMarkdown>{it.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
               </details>
             );
           if (it.kind === "note")
