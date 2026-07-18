@@ -1,0 +1,11 @@
+{
+  "version": "0.8.1",
+  "notes": "+ 菜单（工作区/图片/Slash/MCP）对标 Claude Code；工作区移到底部；全 SVG 图标；ChatGPT 式分类设置；单行会话；Skills 编辑器；明文密钥迁移进钥匙串；字体精修。",
+  "pub_date": "2026-07-17T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFdwT0ppMzZlK0R4NmJTL2lCNTg5SlVveGU3Z251ejZyT204STJ4bzRSdWRIUG1MbHNjTEl5ODdrcFU5ZEVUMlMvOTZ4cHFsR1VkeVlJQ1dFODRRM3dNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzQ4MzE5CWZpbGU6d2FuY29kZV8wLjguMV94NjQtc2V0dXAuZXhlCnpZSzlaQmJZOGdIc3kwYmUvdG5ibU5yMEtoeWhxaFh1K0E1KzlkdjJUK3JWSkx0WjM3MXhIS3pvdzRNNVdPcGhmQXpEbk11SGlOVHJ4UC9Ld3J4NUF3PT0K",
+      "url": "https://github.com/ThomasWan123/wancode/releases/download/v0.8.1/wancode_0.8.1_x64-setup.exe"
+    }
+  }
+}
