@@ -302,8 +302,23 @@ function App() {
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [engineCommands, setEngineCommands] = useState<{ name: string; description?: string }[]>([]);
   // 引擎权威队列（x.ai/queue/changed 广播），不含正在跑的那条
   const [queue, setQueue] = useState<{ id: string; version: number; text: string }[]>([]);
+  // 引擎主动发起的提问（x.ai/ask_user_question）
+  const [question, setQuestion] = useState<{
+    id: number;
+    questions: {
+      question: string;
+      options: { label: string; description?: string }[];
+      multiSelect?: boolean;
+    }[];
+  } | null>(null);
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  // ↑ 调取历史输入
+  const historyRef = useRef<string[]>([]);
+  const histIdxRef = useRef(-1);
+  const draftRef = useRef("");
   // 展开过的思考块索引；新回合开始时清空 —— 读完的思考不会一直摊在记录里
   const [openThoughts, setOpenThoughts] = useState<Set<number>>(new Set());
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
@@ -425,6 +440,21 @@ function App() {
     { cmd: "/compact", desc: lang === "zh" ? "压缩上下文" : "Compact the context", action: "compact" as const },
     { cmd: "/rewind", desc: lang === "zh" ? "打开回滚" : "Open rewind", action: "rewind" as const },
     { cmd: "/clear", desc: lang === "zh" ? "开新会话" : "Start a new session", action: "clear" as const },
+    // 引擎注册表里的命令（技能 / 插件 / 内置），本地已有的同名项不重复列出。
+    // 直接把 "/name" 作为 prompt 发给引擎，由它自己解析执行。
+    ...engineCommands
+      .filter((c) => c?.name)
+      .map((c) => ({
+        cmd: `/${c.name}`,
+        desc: c.description ?? "",
+        prompt: `/${c.name}`,
+      }))
+      .filter(
+        (c) =>
+          !["/commit", "/review", "/test", "/explain", "/compact", "/rewind", "/clear"].includes(
+            c.cmd,
+          ),
+      ),
   ];
 
   async function runSearch(q: string) {
@@ -711,6 +741,13 @@ function App() {
     );
 
     unsubs.push(
+      listen<any>("agent://ask-question", (e) => {
+        setQuestion({ id: e.payload.id, questions: e.payload.questions ?? [] });
+        setAnswers({});
+      }),
+    );
+
+    unsubs.push(
       listen<any>("agent://plan-approval", (e) => {
         setPlanApproval({ id: e.payload.id, planContent: e.payload.planContent ?? "" });
       }),
@@ -763,6 +800,17 @@ function App() {
         .then(setFileList)
         .catch(() => {});
       refreshGit();
+      // ↑ 历史（引擎按 cwd 维护，最近优先）
+      invoke<string[]>("agent_prompt_history", { workspace: wsPath })
+        .then((h) => {
+          historyRef.current = h;
+          histIdxRef.current = -1;
+        })
+        .catch(() => {});
+      // 斜杠命令来自引擎注册表：内置 + 技能 + 插件，而非界面硬编码
+      invoke<any>("agent_commands_list", { workspace: wsPath })
+        .then((r) => setEngineCommands(r?.commands ?? []))
+        .catch(() => {});
       return r.session_id;
     } catch (e) {
       setError(String(e));
@@ -770,6 +818,25 @@ function App() {
     } finally {
       setStarting(false);
     }
+  }
+
+  async function respondQuestion(send: boolean) {
+    if (!question) return;
+    const id = question.id;
+    const payload = send ? answers : null;
+    setQuestion(null);
+    setAnswers({});
+    await invoke("agent_question_respond", { id, answers: payload }).catch((e) =>
+      setError(String(e)),
+    );
+  }
+
+  function toggleAnswer(q: string, label: string, multi: boolean) {
+    setAnswers((prev) => {
+      const cur = prev[q] ?? [];
+      if (!multi) return { ...prev, [q]: [label] };
+      return { ...prev, [q]: cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label] };
+    });
   }
 
   async function runCompact() {
@@ -815,6 +882,8 @@ function App() {
       setItems((prev) => [...prev, { kind: "user", text: label }]);
       setBusy(true);
     }
+    // 新发的 prompt 立刻进历史（引擎那份是启动时快照）
+    if (t) historyRef.current = [t, ...historyRef.current.filter((h) => h !== t)];
     invoke("agent_prompt", {
       text: t,
       images: imgs.length ? imgs.map((i) => ({ data: i.data, mime: i.mime })) : null,
@@ -1513,6 +1582,54 @@ function App() {
         </div>
       )}
 
+      {/* 引擎主动提问。之前这个请求被兜底应答成空对象，用户根本看不到。 */}
+      {question && (
+        <div className="modal-mask">
+          <div className="modal question-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">{t.questionTitle}</div>
+            <div className="question-body">
+              {question.questions.map((q) => (
+                <div key={q.question} className="question-block">
+                  <div className="question-text">{q.question}</div>
+                  {q.multiSelect && <div className="question-multi">{t.questionMulti}</div>}
+                  <div className="question-options">
+                    {(q.options ?? []).map((o) => {
+                      const picked = (answers[q.question] ?? []).includes(o.label);
+                      return (
+                        <button
+                          key={o.label}
+                          className={`question-option ${picked ? "picked" : ""}`}
+                          onClick={() => toggleAnswer(q.question, o.label, !!q.multiSelect)}
+                        >
+                          <span className="question-option-label">
+                            {picked && <IconCheck size={13} />}
+                            {o.label}
+                          </span>
+                          {o.description && (
+                            <span className="question-option-desc">{o.description}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="question-actions">
+              <button
+                disabled={Object.keys(answers).length === 0}
+                onClick={() => respondQuestion(true)}
+              >
+                {t.questionSubmit}
+              </button>
+              <button className="ghost" onClick={() => respondQuestion(false)}>
+                {t.cancel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {planApproval && (
         <div className="modal-mask">
           <div className="modal plan-approval-modal" onClick={(e) => e.stopPropagation()}>
@@ -2009,8 +2126,28 @@ function App() {
                   return;
                 }
               }
+              // ↑/↓ 调取历史输入：只在没有候选弹窗、且不是在多行文本里移动光标时接管。
+              if (e.key === "ArrowUp" && !popup && historyRef.current.length > 0) {
+                const atStart = e.currentTarget.selectionStart === 0;
+                if (input === "" || histIdxRef.current >= 0 || atStart) {
+                  e.preventDefault();
+                  if (histIdxRef.current < 0) draftRef.current = input; // 存草稿
+                  const next = Math.min(histIdxRef.current + 1, historyRef.current.length - 1);
+                  histIdxRef.current = next;
+                  onComposerChange(historyRef.current[next] ?? "");
+                  return;
+                }
+              }
+              if (e.key === "ArrowDown" && !popup && histIdxRef.current >= 0) {
+                e.preventDefault();
+                const next = histIdxRef.current - 1;
+                histIdxRef.current = next;
+                onComposerChange(next < 0 ? draftRef.current : historyRef.current[next]);
+                return;
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
+                histIdxRef.current = -1;
                 send();
               }
             }}

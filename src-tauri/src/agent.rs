@@ -44,6 +44,9 @@ pub struct AgentState {
     next_permission_id: AtomicU64,
     /// Pending `x.ai/exit_plan_mode` approvals → (outcome, feedback).
     pending_plans: Mutex<HashMap<u64, oneshot::Sender<(String, Option<String>)>>>,
+    /// Pending `x.ai/ask_user_question` requests: answers keyed by question text.
+    pending_questions:
+        Mutex<HashMap<u64, oneshot::Sender<Option<HashMap<String, Vec<String>>>>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -353,6 +356,41 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
                             _ => ("cancelled".to_string(), None),
                         };
                     let resp = serde_json::json!({ "outcome": outcome, "feedback": feedback });
+                    let raw = serde_json::value::to_raw_value(&resp).unwrap();
+                    let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+                });
+            } else if args.request.method.as_ref() == "x.ai/ask_user_question" {
+                // The agent is asking the user something. Previously this fell
+                // into the catch-all below and got answered with `{}` — the
+                // question never reached the user and the model saw a blank.
+                let params: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).unwrap_or(serde_json::Value::Null);
+                let questions = params
+                    .get("questions")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(vec![]));
+                let state: State<'_, AgentState> = app.state();
+                let id = state.next_permission_id.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) =
+                    oneshot::channel::<Option<HashMap<String, Vec<String>>>>();
+                state.pending_questions.lock().await.insert(id, tx);
+                let _ = app.emit(
+                    "agent://ask-question",
+                    serde_json::json!({ "id": id, "questions": questions }),
+                );
+                tauri::async_runtime::spawn(async move {
+                    let answered =
+                        match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+                            Ok(Ok(v)) => v,
+                            _ => None,
+                        };
+                    // Tagged on "outcome" — see AskUserQuestionExtResponse.
+                    let resp = match answered {
+                        Some(answers) => {
+                            serde_json::json!({ "outcome": "accepted", "answers": answers })
+                        }
+                        None => serde_json::json!({ "outcome": "cancelled" }),
+                    };
                     let raw = serde_json::value::to_raw_value(&resp).unwrap();
                     let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
                 });
@@ -1085,6 +1123,48 @@ pub async fn agent_compact(
         serde_json::json!({ "userContext": user_context }),
     )
     .await
+}
+
+/// Answer a pending `x.ai/ask_user_question`. `answers` maps each question's
+/// text to the chosen option labels; `None` = the user dismissed it.
+#[tauri::command]
+pub async fn agent_question_respond(
+    state: State<'_, AgentState>,
+    id: u64,
+    answers: Option<HashMap<String, Vec<String>>>,
+) -> Result<(), String> {
+    let sender = state.pending_questions.lock().await.remove(&id);
+    sender
+        .ok_or("该提问已失效")?
+        .send(answers)
+        .map_err(|_| "回传答案失败".to_string())
+}
+
+/// Slash commands the engine actually knows about (builtins + skills +
+/// plugin-provided), rather than a list hardcoded in the UI.
+#[tauri::command]
+pub async fn agent_commands_list(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/commands/list", serde_json::json!({ "cwd": workspace })).await
+}
+
+/// Previously sent prompts for this workspace, most recent first (↑ recall).
+#[tauri::command]
+pub async fn agent_prompt_history(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<Vec<String>, String> {
+    let v = ext_call(&state, "x.ai/prompt_history", serde_json::json!({ "cwd": workspace })).await?;
+    Ok(v.get("prompts")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Context/token usage snapshot (`x.ai/session/info`).
