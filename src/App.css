@@ -1,20 +1,24 @@
+/* 中性深色主题（默认）—— 对标 Claude Code / ChatGPT 的灰阶 */
 :root {
-  --bg0: #0e1014;
-  --bg1: #14171d;
-  --bg2: #1b1f27;
-  --bg3: #232833;
-  --border: #2a3040;
-  --border-soft: #232837;
-  --text: #e9ecf2;
-  --muted: #8b93a7;
-  --faint: #5c6474;
-  --accent: #6d7cff;
-  --accent2: #22d3ee;
-  --grad: linear-gradient(135deg, #6d7cff 0%, #9a6dff 100%);
-  --ok: #34d399;
-  --err: #f87171;
-  --warn: #fbbf24;
-  --radius: 14px;
+  --bg0: #1c1c1c;
+  --bg1: #171717;
+  --bg2: #262626;
+  --bg3: #303030;
+  --border: #383838;
+  --border-soft: #2a2a2a;
+  --text: #ececec;
+  --muted: #a1a1a1;
+  --faint: #6e6e6e;
+  --accent: #c96442; /* 克制的赤陶色，仅用于焦点/激活 */
+  --accent-soft: rgba(201, 100, 66, 0.14);
+  --accent2: #c96442;
+  --grad: #c96442;
+  --btn-bg: #ececec; /* 主按钮：近白，深字（ChatGPT 风格）*/
+  --btn-fg: #1a1a1a;
+  --ok: #6bbf8a;
+  --err: #e0736b;
+  --warn: #d0a45f;
+  --radius: 12px;
 
   font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
     "Microsoft YaHei", system-ui, sans-serif;
@@ -23,26 +27,30 @@
   font-size: 14px;
 }
 
-/* 浅色主题 */
+/* 中性浅色主题 */
 :root[data-theme="light"] {
-  --bg0: #f5f6f8;
-  --bg1: #ffffff;
-  --bg2: #eef0f4;
-  --bg3: #e2e6ec;
-  --border: #d3d8e0;
-  --border-soft: #e3e7ee;
-  --text: #1a1d24;
-  --muted: #5c6474;
-  --faint: #99a0ae;
-  --accent: #5563e8;
-  --accent2: #0891b2;
-  --ok: #059669;
-  --err: #dc2626;
-  --warn: #d97706;
+  --bg0: #ffffff;
+  --bg1: #f9f9f9;
+  --bg2: #f0f0f0;
+  --bg3: #e8e8e8;
+  --border: #e3e3e3;
+  --border-soft: #ededed;
+  --text: #1a1a1a;
+  --muted: #6e6e6e;
+  --faint: #9b9b9b;
+  --accent: #c15f3c;
+  --accent-soft: rgba(193, 95, 60, 0.1);
+  --accent2: #c15f3c;
+  --grad: #c15f3c;
+  --btn-bg: #1a1a1a;
+  --btn-fg: #ffffff;
+  --ok: #2f9e5f;
+  --err: #d24a42;
+  --warn: #c0872f;
 }
 
 :root[data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: #c4cad4;
+  background: #d0d0d0;
 }
 
 * {
@@ -57,7 +65,7 @@ body {
   width: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2c3242;
+  background: #3a3a3a;
   border-radius: 5px;
   border: 2px solid var(--bg0);
 }
@@ -69,20 +77,17 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background:
-    radial-gradient(1200px 500px at 70% -200px, rgba(109, 124, 255, 0.08), transparent 60%),
-    var(--bg0);
+  background: var(--bg0);
 }
 
 /* ── 顶栏 ─────────────────────────────────────────── */
 
 .topbar {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
-  padding: 12px 18px;
-  background: rgba(20, 23, 29, 0.85);
-  backdrop-filter: blur(10px);
+  padding: 10px 16px;
+  background: var(--bg0);
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -95,17 +100,17 @@ body {
 }
 
 .brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--grad);
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 800;
-  font-size: 15px;
-  color: white;
-  box-shadow: 0 2px 10px rgba(109, 124, 255, 0.4);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
 }
 
 .brand-name {
@@ -142,23 +147,23 @@ body {
 }
 
 button {
-  background: var(--grad);
-  color: white;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
   border: none;
-  border-radius: 10px;
-  padding: 8px 18px;
+  border-radius: 9px;
+  padding: 8px 16px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: filter 0.15s, transform 0.05s;
+  transition: opacity 0.15s, background 0.15s;
 }
 
 button:hover:not(:disabled) {
-  filter: brightness(1.12);
+  opacity: 0.85;
 }
 
 button:active:not(:disabled) {
-  transform: scale(0.97);
+  opacity: 0.7;
 }
 
 button:disabled {
@@ -171,22 +176,21 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  background: rgba(52, 211, 153, 0.12);
-  color: var(--ok);
-  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: var(--bg2);
+  color: var(--muted);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  padding: 7px 14px;
+  padding: 6px 13px;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .connected-pill .dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
 }
 
 button.ghost {
@@ -346,8 +350,8 @@ button.ghost.small {
 /* plan 面板 */
 .plan-panel {
   margin: 0 10% 8px;
-  background: rgba(109, 124, 255, 0.06);
-  border: 1px solid rgba(109, 124, 255, 0.25);
+  background: var(--bg1);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 12px 16px;
 }
@@ -355,7 +359,7 @@ button.ghost.small {
 .plan-head {
   font-size: 12.5px;
   font-weight: 700;
-  color: #a5b4fc;
+  color: var(--accent);
   margin-bottom: 8px;
 }
 
@@ -526,27 +530,24 @@ button.ghost.small {
 }
 
 .empty-logo {
-  width: 72px;
-  height: 72px;
-  border-radius: 20px;
-  background: var(--grad);
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 36px;
-  font-weight: 800;
-  color: white;
-  box-shadow: 0 10px 40px rgba(109, 124, 255, 0.35);
-  margin-bottom: 6px;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
 }
 
 .empty-title {
-  font-size: 26px;
-  font-weight: 700;
-  background: linear-gradient(90deg, #e9ecf2, #a5b4fc);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .empty-sub {
@@ -599,28 +600,30 @@ button.ghost.small {
 }
 
 .msg {
-  max-width: 82%;
-  padding: 11px 16px;
-  border-radius: var(--radius);
-  font-size: 14px;
-  line-height: 1.65;
+  max-width: 88%;
+  padding: 2px 0;
+  font-size: 14.5px;
+  line-height: 1.7;
   word-break: break-word;
 }
 
+/* 用户消息：克制的灰底圆角气泡，右对齐（ChatGPT 风格）*/
 .msg.user {
   align-self: flex-end;
-  background: var(--grad);
-  color: white;
-  border-bottom-right-radius: 5px;
-  box-shadow: 0 4px 16px rgba(109, 124, 255, 0.25);
+  max-width: 78%;
+  background: var(--bg2);
+  color: var(--text);
+  border-radius: 18px;
+  padding: 10px 16px;
   white-space: pre-wrap;
 }
 
+/* 助手消息：无卡片，纯文本流（Claude Code 风格）*/
 .msg.assistant {
-  align-self: flex-start;
-  background: var(--bg2);
-  border: 1px solid var(--border-soft);
-  border-bottom-left-radius: 5px;
+  align-self: stretch;
+  max-width: 100%;
+  background: transparent;
+  padding: 2px 0;
 }
 
 .msg.assistant > *:first-child {
@@ -644,7 +647,8 @@ button.ghost.small {
 }
 
 .msg.assistant code {
-  background: rgba(109, 124, 255, 0.12);
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
   border-radius: 4px;
   padding: 1px 5px;
   font-size: 13px;
@@ -656,34 +660,36 @@ button.ghost.small {
 }
 
 .msg.thought {
-  align-self: flex-start;
+  align-self: stretch;
   background: transparent;
   color: var(--muted);
   font-size: 13px;
-  border: 1px dashed var(--border);
-  max-width: 82%;
+  max-width: 100%;
+  padding: 2px 0;
 }
 
 .msg.thought summary {
   cursor: pointer;
   user-select: none;
   color: var(--faint);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .msg.thought[open] summary {
   margin-bottom: 6px;
 }
 
+/* 工具调用：轻量卡片（Claude Code 风格的低调）*/
 .msg.tool {
-  align-self: flex-start;
+  align-self: stretch;
   background: var(--bg1);
   border: 1px solid var(--border-soft);
-  border-left: 3px solid var(--accent);
+  border-radius: 10px;
   color: var(--text);
   font-size: 13px;
   font-family: Consolas, "Cascadia Mono", monospace;
-  max-width: 82%;
+  max-width: 100%;
+  padding: 10px 14px;
 }
 
 .msg.tool .status {
@@ -731,11 +737,11 @@ button.ghost.small {
 }
 
 .diff .line.add {
-  color: #6ee7a0;
+  color: var(--ok);
 }
 
 .diff .line.del {
-  color: #f89b9b;
+  color: var(--err);
 }
 
 .msg.tool.awaiting {
@@ -892,12 +898,12 @@ button.ghost.small {
 .ctx-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  background: linear-gradient(90deg, rgba(109, 124, 255, 0.35), rgba(154, 109, 255, 0.35));
+  background: var(--bg3);
   transition: width 0.4s;
 }
 
 .ctx-fill.hot {
-  background: linear-gradient(90deg, rgba(251, 191, 36, 0.4), rgba(248, 113, 113, 0.45));
+  background: var(--accent-soft);
 }
 
 .ctx-label {
@@ -1210,9 +1216,9 @@ button.ghost.small {
 }
 
 .plan-toggle.on {
-  background: rgba(109, 124, 255, 0.18);
+  background: var(--accent-soft);
   border-color: var(--accent);
-  color: #a5b4fc;
+  color: var(--accent);
 }
 
 .term-toggle {
@@ -1290,7 +1296,7 @@ button.ghost.small {
 
 .composer:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(109, 124, 255, 0.15);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .composer textarea {
