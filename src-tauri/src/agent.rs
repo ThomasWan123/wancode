@@ -436,6 +436,70 @@ fn user_config_path() -> PathBuf {
     xai_grok_shell::util::grok_home::grok_home().join("config.toml")
 }
 
+// ── Hooks (~/.grok/hooks/wancode.json, WanCode-managed) ──────────────
+
+#[derive(Serialize, serde::Deserialize, Clone)]
+pub struct HookEntry {
+    pub event: String,
+    pub command: String,
+}
+
+fn hooks_path() -> PathBuf {
+    xai_grok_shell::util::grok_home::grok_home()
+        .join("hooks")
+        .join("wancode.json")
+}
+
+/// Read the WanCode-managed hooks file as a flat {event, command} list.
+#[tauri::command]
+pub async fn hooks_list() -> Result<Vec<HookEntry>, String> {
+    let text = std::fs::read_to_string(hooks_path()).unwrap_or_default();
+    if text.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    if let Some(map) = doc.get("hooks").and_then(|v| v.as_object()) {
+        for (event, groups) in map {
+            for group in groups.as_array().into_iter().flatten() {
+                for h in group.get("hooks").and_then(|v| v.as_array()).into_iter().flatten() {
+                    if let Some(cmd) = h.get("command").and_then(|v| v.as_str()) {
+                        out.push(HookEntry { event: event.clone(), command: cmd.to_string() });
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Replace the entire WanCode-managed hooks file from a flat list.
+#[tauri::command]
+pub async fn hooks_save(entries: Vec<HookEntry>) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    let mut by_event: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for e in entries {
+        if e.event.trim().is_empty() || e.command.trim().is_empty() {
+            continue;
+        }
+        by_event
+            .entry(e.event)
+            .or_default()
+            .push(serde_json::json!({ "type": "command", "command": e.command }));
+    }
+    let hooks: serde_json::Map<String, serde_json::Value> = by_event
+        .into_iter()
+        .map(|(event, cmds)| (event, serde_json::json!([{ "hooks": cmds }])))
+        .collect();
+    let doc = serde_json::json!({ "hooks": hooks });
+    let path = hooks_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| format!("写入 hooks 失败: {e}"))
+}
+
 /// Read `[mcp_servers]` entries from the user config.
 #[tauri::command]
 pub async fn mcp_config_list() -> Result<Vec<McpServerEntry>, String> {
@@ -707,6 +771,23 @@ pub async fn agent_session_delete(
         serde_json::json!({ "sessionId": session_id, "cwd": workspace }),
     )
     .await
+}
+
+/// Switch the session mode ("plan" = read-only planning, "default" = agent).
+#[tauri::command]
+pub async fn agent_set_mode(state: State<'_, AgentState>, mode: String) -> Result<(), String> {
+    let (acp_tx, session_id) = {
+        let guard = state.handle.lock().await;
+        let h = guard.as_ref().ok_or("会话未启动")?;
+        (h.acp_tx.clone(), h.session_id.clone())
+    };
+    let _: acp::SetSessionModeResponse = acp_send(
+        acp::SetSessionModeRequest::new(session_id, acp::SessionModeId::new(mode)),
+        &acp_tx,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Interrupt the current turn.

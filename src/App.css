@@ -970,6 +970,12 @@ button.ghost.small {
   border-color: var(--accent);
 }
 
+.modal-hint {
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-top: 6px;
+}
+
 /* ── 设置弹窗 ─────────────────────────────────────── */
 
 .modal-mask {
@@ -1088,6 +1094,18 @@ button.ghost.small {
   color: #b8e6c0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.plan-toggle {
+  font-size: 12px;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+.plan-toggle.on {
+  background: rgba(109, 124, 255, 0.18);
+  border-color: var(--accent);
+  color: #a5b4fc;
 }
 
 .term-toggle {

@@ -149,6 +149,8 @@ function App() {
     { name: string; command?: string; args: string[]; url?: string; enabled: boolean }[]
   >([]);
   const [mcpForm, setMcpForm] = useState({ name: "", command: "", args: "", url: "" });
+  const [hooks, setHooks] = useState<{ event: string; command: string }[]>([]);
+  const [hookForm, setHookForm] = useState({ event: "PostToolUse", command: "" });
   const [lang, setLang] = useState<Lang>(loadLang());
   const [theme, setTheme] = useState<"dark" | "light">(
     (localStorage.getItem("wancode-theme") as "dark" | "light") || "dark",
@@ -171,6 +173,16 @@ function App() {
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
+  const [planMode, setPlanMode] = useState(false);
+
+  async function togglePlanMode() {
+    const next = !planMode;
+    setPlanMode(next);
+    await invoke("agent_set_mode", { mode: next ? "plan" : "default" }).catch((e) => {
+      setError(String(e));
+      setPlanMode(!next);
+    });
+  }
 
   async function refreshGit() {
     try {
@@ -256,6 +268,16 @@ function App() {
     } catch {
       /* ignore */
     }
+    try {
+      setHooks(await invoke<{ event: string; command: string }[]>("hooks_list"));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function saveHooks(next: { event: string; command: string }[]) {
+    setHooks(next);
+    await invoke("hooks_save", { entries: next }).catch((e) => setError(String(e)));
   }
 
   async function openRewind() {
@@ -343,7 +365,10 @@ function App() {
       listen<any>("agent://update", (e) => {
         const u = e.payload;
         if (!u || typeof u !== "object") return;
-        if (u.sessionUpdate === "plan") {
+        if (u.sessionUpdate === "current_mode_update" || u.sessionUpdate === "current_mode") {
+          const m = u.currentModeId ?? u.current_mode_id;
+          if (m) setPlanMode(m === "plan");
+        } else if (u.sessionUpdate === "plan") {
           const entries = u.entries ?? u.plan?.entries ?? [];
           setPlanSteps(
             entries.map((e: any) => ({
@@ -645,6 +670,15 @@ function App() {
           </button>
         )}
         {sessionId && (
+          <button
+            className={`ghost plan-toggle ${planMode ? "on" : ""}`}
+            title={planMode ? t.planModeOn : t.planModeOff}
+            onClick={togglePlanMode}
+          >
+            📋 {t.planMode}
+          </button>
+        )}
+        {sessionId && (
           <button className="ghost" title={t.rewindTooltip} onClick={openRewind}>
             ⏪
           </button>
@@ -821,6 +855,54 @@ function App() {
                   {t.mcpAdd}
                 </button>
               </div>
+            </div>
+            <div className="modal-section">
+              <div className="modal-label">{t.hooksSection}</div>
+              <div className="mcp-list">
+                {hooks.length === 0 && <div className="sidebar-empty">{t.hooksEmpty}</div>}
+                {hooks.map((h, i) => (
+                  <div key={i} className="mcp-item">
+                    <div className="mcp-info">
+                      <b>{h.event}</b>
+                      <span className="mcp-detail">{h.command}</span>
+                    </div>
+                    <button
+                      className="ghost small"
+                      title={t.mcpDelete}
+                      onClick={() => saveHooks(hooks.filter((_, j) => j !== i))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="mcp-form">
+                <select
+                  value={hookForm.event}
+                  onChange={(e) => setHookForm({ ...hookForm, event: e.currentTarget.value })}
+                >
+                  {["PreToolUse", "PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"].map((ev) => (
+                    <option key={ev} value={ev}>
+                      {ev}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  placeholder={t.hooksCommand}
+                  value={hookForm.command}
+                  onChange={(e) => setHookForm({ ...hookForm, command: e.currentTarget.value })}
+                />
+                <button
+                  onClick={() => {
+                    if (!hookForm.command.trim()) return;
+                    saveHooks([...hooks, { event: hookForm.event, command: hookForm.command.trim() }]);
+                    setHookForm({ event: hookForm.event, command: "" });
+                  }}
+                >
+                  {t.hooksAdd}
+                </button>
+              </div>
+              <div className="modal-hint">{t.hooksHint}</div>
             </div>
             <div className="modal-section">
               <div className="modal-label">{t.projectMemory}</div>
