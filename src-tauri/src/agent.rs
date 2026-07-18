@@ -19,11 +19,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Windows process flag: run a child process without allocating a console.
-/// Keeps helper commands (git) from blinking black boxes over the GUI.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 use agent_client_protocol as acp;
 use xai_acp_lib::{AcpAgentTx, AcpClientMessage, acp_send};
 use xai_grok_pager::acp::spawn::spawn_grok_shell;
@@ -1125,6 +1120,85 @@ pub async fn agent_compact(
     .await
 }
 
+// ── Git（走引擎的 workspace ops，不再自己 shell 调 git）──────────
+//
+// 引擎已经处理了 gitRoot 解析、worktree、子模块、CREATE_NO_WINDOW 等；
+// 我们只转发。`ext_call` 会自动带上 sessionId，引擎据此定位仓库。
+
+/// Full status: branch / ahead / behind / staged / unstaged。
+#[tauri::command]
+pub async fn git_status_ext(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/git/status",
+        serde_json::json!({ "includeUntracked": true, "includeStats": true }),
+    )
+    .await
+}
+
+/// Unified diffs for the given paths (empty = every change).
+#[tauri::command]
+pub async fn git_diffs(
+    state: State<'_, AgentState>,
+    paths: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/diffs", serde_json::json!({ "paths": paths })).await
+}
+
+/// Stage / unstage / discard the given paths (`None` = all).
+#[tauri::command]
+pub async fn git_stage(
+    state: State<'_, AgentState>,
+    paths: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/stage", serde_json::json!({ "paths": paths })).await
+}
+
+#[tauri::command]
+pub async fn git_unstage(
+    state: State<'_, AgentState>,
+    paths: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/unstage", serde_json::json!({ "paths": paths })).await
+}
+
+#[tauri::command]
+pub async fn git_discard(
+    state: State<'_, AgentState>,
+    paths: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/discard", serde_json::json!({ "paths": paths })).await
+}
+
+/// Commit what is currently staged.
+#[tauri::command]
+pub async fn git_commit(
+    state: State<'_, AgentState>,
+    message: String,
+    amend: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/git/commit",
+        serde_json::json!({ "message": message, "amend": amend.unwrap_or(false) }),
+    )
+    .await
+}
+
+/// Branch list, and checkout.
+#[tauri::command]
+pub async fn git_branches(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/branches", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_checkout(
+    state: State<'_, AgentState>,
+    branch: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/git/checkout", serde_json::json!({ "branch": branch })).await
+}
+
 /// Answer a pending `x.ai/ask_user_question`. `answers` maps each question's
 /// text to the chosen option labels; `None` = the user dismissed it.
 #[tauri::command]
@@ -1200,43 +1274,6 @@ pub async fn agent_rewind(
         }),
     )
     .await
-}
-
-/// Git status of the workspace: (branch, [(xy, path)]). Empty list = clean.
-#[tauri::command]
-pub async fn git_status(workspace: String) -> Result<serde_json::Value, String> {
-    let run = |args: &[&str]| -> Option<String> {
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(args).current_dir(&workspace);
-        // Windows: without CREATE_NO_WINDOW every git call flashes a console
-        // window. git_status runs on each session start (i.e. every launch),
-        // so this would blink three black boxes at the user each time.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        cmd.output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let is_repo = run(&["rev-parse", "--is-inside-work-tree"])
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false);
-    if !is_repo {
-        return Ok(serde_json::json!({ "isRepo": false }));
-    }
-    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let porcelain = run(&["status", "--porcelain"]).unwrap_or_default();
-    let files: Vec<serde_json::Value> = porcelain
-        .lines()
-        .filter(|l| l.len() > 3)
-        .map(|l| serde_json::json!({ "xy": l[..2].trim().to_string(), "path": l[3..].to_string() }))
-        .collect();
-    Ok(serde_json::json!({ "isRepo": true, "branch": branch, "files": files }))
 }
 
 /// List workspace files (relative paths) for @-mention autocomplete.

@@ -180,6 +180,20 @@ function autoApproveOption(
 
 // 首页建议：从**真实工作区**推导，而不是写死一串示例。
 // 之前固定的 "读取 notes.md…" 在多数项目里指向并不存在的文件。
+// 引擎的 ChangeType 是 create/edit/delete/... —— 映射成 git 用户熟悉的字母。
+const CHANGE_LETTER: Record<string, string> = {
+  create: "A",
+  edit: "M",
+  delete: "D",
+  rename: "R",
+  copy: "C",
+  typechange: "T",
+  untracked: "?",
+};
+function changeLetter(t: unknown): string {
+  return CHANGE_LETTER[String(t ?? "").toLowerCase()] ?? "M";
+}
+
 function buildSuggestions(
   files: string[],
   git: any,
@@ -324,6 +338,8 @@ function App() {
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
+  const [gitBranches, setGitBranches] = useState<string[]>([]);
+  const [commitMsg, setCommitMsg] = useState("");
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
     (localStorage.getItem("wancode-perm-mode") as PermMode) || "manual",
@@ -422,11 +438,55 @@ function App() {
     }
   }
 
+  // 走引擎的 workspace ops：它已处理 gitRoot 解析 / worktree / 子模块，
+  // 也不会像我们自己 shell 调 git 那样在 Windows 上闪控制台。
   async function refreshGit() {
+    if (!sessionIdRef.current) {
+      setGitInfo(null);
+      return;
+    }
     try {
-      setGitInfo(await invoke<any>("git_status", { workspace }));
+      const r = await invoke<any>("git_status_ext");
+      // 引擎统一包成 { result: T | null, error? }。失败时 result 为 null ——
+      // 必须区分"引擎报错"和"这不是 git 仓库"，否则会把故障伪装成正常状态。
+      if (r?.error) {
+        setGitInfo(null);
+        setError(`git: ${typeof r.error === "string" ? r.error : JSON.stringify(r.error)}`);
+        return;
+      }
+      // 兼容 {result:{format,data}} / {format,data} / 旧版扁平 GitStatusData
+      const env = r?.result ?? r;
+      const d =
+        env?.data ??
+        (env && (env.branch !== undefined || env.staged !== undefined || env.root !== undefined)
+          ? env
+          : null);
+      if (!d) {
+        setGitInfo({ isRepo: false });
+        return;
+      }
+      setGitInfo({
+        isRepo: true,
+        branch: d.branch ?? "",
+        ahead: d.ahead ?? 0,
+        behind: d.behind ?? 0,
+        staged: d.staged ?? [],
+        unstaged: d.unstaged ?? [],
+        // 底部状态行只关心"有多少改动"
+        files: [...(d.staged ?? []), ...(d.unstaged ?? [])],
+      });
     } catch {
       setGitInfo(null);
+    }
+  }
+
+  async function gitOp(cmd: string, args: Record<string, unknown> = {}) {
+    setError("");
+    try {
+      await invoke(cmd, args);
+      await refreshGit();
+    } catch (e) {
+      setError(String(e));
     }
   }
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -1502,22 +1562,125 @@ function App() {
               <div className="modal-body">{t.gitNotRepo}</div>
             ) : (
               <>
-                <div className="modal-section">
-                  <div className="modal-label">{gitInfo.branch}</div>
-                  <div className="git-files">
-                    {(!gitInfo.files || gitInfo.files.length === 0) && (
-                      <div className="sidebar-empty">{t.gitClean}</div>
-                    )}
-                    {(gitInfo.files ?? []).map((f: any) => (
-                      <div key={f.path} className="git-file">
-                        <span className="git-xy">{f.xy || "??"}</span>
+                <div className="git-head">
+                  <span className="git-branch-name">
+                    <IconGitBranch size={13} /> {gitInfo.branch || "-"}
+                  </span>
+                  {(gitInfo.ahead ?? 0) > 0 && <span className="git-track">↑{gitInfo.ahead}</span>}
+                  {(gitInfo.behind ?? 0) > 0 && <span className="git-track">↓{gitInfo.behind}</span>}
+                  <select
+                    className="git-branch-pick"
+                    value=""
+                    onChange={(e) => {
+                      const b = e.currentTarget.value;
+                      if (b) gitOp("git_checkout", { branch: b });
+                    }}
+                    onMouseDown={async () => {
+                      if (gitBranches.length) return;
+                      const r = await invoke<any>("git_branches").catch(() => null);
+                      const list = r?.branches ?? r?.data?.branches ?? r?.result?.branches ?? [];
+                      setGitBranches(
+                        list.map((b: any) => (typeof b === "string" ? b : (b?.name ?? ""))).filter(Boolean),
+                      );
+                    }}
+                  >
+                    <option value="">{t.gitSwitchBranch}</option>
+                    {gitBranches.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {(gitInfo.staged?.length ?? 0) === 0 && (gitInfo.unstaged?.length ?? 0) === 0 && (
+                  <div className="sidebar-empty">{t.gitClean}</div>
+                )}
+
+                {(gitInfo.staged?.length ?? 0) > 0 && (
+                  <div className="git-group">
+                    <div className="git-group-head">
+                      <span>{t.gitStaged(gitInfo.staged.length)}</span>
+                      <button className="git-mini" onClick={() => gitOp("git_unstage", { paths: null })}>
+                        {t.gitUnstageAll}
+                      </button>
+                    </div>
+                    {gitInfo.staged.map((f: any) => (
+                      <div key={f.path} className="git-row">
+                        <span className="git-type">{changeLetter(f.type)}</span>
                         <span className="git-path">{f.path}</span>
+                        <span className="git-stat">
+                          <span className="add">+{f.additions ?? 0}</span>{" "}
+                          <span className="del">-{f.deletions ?? 0}</span>
+                        </span>
+                        <button
+                          className="git-mini"
+                          title={t.gitUnstage}
+                          onClick={() => gitOp("git_unstage", { paths: [f.path] })}
+                        >
+                          −
+                        </button>
                       </div>
                     ))}
                   </div>
-                </div>
+                )}
+
+                {(gitInfo.unstaged?.length ?? 0) > 0 && (
+                  <div className="git-group">
+                    <div className="git-group-head">
+                      <span>{t.gitChanges(gitInfo.unstaged.length)}</span>
+                      <button className="git-mini" onClick={() => gitOp("git_stage", { paths: null })}>
+                        {t.gitStageAll}
+                      </button>
+                    </div>
+                    {gitInfo.unstaged.map((f: any) => (
+                      <div key={f.path} className="git-row">
+                        <span className="git-type">{changeLetter(f.type)}</span>
+                        <span className="git-path">{f.path}</span>
+                        <span className="git-stat">
+                          <span className="add">+{f.additions ?? 0}</span>{" "}
+                          <span className="del">-{f.deletions ?? 0}</span>
+                        </span>
+                        <button
+                          className="git-mini"
+                          title={t.gitStage}
+                          onClick={() => gitOp("git_stage", { paths: [f.path] })}
+                        >
+                          +
+                        </button>
+                        <button
+                          className="git-mini danger"
+                          title={t.gitDiscard}
+                          onClick={() => {
+                            if (window.confirm(t.gitDiscardConfirm(f.path)))
+                              gitOp("git_discard", { paths: [f.path] });
+                          }}
+                        >
+                          ↺
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <input
+                  className="git-msg"
+                  placeholder={t.gitMsgPlaceholder}
+                  value={commitMsg}
+                  onChange={(e) => setCommitMsg(e.currentTarget.value)}
+                />
                 <div className="git-actions">
                   <button
+                    disabled={!commitMsg.trim() || (gitInfo.staged?.length ?? 0) === 0}
+                    onClick={async () => {
+                      await gitOp("git_commit", { message: commitMsg.trim() });
+                      setCommitMsg("");
+                    }}
+                  >
+                    {t.gitDoCommit}
+                  </button>
+                  <button
+                    className="ghost"
                     disabled={!gitInfo.files?.length}
                     onClick={() => {
                       setShowGit(false);
@@ -1835,12 +1998,13 @@ function App() {
               </span>
             </button>
             <div className="side-foot-meta">
+              {/* gitInfo === null 表示"还没取到/取失败"，不能当成"不是仓库" */}
               {gitInfo?.isRepo ? (
                 <>
                   <IconGitBranch size={11} /> {gitInfo.branch}
                   {(gitInfo.files?.length ?? 0) > 0 && ` · ${t.homeChanged(gitInfo.files.length)}`}
                 </>
-              ) : workspace ? (
+              ) : gitInfo?.isRepo === false ? (
                 t.sidebarNoRepo
               ) : null}
             </div>
