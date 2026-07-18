@@ -1,11 +1,11 @@
 {
-  "version": "0.8.4",
-  "notes": "聊天区对标 Claude Code：工具调用改为扁平树状（● 状态点 + ⎿ 连接输出），去掉盒子卡片与徽章，更紧凑清爽。",
+  "version": "0.8.5",
+  "notes": "字体对标 Claude：内置 Inter（跨机一致的中性无衬线）+ 匹配字号/行高/字距；工具调用改扁平树状（● 状态点 + ⎿ 输出），去掉盒子卡片。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZGE3NkxnTURDdExGUzdrZ1R5L1QvdGp1dGxMaVdhc0dWelR6MEVKeEVLeXhkNU9ZelMvT2hwaHo1VDZkMWl1dWJrclpCcUhCU2pIdS9zSjFFSGtmNFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU0MTYyCWZpbGU6d2FuY29kZV8wLjguNF94NjQtc2V0dXAuZXhlClc0cjdGREFlS2oyenJLbUhMcFZ5UVQyMWlDZ2NkOXFzSzRMMksxc280V1JuZzJhR2NlMVpGT3FYODVEWHpVc1VZQlFOZ1FudkdqQWU0K3IzVVFBMkRBPT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.4/wancode_0.8.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFpVZkpEUzBwYmlqdlZnbFUvUUZFM2ZFemFMTUF2dGE0YjlUc0RKc0ZDZnFwbDA4ekY0V2RvL0tFd05TV05DNkR0anlqTlFQTFdSak4wZmQ3Y0k0d1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzU1OTA1CWZpbGU6d2FuY29kZV8wLjguNV94NjQtc2V0dXAuZXhlCmkwbHlBYnlRQXREZUM5Znd6R2hSQ0IrWGF3bWNZY0puR0ZxR1ZvNDJKSThtNjJkVWRwR3RsMUc0ZHpzaEJQSVkvNVRiMmdtSFJLcCs5YlRPOEZyMEFBPT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.5/wancode_0.8.5_x64-setup.exe"
     }
   }
 }
