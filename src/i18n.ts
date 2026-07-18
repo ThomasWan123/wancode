@@ -15,11 +15,7 @@ const zh = {
     "检查代码里有没有明显的 bug",
   ],
   // 首页：按当前工作区实况生成的建议（不是写死的示例）
-  homeNoWorkspace: "尚未打开工作区",
   homeChanged: (n: number) => `${n} 个文件有改动`,
-  homeClean: "工作区干净",
-  homeRecent: "最近会话",
-  homeMsgs: (n: number) => `${n} 条`,
   sugReviewChanges: "审查未提交的改动",
   sugReviewChangesP: "审查我未提交的改动，逐个说明改了什么、有没有问题。",
   sugCommitMsg: "生成提交信息",
@@ -207,11 +203,7 @@ const en: typeof zh = {
     "Check the code for obvious bugs",
   ],
   // Home: suggestions derived from the actual workspace, not a fixed list
-  homeNoWorkspace: "No workspace open",
   homeChanged: (n: number) => `${n} changed`,
-  homeClean: "Working tree clean",
-  homeRecent: "Recent sessions",
-  homeMsgs: (n: number) => `${n} msgs`,
   sugReviewChanges: "Review my uncommitted changes",
   sugReviewChangesP: "Review my uncommitted changes — walk through what changed and flag any problems.",
   sugCommitMsg: "Write a commit message",

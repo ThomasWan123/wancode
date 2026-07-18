@@ -180,22 +180,6 @@ function autoApproveOption(
 
 // 首页建议：从**真实工作区**推导，而不是写死一串示例。
 // 之前固定的 "读取 notes.md…" 在多数项目里指向并不存在的文件。
-// 多语言仓库很常见（比如 Android app + Python 网关），返回全部命中而不是
-// 只取第一个，否则会以偏概全地把混合项目标成单一技术栈。
-function detectKinds(files: string[]): string[] {
-  const has = (name: string) =>
-    files.some((f) => f.toLowerCase() === name || f.toLowerCase().endsWith("/" + name));
-  const kinds: string[] = [];
-  if (has("cargo.toml")) kinds.push("Rust");
-  if (has("package.json")) kinds.push("Node");
-  if (has("go.mod")) kinds.push("Go");
-  if (has("pyproject.toml") || has("requirements.txt") || has("setup.py")) kinds.push("Python");
-  if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts")) kinds.push("JVM");
-  if (has("gemfile")) kinds.push("Ruby");
-  if (has("composer.json")) kinds.push("PHP");
-  return kinds.slice(0, 3);
-}
-
 function buildSuggestions(
   files: string[],
   git: any,
@@ -1686,40 +1670,8 @@ function App() {
           <div className="empty-logo">W</div>
           <div className="empty-title">{t.appTagline}</div>
 
-          {/* 工作区实况：文件夹 / 技术栈 / 分支 / 改动数 —— 都是真实数据 */}
-          <div className="home-ws">
-            {sessionId ? (
-              <>
-                <span className="home-tag strong">
-                  <IconFolder size={13} />
-                  {workspace.split(/[\\/]/).filter(Boolean).pop()}
-                </span>
-                {detectKinds(fileList).map((k) => (
-                  <span key={k} className="home-tag">
-                    {k}
-                  </span>
-                ))}
-                {gitInfo?.isRepo && (
-                  <span className="home-tag">
-                    <IconGitBranch size={12} /> {gitInfo.branch}
-                  </span>
-                )}
-                {gitInfo?.isRepo && (
-                  <span className={`home-tag ${(gitInfo.files?.length ?? 0) > 0 ? "warn" : ""}`}>
-                    {(gitInfo.files?.length ?? 0) > 0
-                      ? t.homeChanged(gitInfo.files.length)
-                      : t.homeClean}
-                  </span>
-                )}
-              </>
-            ) : (
-              <button className="home-tag strong" onClick={pickFolderAndConnect}>
-                <IconFolder size={13} /> {t.sugOpenFolder}
-              </button>
-            )}
-          </div>
-
-          {/* 建议来自当前工作区（有改动就先建议审查改动，有 README 才建议总结…） */}
+          {/* 建议来自当前工作区（有改动就先建议审查改动，有 README 才建议总结…）
+              工作区信息不在这里重复 —— 左栏底部和输入框上方已经显示。 */}
           {sessionId && (
             <div className="chips">
               {buildSuggestions(fileList, gitInfo, t).map((s) => (
