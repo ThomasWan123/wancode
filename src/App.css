@@ -2269,3 +2269,69 @@ button.ghost.small {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
+
+/* ── MCP 实时管理 ─────────────────────────────────────── */
+.mcp-live {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 9px 11px;
+  margin-bottom: 8px;
+}
+.mcp-live-head { display: flex; align-items: center; gap: 9px; }
+.mcp-live-name { font-size: 13.5px; font-weight: 600; }
+.mcp-switch {
+  width: 32px;
+  height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  position: relative;
+  flex-shrink: 0;
+}
+.mcp-switch.on { background: var(--accent); border-color: var(--accent); }
+.mcp-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg0);
+  transition: left 0.15s;
+}
+.mcp-switch.on .mcp-knob { left: 16px; background: #fff; }
+.mcp-status {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--faint);
+}
+.mcp-status.ready { color: var(--ok); }
+.mcp-status.initializing { color: var(--warn); }
+.mcp-status.unavailable { color: var(--err); }
+.mcp-src { font-size: 11px; color: var(--faint); margin-left: auto; }
+.mcp-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+.mcp-tool {
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.mcp-tool:hover:not(:disabled) { background: var(--bg3); color: var(--text); opacity: 1; }
+.mcp-tool.off { opacity: 0.45; text-decoration: line-through; }

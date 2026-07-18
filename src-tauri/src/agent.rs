@@ -1043,8 +1043,13 @@ async fn ext_call(
         (h.acp_tx.clone(), h.session_id.clone())
     };
     if let Some(obj) = params.as_object_mut() {
-        obj.entry("sessionId")
-            .or_insert(serde_json::Value::String(session_id.0.to_string()));
+        // 引擎里同级方法的命名并不统一：mcp/list 用 camelCase 的 sessionId，
+        // 而 mcp/toggle / toggle_tool / auth_trigger 用 snake_case 的
+        // session_id。两个都塞进去——没有 deny_unknown_fields，多余的键会被
+        // 忽略，但少一个就是静默的 missing field 失败。
+        let sid = serde_json::Value::String(session_id.0.to_string());
+        obj.entry("sessionId").or_insert(sid.clone());
+        obj.entry("session_id").or_insert(sid);
     }
     let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
     let resp: acp::ExtResponse =
@@ -1116,6 +1121,77 @@ pub async fn agent_compact(
         &state,
         "x.ai/compact_conversation",
         serde_json::json!({ "userContext": user_context }),
+    )
+    .await
+}
+
+// ── MCP 实时管理 ────────────────────────────────────────────────
+//
+// 以前只能改 config.toml 再重开会话。引擎支持按服务器/按工具启停、
+// 查授权状态、触发 OAuth，全部即时生效。
+
+/// 服务器与工具清单（含启用状态）。`cache=false` 绕过缓存，
+/// 用于 OAuth 授权或断开之后强制刷新。
+#[tauri::command]
+pub async fn mcp_live_list(
+    state: State<'_, AgentState>,
+    fresh: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/mcp/list",
+        serde_json::json!({ "cache": !fresh.unwrap_or(false) }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mcp_toggle(
+    state: State<'_, AgentState>,
+    server_name: String,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/mcp/toggle",
+        serde_json::json!({ "server_name": server_name, "enabled": enabled }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mcp_toggle_tool(
+    state: State<'_, AgentState>,
+    server_name: String,
+    tool_name: String,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/mcp/toggle_tool",
+        serde_json::json!({
+            "server_name": server_name,
+            "tool_name": tool_name,
+            "enabled": enabled
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mcp_auth_status(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_call(&state, "x.ai/mcp/auth_status", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn mcp_auth_trigger(
+    state: State<'_, AgentState>,
+    server_name: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/mcp/auth_trigger",
+        serde_json::json!({ "server_name": server_name }),
     )
     .await
 }

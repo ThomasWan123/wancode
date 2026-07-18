@@ -342,6 +342,7 @@ function App() {
   const [bgTasks, setBgTasks] = useState<any[]>([]);
   const [subagents, setSubagents] = useState<any[]>([]);
   const [showTasks, setShowTasks] = useState(false);
+  const [mcpLive, setMcpLive] = useState<any[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
@@ -438,6 +439,39 @@ function App() {
         permModeRef.current = prev;
         localStorage.setItem("wancode-perm-mode", prev);
       });
+    }
+  }
+
+  // 设置页的数据按"当前分类"加载，而不是挂在某个入口按钮上 ——
+  // 否则从齿轮进来再切到 MCP/技能，面板会是空的（数据从没被拉过）。
+  useEffect(() => {
+    if (!showSettings) return;
+    if (settingsTab === "mcp") {
+      refreshMcpConfig();
+      refreshMcpLive();
+    } else if (settingsTab === "skills") {
+      invoke<{ name: string; description: string; path: string }[]>("skills_list")
+        .then(setSkills)
+        .catch(() => {});
+    } else if (settingsTab === "models") {
+      refreshModels();
+    } else if (settingsTab === "hooks") {
+      refreshMcpConfig(); // 它同时加载 hooks_list（函数名没体现）
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSettings, settingsTab, sessionId]);
+
+  // MCP 实时状态。fresh=true 绕过缓存（OAuth 授权/断开之后必须这样拉）。
+  async function refreshMcpLive(fresh = false) {
+    if (!sessionIdRef.current) {
+      setMcpLive([]);
+      return;
+    }
+    try {
+      const r = await invoke<any>("mcp_live_list", { fresh });
+      setMcpLive((r?.result ?? r)?.servers ?? []);
+    } catch (e) {
+      setMcpLive([]);
     }
   }
 
@@ -817,6 +851,10 @@ function App() {
         // 后台任务开始/结束 —— 之前这两个通知被直接丢弃
         if (m === "x.ai/task_backgrounded" || m === "x.ai/task_completed") {
           refreshTasks();
+          return;
+        }
+        if (m === "x.ai/mcp/servers_updated" || m === "x.ai/mcp/tools_changed") {
+          refreshMcpLive();
           return;
         }
         if (m !== "x.ai/queue/changed") return;
@@ -1398,6 +1436,73 @@ function App() {
             )}
             {settingsTab === "mcp" && (
             <div className="modal-section">
+              {/* 实时状态：按服务器/按工具启停、授权，全部即时生效，
+                  不必再改 TOML 重开会话。 */}
+              <div className="modal-label">{t.mcpLiveSection}</div>
+              <div className="mcp-list">
+                {mcpLive.length === 0 && <div className="sidebar-empty">{t.mcpLiveEmpty}</div>}
+                {mcpLive.map((s: any) => {
+                  const st = s.session ?? {};
+                  const on = st.enabled !== false;
+                  return (
+                    <div key={s.name} className="mcp-live">
+                      <div className="mcp-live-head">
+                        <button
+                          className={`mcp-switch ${on ? "on" : ""}`}
+                          title={on ? t.mcpDisable : t.mcpEnable}
+                          onClick={async () => {
+                            await invoke("mcp_toggle", {
+                              serverName: s.name,
+                              enabled: !on,
+                            }).catch((e) => setError(String(e)));
+                            refreshMcpLive();
+                          }}
+                        >
+                          <span className="mcp-knob" />
+                        </button>
+                        <span className="mcp-live-name">{s.displayName ?? s.name}</span>
+                        {st.status && <span className={`mcp-status ${st.status}`}>{st.status}</span>}
+                        {s.sourceLabel && <span className="mcp-src">{s.sourceLabel}</span>}
+                        {st.authRequired && (
+                          <button
+                            className="git-mini"
+                            onClick={async () => {
+                              await invoke("mcp_auth_trigger", { serverName: s.name }).catch((e) =>
+                                setError(String(e)),
+                              );
+                              refreshMcpLive(true);
+                            }}
+                          >
+                            {t.mcpAuth}
+                          </button>
+                        )}
+                      </div>
+                      {on && (st.tools ?? []).length > 0 && (
+                        <div className="mcp-tools">
+                          {st.tools.map((tool: any) => (
+                            <button
+                              key={tool.name}
+                              className={`mcp-tool ${tool.enabled === false ? "off" : ""}`}
+                              title={tool.description ?? tool.name}
+                              onClick={async () => {
+                                await invoke("mcp_toggle_tool", {
+                                  serverName: s.name,
+                                  toolName: tool.name,
+                                  enabled: tool.enabled === false,
+                                }).catch((e) => setError(String(e)));
+                                refreshMcpLive();
+                              }}
+                            >
+                              {tool.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
               <div className="modal-label">{t.mcpSection}</div>
               <div className="mcp-list">
                 {mcpList.length === 0 && <div className="sidebar-empty">{t.notConfigured}</div>}
@@ -1996,6 +2101,7 @@ function App() {
               className="side-nav-item"
               onClick={() => {
                 refreshMcpConfig();
+                refreshMcpLive();
                 setSettingsTab("mcp");
                 setShowSettings(true);
               }}
