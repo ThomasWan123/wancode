@@ -235,6 +235,17 @@ function App() {
   const [planFeedback, setPlanFeedback] = useState("");
   const [skills, setSkills] = useState<{ name: string; description: string; path: string }[]>([]);
   const [skillForm, setSkillForm] = useState({ name: "", description: "" });
+  const [editingSkill, setEditingSkill] = useState<{ name: string; content: string } | null>(null);
+  const [migrateMsg, setMigrateMsg] = useState("");
+
+  async function openSkillEditor(name: string) {
+    try {
+      const content = await invoke<string>("skill_read", { name });
+      setEditingSkill({ name, content });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function respondPlan(outcome: string) {
     if (!planApproval) return;
@@ -721,26 +732,12 @@ function App() {
           <div className="brand-mark">W</div>
           <div className="brand-name">WanCode</div>
         </div>
-        <input
-          value={workspace}
-          onChange={(e) => setWorkspace(e.currentTarget.value)}
-          placeholder={t.workspacePlaceholder}
-          title={t.workspacePlaceholder}
-          style={{ flex: 1 }}
-          disabled={!!sessionId}
-        />
-        <button className="icon-btn" onClick={pickFolder} disabled={!!sessionId} title={t.browseFolder}>
-          <IconFolder />
-        </button>
-        {sessionId ? (
+        <div style={{ flex: 1 }} />
+        {sessionId && (
           <span className="connected-pill">
             <span className="dot" />
             {t.connected}
           </span>
-        ) : (
-          <button onClick={() => startSession()} disabled={starting}>
-            {starting ? t.starting : t.openWorkspace}
-          </button>
         )}
         {sessionId && (
           <button
@@ -974,6 +971,23 @@ function App() {
                 {modelTestMsg && <div className="model-test-msg">{modelTestMsg}</div>}
               </div>
               <div className="modal-hint">{t.modelsHint}</div>
+              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  className="ghost"
+                  onClick={async () => {
+                    try {
+                      const n = await invoke<number>("migrate_env_keys");
+                      setMigrateMsg(t.migrateOk(n));
+                      refreshModels();
+                    } catch (e) {
+                      setError(String(e));
+                    }
+                  }}
+                >
+                  {t.migrateKeys}
+                </button>
+                {migrateMsg && <span className="model-test-msg" style={{ margin: 0 }}>{migrateMsg}</span>}
+              </div>
             </div>
             )}
             {settingsTab === "mcp" && (
@@ -1052,11 +1066,16 @@ function App() {
               <div className="mcp-list">
                 {skills.length === 0 && <div className="sidebar-empty">{t.skillsEmpty}</div>}
                 {skills.map((sk) => (
-                  <div key={sk.name} className="mcp-item">
+                  <div
+                    key={sk.name}
+                    className="mcp-item clickable"
+                    onClick={() => openSkillEditor(sk.name)}
+                  >
                     <div className="mcp-info">
                       <b>{sk.name}</b>
                       <span className="mcp-detail">{sk.description}</span>
                     </div>
+                    <IconPencil size={13} className="skill-edit-icon" />
                   </div>
                 ))}
               </div>
@@ -1225,6 +1244,39 @@ function App() {
             <div className="modal-footer">
               <span />
               <button onClick={() => setShowGit(false)}>{t.close}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingSkill && (
+        <div className="modal-mask" onClick={() => setEditingSkill(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 620 }}>
+            <div className="modal-title">{t.skillEditTitle} · {editingSkill.name}</div>
+            <textarea
+              className="skill-editor"
+              value={editingSkill.content}
+              onChange={(e) => setEditingSkill({ ...editingSkill, content: e.currentTarget.value })}
+              spellCheck={false}
+            />
+            <div className="modal-footer">
+              <span />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="ghost" onClick={() => setEditingSkill(null)}>{t.cancel}</button>
+                <button
+                  onClick={async () => {
+                    try {
+                      await invoke("skill_write", { name: editingSkill.name, content: editingSkill.content });
+                      setEditingSkill(null);
+                      setSkills(await invoke("skills_list"));
+                    } catch (e) {
+                      setError(String(e));
+                    }
+                  }}
+                >
+                  {t.save}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1512,6 +1564,27 @@ function App() {
           </pre>
         </div>
       )}
+
+      <div className="workspace-bar">
+        <button
+          className="ws-chip"
+          onClick={pickFolder}
+          disabled={!!sessionId}
+          title={workspace}
+        >
+          <IconFolder size={14} />
+          <span className="ws-name">{workspace.split(/[\\/]/).filter(Boolean).pop() || t.workspacePlaceholder}</span>
+        </button>
+        {sessionId ? (
+          <span className="ws-status">
+            <span className="dot" /> {t.connected}
+          </span>
+        ) : (
+          <button className="ws-connect" onClick={() => startSession()} disabled={starting}>
+            {starting ? t.starting : t.openWorkspace}
+          </button>
+        )}
+      </div>
 
       <footer className="composer">
         <div className="composer-input-wrap">

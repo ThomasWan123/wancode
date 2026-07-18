@@ -666,6 +666,70 @@ pub async fn model_test(
     Ok(reply.chars().take(80).collect())
 }
 
+/// Migrate plaintext env-var keys into the OS keyring: for each preset whose
+/// env_key is a plain env var (not WANCODE_KEY_*) that currently resolves,
+/// copy the value into the keyring and switch the preset to a keyring-backed
+/// env_key. Non-destructive to the user's system env vars. Returns count moved.
+#[tauri::command]
+pub async fn migrate_env_keys() -> Result<usize, String> {
+    let path = user_config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+    let mut moved = 0usize;
+    // Collect keys to migrate first (avoid borrow conflicts).
+    let mut todo: Vec<(String, String)> = Vec::new(); // (preset_key, plaintext_value)
+    if let Some(models) = doc.get("model").and_then(|v| v.as_table()) {
+        for (key, item) in models.iter() {
+            let env_key = item
+                .as_table_like()
+                .and_then(|t| t.get("env_key"))
+                .and_then(|v| v.as_str());
+            if let Some(ek) = env_key {
+                if ek == wancode_env_key(key) {
+                    continue; // already managed
+                }
+                if let Ok(val) = std::env::var(ek) {
+                    if !val.is_empty() {
+                        todo.push((key.to_string(), val));
+                    }
+                }
+            }
+        }
+    }
+    for (key, val) in todo {
+        if keyring::Entry::new(KEYRING_SERVICE, &key)
+            .and_then(|e| e.set_password(&val))
+            .is_ok()
+        {
+            if let Some(models) = doc.get_mut("model").and_then(|v| v.as_table_mut()) {
+                if let Some(entry) = models.get_mut(&key).and_then(|i| i.as_table_mut()) {
+                    entry["env_key"] = toml_edit::value(wancode_env_key(&key));
+                }
+            }
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+    }
+    Ok(moved)
+}
+
+/// Read a skill's SKILL.md content for in-app editing.
+#[tauri::command]
+pub async fn skill_read(name: String) -> Result<String, String> {
+    let path = skills_dir().join(&name).join("SKILL.md");
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+/// Write a skill's SKILL.md content.
+#[tauri::command]
+pub async fn skill_write(name: String, content: String) -> Result<(), String> {
+    let dir = skills_dir().join(&name);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("SKILL.md"), content).map_err(|e| e.to_string())
+}
+
 /// Inject managed model keys from keyring into the process env so the engine's
 /// `env_key` lookup resolves them. Call before starting a session.
 fn inject_managed_keys() {

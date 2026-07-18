@@ -1231,6 +1231,38 @@ button.ghost.small {
   gap: 10px;
 }
 
+.mcp-item.clickable {
+  cursor: pointer;
+}
+
+.mcp-item.clickable:hover {
+  border-color: var(--border);
+}
+
+.skill-edit-icon {
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.skill-editor {
+  width: 100%;
+  height: 340px;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+
+.skill-editor:focus {
+  border-color: var(--faint);
+}
+
 .modal-title {
   font-size: 17px;
   font-weight: 700;
@@ -1400,6 +1432,61 @@ button.ghost.small {
 }
 
 /* ── 输入区 ───────────────────────────────────────── */
+
+/* 工作区选择器：移到输入框上方（对标 Claude Code / Codex）*/
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12% 6px;
+  padding: 0 2px;
+}
+
+.ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  max-width: 320px;
+}
+
+.ws-chip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border);
+  opacity: 1;
+}
+
+.ws-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ws-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.ws-connect {
+  padding: 5px 14px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
 
 /* 输入区：对标 Claude/ChatGPT —— 圆角容器，底部一行放模型选择+操作 */
 .composer {
