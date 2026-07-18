@@ -70,6 +70,9 @@ export const IconFolderClosed = ({ size = 16, ...r }: P) => (
 export const IconCheck = ({ size = 16, ...r }: P) => (
   <svg {...base(size)} {...r}><path d="M20 6 9 17l-5-5" /></svg>
 );
+export const IconCopy = ({ size = 16, ...r }: P) => (
+  <svg {...base(size)} {...r}><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
+);
 export const IconShield = ({ size = 16, ...r }: P) => (
   <svg {...base(size)} {...r}><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /></svg>
 );

@@ -807,6 +807,36 @@ button.ghost.small {
   white-space: pre-wrap;
 }
 
+/* 助手消息 + 悬停显示的操作行（复制…）—— 对标 Claude Code 消息下方小按钮 */
+.msg-wrap {
+  align-self: stretch;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.msg-wrap:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
+.msg-action {
+  padding: 5px;
+  color: var(--faint);
+}
+.msg-action:hover:not(:disabled) {
+  color: var(--text);
+}
+
 /* 助手消息：无卡片，纯文本流（Claude Code 风格）*/
 .msg.assistant {
   align-self: stretch;

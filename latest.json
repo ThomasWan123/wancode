@@ -1,11 +1,11 @@
 {
-  "version": "0.8.9",
-  "notes": "首页去掉重复的工作区标签行（左栏底部与输入框上方已显示），只保留标题与上下文建议。",
+  "version": "0.9.0",
+  "notes": "消息悬停显示复制按钮（复制原始 Markdown）；思考块在新回合开始时自动收起。",
   "pub_date": "2026-07-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZGV5Q2o0TkxkcEFVSmxKR0dtZmFMcHlKTXhmU2FzYkNNbnhndXNyZGhBS3RSUzZ2SG5WR29lNE5CT2dtd1p1THpHckpXL0VPSjdGRzFMSENUemMwWFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzY1NjQxCWZpbGU6d2FuY29kZV8wLjguOV94NjQtc2V0dXAuZXhlCjFrTzFoNmo3WmdDZzZYZUFFdHpNOVJKNGozUHljOW91MlFGVllLYTUwSVdLbkw0MkVJaDVKWSswaG50OFJhTWhpWjcyY0VBUE9BdWxxUXdDVjhkckRRPT0K",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.8.9/wancode_0.8.9_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFRyV3Jqa012Y09ISkhVQUh6TXFFZzlRYmdPKzlmTFR6emlqWlQ1VHl4dzJzNGxLa2lxOUc4bFFMLzMvQ2Nudytqd01MTHpqSTUxVzRqRnVnU21acFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzY2NjY0CWZpbGU6d2FuY29kZV8wLjkuMF94NjQtc2V0dXAuZXhlCjNEVVZNMTBob0o2aVZqT28zOVBuaENKRm8rcCs3aUJsSm1nYjlmNmw4RnA1MGVlZHZITEh4Uk03UjhJWTdqd1FJNHRqcWVYT3ZEdWY5S2t3TmJvbER3PT0K",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.9.0/wancode_0.9.0_x64-setup.exe"
     }
   }
 }

@@ -12,7 +12,7 @@ import {
   IconFolder, IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconClipboard, IconTerminal, IconArrowUp, IconStop, IconPlus,
   IconX, IconPencil, IconTrash, IconFile, IconFolderClosed,
-  IconCheck, IconShield, IconChevron, IconSearch,
+  IconCheck, IconShield, IconChevron, IconSearch, IconCopy,
 } from "./icons";
 import "./App.css";
 
@@ -300,6 +300,9 @@ function App() {
   const [showTerminal, setShowTerminal] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  // 展开过的思考块索引；新回合开始时清空 —— 读完的思考不会一直摊在记录里
+  const [openThoughts, setOpenThoughts] = useState<Set<number>>(new Set());
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
   const [gitInfo, setGitInfo] = useState<any>(null);
   const [showGit, setShowGit] = useState(false);
@@ -752,9 +755,20 @@ function App() {
     }
   }
 
+  async function copyMessage(text: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   function sendText(text: string, imgs: { data: string; mime: string; preview: string }[] = []) {
     const t = text.trim();
     if ((!t && imgs.length === 0) || busy || !sessionIdRef.current) return;
+    setOpenThoughts(new Set()); // 新回合：收起上一轮展开过的思考
     setError("");
     lastSentRef.current = t;
     setPlanSteps([]);
@@ -1718,13 +1732,37 @@ function App() {
             );
           if (it.kind === "assistant")
             return (
-              <div key={i} className="msg assistant">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
+              <div key={i} className="msg-wrap">
+                <div className="msg assistant">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
+                </div>
+                <div className="msg-actions">
+                  <button
+                    className="icon-btn msg-action"
+                    title={copiedIdx === i ? t.copied : t.copyMessage}
+                    onClick={() => copyMessage(it.text, i)}
+                  >
+                    {copiedIdx === i ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                  </button>
+                </div>
               </div>
             );
           if (it.kind === "thought")
             return (
-              <details key={i} className="msg thought">
+              <details
+                key={i}
+                className="msg thought"
+                open={openThoughts.has(i)}
+                onToggle={(e) => {
+                  const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                  setOpenThoughts((prev) => {
+                    const next = new Set(prev);
+                    if (isOpen) next.add(i);
+                    else next.delete(i);
+                    return next;
+                  });
+                }}
+              >
                 <summary>{t.thinking}</summary>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
               </details>
