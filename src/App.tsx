@@ -231,6 +231,33 @@ function App() {
   const [showGit, setShowGit] = useState(false);
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [planMode, setPlanMode] = useState(false);
+  const [plusMenu, setPlusMenu] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function pickFolderAndConnect() {
+    setPlusMenu(false);
+    const dir = await openDialog({ directory: true, title: t.pickFolderTitle });
+    if (typeof dir === "string" && dir) {
+      setWorkspace(dir);
+      refreshSessions(dir);
+      // Auto-open the workspace (start the session) — one action, Claude-style.
+      startSession(undefined, dir);
+    }
+  }
+
+  function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/"));
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result);
+        const base64 = dataUrl.split(",")[1] ?? "";
+        setPastedImages((prev) => [...prev, { data: base64, mime: file.type, preview: dataUrl }]);
+      };
+      reader.readAsDataURL(file);
+    }
+    e.target.value = "";
+  }
   const [planApproval, setPlanApproval] = useState<{ id: number; planContent: string } | null>(null);
   const [planFeedback, setPlanFeedback] = useState("");
   const [skills, setSkills] = useState<{ name: string; description: string; path: string }[]>([]);
@@ -433,14 +460,6 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function pickFolder() {
-    const dir = await openDialog({ directory: true, title: t.pickFolderTitle });
-    if (typeof dir === "string" && dir) {
-      setWorkspace(dir);
-      refreshSessions(dir);
-    }
-  }
-
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [items, permission]);
@@ -575,21 +594,22 @@ function App() {
     });
   }
 
-  async function startSession(resume?: string) {
+  async function startSession(resume?: string, ws?: string) {
+    const wsPath = ws ?? workspace;
     setStarting(true);
     setError("");
     setItems([]);
     setSessionId("");
     try {
       const r = await invoke<{ session_id: string; models: string[] }>("agent_start", {
-        workspace,
+        workspace: wsPath,
         model,
         resume: resume ?? null,
       });
       setSessionId(r.session_id);
       if (r.models?.length) setModels(r.models);
-      refreshSessions(workspace);
-      invoke<string[]>("list_workspace_files", { workspace })
+      refreshSessions(wsPath);
+      invoke<string[]>("list_workspace_files", { workspace: wsPath })
         .then(setFileList)
         .catch(() => {});
       refreshGit();
@@ -1197,7 +1217,7 @@ function App() {
       {showGit && (
         <div className="modal-mask" onClick={() => setShowGit(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">⑂ {t.git}</div>
+            <div className="modal-title panel-title"><IconGitBranch size={16} /> {t.git}</div>
             {gitInfo?.isRepo === false || !gitInfo ? (
               <div className="modal-body">{t.gitNotRepo}</div>
             ) : (
@@ -1455,7 +1475,7 @@ function App() {
 
       {planSteps.length > 0 && (
         <div className="plan-panel">
-          <div className="plan-head">📋 {t.planTitle}</div>
+          <div className="plan-head"><IconClipboard size={14} /> {t.planTitle}</div>
           {planSteps.map((p, i) => (
             <div key={i} className={`plan-step ${p.status ?? ""}`}>
               <span className="plan-mark">
@@ -1549,7 +1569,7 @@ function App() {
       {showTerminal && (
         <div className="terminal-panel">
           <div className="terminal-head">
-            <span>▸ {lang === "zh" ? "终端" : "Terminal"}</span>
+            <span className="panel-title"><IconTerminal size={14} /> {lang === "zh" ? "终端" : "Terminal"}</span>
             <div>
               <button className="ghost small" title={lang === "zh" ? "清空" : "Clear"} onClick={() => setTerminalLines([])}>
                 🧹
@@ -1565,27 +1585,14 @@ function App() {
         </div>
       )}
 
-      <div className="workspace-bar">
-        <button
-          className="ws-chip"
-          onClick={pickFolder}
-          disabled={!!sessionId}
-          title={workspace}
-        >
-          <IconFolder size={14} />
-          <span className="ws-name">{workspace.split(/[\\/]/).filter(Boolean).pop() || t.workspacePlaceholder}</span>
-        </button>
-        {sessionId ? (
-          <span className="ws-status">
-            <span className="dot" /> {t.connected}
-          </span>
-        ) : (
-          <button className="ws-connect" onClick={() => startSession()} disabled={starting}>
-            {starting ? t.starting : t.openWorkspace}
-          </button>
-        )}
-      </div>
-
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: "none" }}
+        onChange={onPickImages}
+      />
       <footer className="composer">
         <div className="composer-input-wrap">
           {pastedImages.length > 0 && (
@@ -1653,28 +1660,90 @@ function App() {
                 send();
               }
             }}
-            placeholder={
-              sessionId ? t.composerPlaceholder + "  ·  @文件  /命令" : t.composerLocked
-            }
+            placeholder={sessionId ? t.composerPlaceholder : t.composerHint}
             disabled={!sessionId}
             rows={2}
           />
           <div className="composer-bar">
-            <select
-              className="composer-model"
-              value={model}
-              onChange={(e) => setModel(e.currentTarget.value)}
-              disabled={!!sessionId}
-              title={sessionId ? t.connected : ""}
-            >
-              {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
-                (m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ),
+            <div className="composer-left">
+              <div className="plus-wrap">
+                <button
+                  className="icon-btn plus-btn"
+                  title={t.addMenu}
+                  onClick={() => setPlusMenu((v) => !v)}
+                >
+                  <IconPlus size={18} />
+                </button>
+                {plusMenu && (
+                  <>
+                    <div className="plus-backdrop" onClick={() => setPlusMenu(false)} />
+                    <div className="plus-menu">
+                      <button className="plus-item" onClick={pickFolderAndConnect}>
+                        <IconFolder size={15} /> {t.menuOpenFolder}
+                      </button>
+                      <button
+                        className="plus-item"
+                        disabled={!sessionId}
+                        onClick={() => {
+                          setPlusMenu(false);
+                          fileInputRef.current?.click();
+                        }}
+                      >
+                        <IconFile size={15} /> {t.menuAddImage}
+                      </button>
+                      <button
+                        className="plus-item"
+                        disabled={!sessionId}
+                        onClick={() => {
+                          setPlusMenu(false);
+                          setInput("/");
+                          onComposerChange("/");
+                          taRef.current?.focus();
+                        }}
+                      >
+                        <IconClipboard size={15} /> {t.menuSlash}
+                      </button>
+                      <button
+                        className="plus-item"
+                        onClick={() => {
+                          setPlusMenu(false);
+                          refreshMcpConfig();
+                          setSettingsTab("mcp");
+                          setShowSettings(true);
+                        }}
+                      >
+                        <IconGitBranch size={15} /> {t.menuMcp}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              {sessionId ? (
+                <span className="ws-inline" title={workspace}>
+                  <span className="dot" />
+                  {workspace.split(/[\\/]/).filter(Boolean).pop()}
+                </span>
+              ) : (
+                <button className="ws-inline connect" onClick={pickFolderAndConnect} disabled={starting}>
+                  <IconFolder size={13} />
+                  {starting ? t.starting : t.openWorkspace}
+                </button>
               )}
-            </select>
+              <select
+                className="composer-model"
+                value={model}
+                onChange={(e) => setModel(e.currentTarget.value)}
+                disabled={!!sessionId}
+              >
+                {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
+                  (m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ),
+                )}
+              </select>
+            </div>
             <div className="composer-actions">
               {sessionId && (
                 <button

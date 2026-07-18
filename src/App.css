@@ -20,11 +20,13 @@
   --warn: #d0a45f;
   --radius: 12px;
 
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
-    "Microsoft YaHei", system-ui, sans-serif;
+  font-family: ui-sans-serif, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+    "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--text);
   background-color: var(--bg0);
   font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* 中性浅色主题 */
@@ -390,6 +392,15 @@ button.ghost.small {
   font-weight: 700;
   color: var(--accent);
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .plan-step {
@@ -542,13 +553,20 @@ button.ghost.small {
   margin-right: 4px;
 }
 
+/* 单行会话（对标 Claude Code——只显示标题，元信息 hover 才现）*/
 .session-meta {
-  font-size: 11.5px;
+  display: none;
+  font-size: 11px;
   color: var(--faint);
   margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-item:hover .session-meta,
+.session-item.active .session-meta {
+  display: block;
 }
 
 .sidebar-foot {
@@ -1380,11 +1398,6 @@ button.ghost.small {
 
 /* ── @ / slash 弹窗 ───────────────────────────────── */
 
-.composer-input-wrap {
-  position: relative;
-  flex: 1;
-  display: flex;
-}
 
 .mention-popup {
   position: absolute;
@@ -1433,59 +1446,94 @@ button.ghost.small {
 
 /* ── 输入区 ───────────────────────────────────────── */
 
-/* 工作区选择器：移到输入框上方（对标 Claude Code / Codex）*/
-.workspace-bar {
+/* 输入区左下角「+」菜单 + 工作区（对标 Claude Code）*/
+.composer-left {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 12% 6px;
-  padding: 0 2px;
+  gap: 4px;
+  min-width: 0;
+  margin-right: auto;
 }
 
-.ws-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg2);
-  border: 1px solid var(--border-soft);
+.plus-wrap {
+  position: relative;
+}
+
+.plus-btn {
   color: var(--muted);
-  border-radius: 8px;
-  padding: 5px 11px;
-  font-size: 12.5px;
-  max-width: 320px;
 }
 
-.ws-chip:hover:not(:disabled) {
+.plus-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.plus-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 41;
+  min-width: 210px;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+}
+
+.plus-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
   color: var(--text);
-  border-color: var(--border);
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.plus-item:hover:not(:disabled) {
+  background: var(--bg2);
   opacity: 1;
 }
 
-.ws-name {
+.plus-item:disabled {
+  color: var(--faint);
+  background: transparent;
+}
+
+.ws-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ws-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
+.ws-inline.connect:hover:not(:disabled) {
+  background: var(--bg2);
+  color: var(--text);
 }
 
-.ws-status .dot {
+.ws-inline .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--ok);
-}
-
-.ws-connect {
-  padding: 5px 14px;
-  font-size: 12.5px;
-  border-radius: 8px;
+  flex-shrink: 0;
 }
 
 /* 输入区：对标 Claude/ChatGPT —— 圆角容器，底部一行放模型选择+操作 */
