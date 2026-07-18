@@ -19,6 +19,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// Windows process flag: run a child process without allocating a console.
+/// Keeps helper commands (git) from blinking black boxes over the GUI.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use agent_client_protocol as acp;
 use xai_acp_lib::{AcpAgentTx, AcpClientMessage, acp_send};
 use xai_grok_pager::acp::spawn::spawn_grok_shell;
@@ -1055,10 +1060,17 @@ pub async fn agent_rewind(
 #[tauri::command]
 pub async fn git_status(workspace: String) -> Result<serde_json::Value, String> {
     let run = |args: &[&str]| -> Option<String> {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&workspace)
-            .output()
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args).current_dir(&workspace);
+        // Windows: without CREATE_NO_WINDOW every git call flashes a console
+        // window. git_status runs on each session start (i.e. every launch),
+        // so this would blink three black boxes at the user each time.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
