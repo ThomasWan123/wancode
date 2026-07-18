@@ -343,6 +343,10 @@ function App() {
   const [subagents, setSubagents] = useState<any[]>([]);
   const [showTasks, setShowTasks] = useState(false);
   const [mcpLive, setMcpLive] = useState<any[]>([]);
+  const [knownWorkspaces, setKnownWorkspaces] = useState<
+    { path: string; sessions: number; updatedAt: string }[]
+  >([]);
+  const [wsMenu, setWsMenu] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
@@ -460,6 +464,16 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSettings, settingsTab, sessionId]);
+
+  // 有过会话历史的工作区（引擎按 cwd 分组），用于跨项目切换。
+  async function refreshWorkspaces() {
+    if (!sessionIdRef.current) return;
+    try {
+      setKnownWorkspaces(await invoke("workspace_list"));
+    } catch {
+      /* 拿不到就只保留"浏览文件夹" */
+    }
+  }
 
   // MCP 实时状态。fresh=true 绕过缓存（OAuth 授权/断开之后必须这样拉）。
   async function refreshMcpLive(fresh = false) {
@@ -2226,11 +2240,52 @@ function App() {
           </div>
           </>
           )}
-          {/* 底部工作区状态行（对应 Claude Code 左栏底部的账号行） */}
+          {/* 底部工作区行 —— 点击可跨项目切换（对应 Claude Code 的跨项目 Recents） */}
           <div className="side-foot">
+            {wsMenu && (
+              <>
+                <div className="plus-backdrop" onClick={() => setWsMenu(false)} />
+                <div className="ws-menu">
+                  <div className="mode-menu-head">{t.wsSwitch}</div>
+                  {knownWorkspaces
+                    .filter((w) => w.path !== workspace)
+                    .slice(0, 8)
+                    .map((w) => (
+                      <button
+                        key={w.path}
+                        className="ws-menu-item"
+                        title={w.path}
+                        onClick={() => {
+                          setWsMenu(false);
+                          setWorkspace(w.path);
+                          localStorage.setItem("wancode-workspace", w.path);
+                          refreshSessions(w.path);
+                          startSession(undefined, w.path);
+                        }}
+                      >
+                        <IconFolderClosed size={14} />
+                        <span className="ws-menu-name">
+                          {w.path.split(/[\\/]/).filter(Boolean).pop()}
+                        </span>
+                        <span className="ws-menu-count">{w.sessions}</span>
+                      </button>
+                    ))}
+                  <button className="ws-menu-item" onClick={pickFolderAndConnect}>
+                    <IconFolder size={14} /> <span className="ws-menu-name">{t.wsBrowse}</span>
+                  </button>
+                </div>
+              </>
+            )}
             <button
               className="side-foot-ws"
-              onClick={pickFolderAndConnect}
+              onClick={() => {
+                if (!workspace) {
+                  pickFolderAndConnect();
+                  return;
+                }
+                refreshWorkspaces();
+                setWsMenu((v) => !v);
+              }}
               disabled={starting}
               title={workspace || t.sugOpenFolder}
             >
@@ -2238,6 +2293,7 @@ function App() {
               <span className="side-foot-name">
                 {workspace ? workspace.split(/[\\/]/).filter(Boolean).pop() : t.sugOpenFolder}
               </span>
+              {workspace && <IconChevron size={12} />}
             </button>
             <div className="side-foot-meta">
               {/* gitInfo === null 表示"还没取到/取失败"，不能当成"不是仓库" */}

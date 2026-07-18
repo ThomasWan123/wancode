@@ -2335,3 +2335,42 @@ button.ghost.small {
 }
 .mcp-tool:hover:not(:disabled) { background: var(--bg3); color: var(--text); opacity: 1; }
 .mcp-tool.off { opacity: 0.45; text-decoration: line-through; }
+
+/* ── 工作区切换菜单 ───────────────────────────────────── */
+.ws-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  z-index: 41;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+}
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ws-menu-item:hover:not(:disabled) { background: var(--bg2); opacity: 1; }
+.ws-menu-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-menu-count {
+  font-size: 11px;
+  color: var(--faint);
+  background: var(--bg2);
+  border-radius: 999px;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+.side-foot { position: relative; }

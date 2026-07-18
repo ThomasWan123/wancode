@@ -1125,6 +1125,56 @@ pub async fn agent_compact(
     .await
 }
 
+/// Workspaces that have session history, newest-active first.
+/// 引擎按 cwd 分组返回全部会话摘要；我们只需要目录清单和各自的会话数。
+#[tauri::command]
+pub async fn workspace_list(state: State<'_, AgentState>) -> Result<Vec<serde_json::Value>, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/session_summaries/workspace_list",
+        serde_json::json!({}),
+    )
+    .await?;
+    let map = v
+        .get("result")
+        .and_then(|r| r.get("all_sessions"))
+        .or_else(|| v.get("all_sessions"))
+        .and_then(|m| m.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out: Vec<serde_json::Value> = map
+        .into_iter()
+        .map(|(path, sessions)| {
+            let arr = sessions.as_array().cloned().unwrap_or_default();
+            // 取该工作区最近一次活动时间用于排序
+            let latest = arr
+                .iter()
+                .filter_map(|s| {
+                    s.get("info")
+                        .and_then(|i| i.get("updated_at"))
+                        .or_else(|| s.get("updated_at"))
+                        .and_then(|u| u.as_str())
+                        .map(String::from)
+                })
+                .max()
+                .unwrap_or_default();
+            serde_json::json!({
+                "path": path,
+                "sessions": arr.len(),
+                "updatedAt": latest,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.get("updatedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(a.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    Ok(out)
+}
+
 // ── MCP 实时管理 ────────────────────────────────────────────────
 //
 // 以前只能改 config.toml 再重开会话。引擎支持按服务器/按工具启停、
