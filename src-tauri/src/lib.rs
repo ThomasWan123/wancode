@@ -56,6 +56,8 @@ pub fn run() {
             agent::agent_plan_respond,
             agent::agent_cancel,
             agent::agent_set_mode,
+            agent::agent_set_model,
+            agent::default_workspace,
             agent::agent_list_sessions,
             agent::agent_list_mcp,
             agent::agent_session_info,

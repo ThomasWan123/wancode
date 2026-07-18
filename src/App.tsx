@@ -134,7 +134,7 @@ type PermissionRequest = {
 // ── 组件 ─────────────────────────────────────────────────────────
 
 function App() {
-  const [workspace, setWorkspace] = useState("D:\\WANCode\\scratch-agent-test");
+  const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
   const [sessionId, setSessionId] = useState("");
@@ -233,12 +233,35 @@ function App() {
   const [planMode, setPlanMode] = useState(false);
   const [plusMenu, setPlusMenu] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const didAutoStart = useRef(false);
+  const sessionIdRef = useRef("");
+
+  // Launch straight into a session (last-used folder, else home) so you can
+  // type immediately — no forced folder pick, like Claude Code / Codex in cwd.
+  useEffect(() => {
+    if (didAutoStart.current) return;
+    didAutoStart.current = true;
+    (async () => {
+      let ws = workspace;
+      if (!ws) {
+        try {
+          ws = await invoke<string>("default_workspace");
+        } catch {
+          ws = "";
+        }
+        if (ws) setWorkspace(ws);
+      }
+      if (ws) startSession(undefined, ws);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function pickFolderAndConnect() {
     setPlusMenu(false);
     const dir = await openDialog({ directory: true, title: t.pickFolderTitle });
     if (typeof dir === "string" && dir) {
       setWorkspace(dir);
+      localStorage.setItem("wancode-workspace", dir);
       refreshSessions(dir);
       // Auto-open the workspace (start the session) — one action, Claude-style.
       startSession(undefined, dir);
@@ -594,12 +617,13 @@ function App() {
     });
   }
 
-  async function startSession(resume?: string, ws?: string) {
+  async function startSession(resume?: string, ws?: string): Promise<string> {
     const wsPath = ws ?? workspace;
     setStarting(true);
     setError("");
     setItems([]);
     setSessionId("");
+    sessionIdRef.current = "";
     try {
       const r = await invoke<{ session_id: string; models: string[] }>("agent_start", {
         workspace: wsPath,
@@ -607,14 +631,17 @@ function App() {
         resume: resume ?? null,
       });
       setSessionId(r.session_id);
+      sessionIdRef.current = r.session_id;
       if (r.models?.length) setModels(r.models);
       refreshSessions(wsPath);
       invoke<string[]>("list_workspace_files", { workspace: wsPath })
         .then(setFileList)
         .catch(() => {});
       refreshGit();
+      return r.session_id;
     } catch (e) {
       setError(String(e));
+      return "";
     } finally {
       setStarting(false);
     }
@@ -622,7 +649,7 @@ function App() {
 
   function sendText(text: string, imgs: { data: string; mime: string; preview: string }[] = []) {
     const t = text.trim();
-    if ((!t && imgs.length === 0) || busy || !sessionId) return;
+    if ((!t && imgs.length === 0) || busy || !sessionIdRef.current) return;
     setError("");
     lastSentRef.current = t;
     setPlanSteps([]);
@@ -638,10 +665,25 @@ function App() {
     });
   }
 
-  function send() {
+  async function send() {
     if (popup) return;
     const text = input.trim();
     if (!text && pastedImages.length === 0) return;
+    // Typed before the session was ready — spin one up first, then send.
+    if (!sessionId) {
+      if (!starting) {
+        const ws = workspace || (await invoke<string>("default_workspace").catch(() => ""));
+        if (ws) {
+          if (ws !== workspace) setWorkspace(ws);
+          const sid = await startSession(undefined, ws);
+          if (!sid) return; // start failed; keep the text so the user can retry
+        } else {
+          return;
+        }
+      } else {
+        return; // a start is already in flight; user can press Enter again
+      }
+    }
     const imgs = pastedImages;
     setInput("");
     setPastedImages([]);
@@ -708,6 +750,7 @@ function App() {
       if ("action" in c && c.action) {
         if (c.action === "clear") {
           setSessionId("");
+          sessionIdRef.current = "";
           setItems([]);
         } else if (c.action === "rewind") {
           openRewind();
@@ -1350,6 +1393,7 @@ function App() {
                 title={t.newSession}
                 onClick={() => {
                   setSessionId("");
+                  sessionIdRef.current = "";
                   setItems([]);
                 }}
               >
@@ -1425,6 +1469,7 @@ function App() {
                           });
                           if (s.session_id === sessionId) {
                             setSessionId("");
+                            sessionIdRef.current = "";
                             setItems([]);
                           }
                           refreshSessions(workspace);
@@ -1660,8 +1705,7 @@ function App() {
                 send();
               }
             }}
-            placeholder={sessionId ? t.composerPlaceholder : t.composerHint}
-            disabled={!sessionId}
+            placeholder={sessionId ? t.composerPlaceholder : starting ? t.starting : t.composerHint}
             rows={2}
           />
           <div className="composer-bar">
@@ -1732,8 +1776,13 @@ function App() {
               <select
                 className="composer-model"
                 value={model}
-                onChange={(e) => setModel(e.currentTarget.value)}
-                disabled={!!sessionId}
+                title={t.modelSwitchHint}
+                onChange={(e) => {
+                  const m = e.currentTarget.value;
+                  setModel(m);
+                  // Live switch — no restart, keeps conversation context.
+                  if (sessionId) invoke("agent_set_model", { model: m }).catch((err) => setError(String(err)));
+                }}
               >
                 {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
                   (m) => (
@@ -1766,7 +1815,7 @@ function App() {
                 <button
                   className="send-btn"
                   onClick={send}
-                  disabled={!sessionId || (!input.trim() && pastedImages.length === 0)}
+                  disabled={starting || (!input.trim() && pastedImages.length === 0)}
                   title={t.send}
                 >
                   <IconArrowUp size={16} />

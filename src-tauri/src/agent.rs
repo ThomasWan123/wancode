@@ -1193,6 +1193,36 @@ pub async fn agent_set_mode(state: State<'_, AgentState>, mode: String) -> Resul
     Ok(())
 }
 
+/// Switch the active model live, without restarting the session or losing
+/// context (ACP `session/setModel`). Mirrors Claude Code's `/model`.
+#[tauri::command]
+pub async fn agent_set_model(state: State<'_, AgentState>, model: String) -> Result<(), String> {
+    let (acp_tx, session_id) = {
+        let guard = state.handle.lock().await;
+        let h = guard.as_ref().ok_or("会话未启动")?;
+        (h.acp_tx.clone(), h.session_id.clone())
+    };
+    let _: acp::SetSessionModelResponse = acp_send(
+        acp::SetSessionModelRequest::new(
+            session_id,
+            acp::ModelId::new(std::sync::Arc::from(model.as_str())),
+        ),
+        &acp_tx,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Best-effort default working directory when the user hasn't picked one yet,
+/// so the composer is usable immediately (Claude Code / Codex launch in cwd).
+#[tauri::command]
+pub fn default_workspace() -> String {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
 /// Interrupt the current turn.
 #[tauri::command]
 pub async fn agent_cancel(state: State<'_, AgentState>) -> Result<(), String> {
