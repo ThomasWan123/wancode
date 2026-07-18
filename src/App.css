@@ -1112,6 +1112,84 @@ button.ghost.small {
   z-index: 2;
 }
 
+/* ── ChatGPT 式两栏设置 ─────────────────────────────── */
+
+.settings-modal {
+  width: 780px;
+  max-width: 92vw;
+  height: 78vh;
+  max-height: 78vh;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.settings-nav {
+  width: 190px;
+  flex-shrink: 0;
+  background: var(--bg0);
+  border-right: 1px solid var(--border-soft);
+  padding: 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.settings-nav-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  padding: 4px 10px 12px;
+}
+
+.settings-nav-item {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.settings-nav-item:hover:not(.active) {
+  background: var(--bg2);
+  color: var(--text);
+  opacity: 1;
+}
+
+.settings-nav-item.active {
+  background: var(--bg2);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 26px;
+  min-width: 0;
+}
+
+.settings-footer {
+  position: sticky;
+  bottom: -24px;
+  background: var(--bg1);
+  margin: 12px -26px -24px;
+  padding: 14px 26px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.about-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .modal-title {
   font-size: 17px;
   font-weight: 700;

@@ -142,6 +142,7 @@ function App() {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [mcpServers, setMcpServers] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "mcp" | "skills" | "hooks" | "about">("models");
   const [ctx, setCtx] = useState<{ used: number; total: number; pct: number } | null>(null);
   const [rewindPoints, setRewindPoints] = useState<any[] | null>(null);
   const [rewindMode, setRewindMode] = useState("all");
@@ -842,8 +843,28 @@ function App() {
 
       {showSettings && (
         <div className="modal-mask" onClick={() => setShowSettings(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{t.settingsTitle}</div>
+          <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+            <nav className="settings-nav">
+              <div className="settings-nav-title">{t.settingsTitle}</div>
+              {([
+                ["general", t.navGeneral],
+                ["models", t.navModels],
+                ["mcp", t.navMcp],
+                ["skills", t.navSkills],
+                ["hooks", t.navHooks],
+                ["about", t.navAbout],
+              ] as const).map(([id, label]) => (
+                <button
+                  key={id}
+                  className={`settings-nav-item ${settingsTab === id ? "active" : ""}`}
+                  onClick={() => setSettingsTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+            <div className="settings-content">
+            {settingsTab === "general" && (
             <div className="modal-section">
               <div className="modal-label">{t.language}</div>
               <select
@@ -857,7 +878,14 @@ function App() {
                 <option value="zh">中文</option>
                 <option value="en">English</option>
               </select>
+              <div className="modal-label" style={{ marginTop: 16 }}>{t.themeLabel}</div>
+              <select value={theme} onChange={(e) => setTheme(e.currentTarget.value as "dark" | "light")}>
+                <option value="dark">{t.themeDark}</option>
+                <option value="light">{t.themeLight}</option>
+              </select>
             </div>
+            )}
+            {settingsTab === "models" && (
             <div className="modal-section">
               <div className="modal-label">{t.modelsSection}</div>
               <div className="mcp-list">
@@ -951,6 +979,8 @@ function App() {
               </div>
               <div className="modal-hint">{t.modelsHint}</div>
             </div>
+            )}
+            {settingsTab === "mcp" && (
             <div className="modal-section">
               <div className="modal-label">{t.mcpSection}</div>
               <div className="mcp-list">
@@ -1019,6 +1049,8 @@ function App() {
                 </button>
               </div>
             </div>
+            )}
+            {settingsTab === "skills" && (
             <div className="modal-section">
               <div className="modal-label">{t.skillsSection}</div>
               <div className="mcp-list">
@@ -1069,6 +1101,8 @@ function App() {
               </div>
               <div className="modal-hint">{t.skillsHint}</div>
             </div>
+            )}
+            {settingsTab === "hooks" && (
             <div className="modal-section">
               <div className="modal-label">{t.hooksSection}</div>
               <div className="mcp-list">
@@ -1117,6 +1151,9 @@ function App() {
               </div>
               <div className="modal-hint">{t.hooksHint}</div>
             </div>
+            )}
+            {settingsTab === "about" && (
+            <>
             <div className="modal-section">
               <div className="modal-label">{t.projectMemory}</div>
               <div className="modal-body">{t.projectMemoryHelp}</div>
@@ -1125,15 +1162,18 @@ function App() {
               <div className="modal-label">{t.configFile}</div>
               <div className="modal-body mono">{t.configHelp}</div>
             </div>
-            <div className="modal-footer">
-              <span className="version-tag">
-                WanCode {version ? `v${version}` : ""}
-                <a className="update-link" onClick={runUpdate}>
-                  {t.checkUpdate}
-                </a>
+            <div className="modal-section">
+              <div className="modal-label">WanCode {version ? `v${version}` : ""}</div>
+              <div className="about-actions">
+                <button className="ghost" onClick={runUpdate}>{t.checkUpdate}</button>
                 {updateMsg && <span className="update-msg">{updateMsg}</span>}
-              </span>
+              </div>
+            </div>
+            </>
+            )}
+            <div className="settings-footer">
               <button onClick={() => setShowSettings(false)}>{t.close}</button>
+            </div>
             </div>
           </div>
         </div>
