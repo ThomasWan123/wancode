@@ -11,7 +11,10 @@
 #   （空密码走 CLI 参数，不受此坑影响）在 build 后补签，稳定可靠。
 param(
   [Parameter(Mandatory = $true)][string]$Version,
-  [string]$Repo = "ThomasWan123/wancode"
+  [string]$Repo = "ThomasWan123/wancode",
+  # 国内直连 GitHub 资产 CDN（release-assets.githubusercontent.com）概率性失败，
+  # 更新器下载走镜像前缀转发（原样转发，签名不变仍有效）。置 "" 可关。
+  [string]$Mirror = "https://gh-proxy.com/"
 )
 $ErrorActionPreference = "Stop"
 $key = "$env:USERPROFILE\.tauri\wancode_updater.key"
@@ -50,7 +53,7 @@ $latest = @{
   platforms = @{
     "windows-x86_64" = @{
       signature = $sig.Trim()
-      url       = "https://github.com/$Repo/releases/download/v$Version/wancode_${Version}_x64-setup.exe"
+      url       = "$Mirror`https://github.com/$Repo/releases/download/v$Version/wancode_${Version}_x64-setup.exe"
     }
   }
 } | ConvertTo-Json -Depth 6
