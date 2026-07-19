@@ -1,20 +1,36 @@
 # WanCode 对标 Claude Code / Codex —— 差距分析与开发路线图
 
-> 基线：WanCode v0.11.0（2026-07-19，Tier 1–3 全部完成后修订）
-> 上一版基线：v0.9.0（2026-07-18）
-> 方法：读 WanCode 源码统计已暴露能力 + 扫 grok-build 引擎的扩展方法全集 + 对照 Claude Code / Codex 已知功能集。
+> 基线：WanCode v0.11.0 + 全量方法分类审计（2026-07-19，第二阶段启动版）
+> 方法：读 WanCode 源码统计已暴露能力 + **对引擎全部 251 个 `x.ai/*` 字符串逐一分类**（dispatch 表核对、方向判定、门控检查）+ 对照 Claude Code / Codex 已知功能集。
 
-## 0. 引擎覆盖率：这一轮的主线
+## 0. 引擎覆盖率：换用真分母
 
-| 指标 | v0.9.0 | v0.11.0 |
+此前的覆盖率用的是字符串 grep 出的原始计数（234→251），**那个分母是虚的**：里面混着 50 个假字符串（测试夹具、dispatch 前缀、`_meta` 能力键）、15 个 leader/内部管线方法、7 个 xAI 门控方法。全量分类审计后的诚实口径：
+
+### 251 个字符串的去向
+
+| 类别 | 数量 | 说明 |
 |---|---|---|
-| WanCode 暴露的 Tauri 命令 | 34 | **70** |
-| 实际调用的 `x.ai/*` 扩展方法 | 7 | **43** |
-| 引擎能力覆盖率（/234） | 3.0% | **18.4%** |
+| **REQ** — 真实现的客户端请求 | 127 | 90 未接 + 37 已接 |
+| **NOTIF-OUT** — 引擎→客户端通知 | 34 | 监听即覆盖，已监听 9 |
+| **NOTIF-IN** — 客户端→引擎通知 | 14 | 11 未接 + 3 已接 |
+| **反向请求** — 引擎→客户端 ExtMethod | 3 | ask_user_question / exit_plan_mode / folder_trust，已全接 |
+| ⛔ GATED — xAI 登录态/云后端门控 | 7 | billing、cloud/env/*、cloud/terminate、share_session |
+| ⛔ INTERNAL — leader/debug/内部重载 | 15 | 含 mcp/call、mcp/sdk*（是引擎→客户端的反向桥，当请求发= method_not_found） |
+| ⛔ FAKE — 测试夹具/前缀/`_meta` 键 | 51 | `x.ai/foo`、`x.ai/test`、`bashOutputNoColor`、`x.ai/folderTrust` 等 |
 
-上一版的判断是「最大的机会不是写新功能，而是把引擎里已实现、界面没接出来的能力暴露出去」。这一轮验证了该判断：**16 项交付里没有一项是从零实现 Agent 能力，全部是接线**。真 Git 面板、后台任务、PTY 终端、worktree —— 引擎侧早已完整，缺的只是客户端。
+### 覆盖率（真分母 = 127 + 34 + 14 + 3 = **178**）
 
-但这一轮也修正了该判断的一个盲点：**「引擎里有这个方法」不等于「这个能力可用」**。见第 3 节被砍掉的两项。
+| 指标 | 数值 |
+|---|---|
+| 当前已覆盖（调用/监听/应答） | **52** |
+| **当前覆盖率** | **29.2%** |
+| 60% 门槛 | 107 个（还需 +55） |
+| 第二阶段目标（接完全部值得接的） | **约 127 个 ≈ 71%** |
+
+覆盖不到 100% 是**有意的**：REQ 里有约 20 个属于 xAI 遥测/账号管理（feedback、btw、rollout/survey、auth/*、privacy）或已证实的假能力（review 三件套），接上去违反 §3 的检查清单。
+
+上一版的判断「最大的机会是接线不是造轮子」在 Tier 1–3 得到验证：16 项交付全部是接线。这一版把该判断推到底：**第二阶段就是把剩余 126 个可接项里值得接的约 75 个全部接完**。
 
 ---
 
@@ -168,33 +184,82 @@
 
 ---
 
-## 6. 下一步方向
+## 6. 第二阶段路线图：覆盖率 29.2% → 60%+（目标 ~71%）
 
-Tier 1–3 已全部完成，剩余差距不再是「接线」，性质变了。按建议顺序：
+v0.11.0 已发布。第二阶段按功能域分 10 批接线，每批独立可测、独立提交。排序原则：用户可感知的在前，纯覆盖性的在后。
 
-### A. 先发版并收真实反馈（最高优先）
-16 项功能全部只经过我方测试，没有真实用户数据。继续堆功能之前应先发 v0.11.0。
+### P2.1 会话流控补全（7 项）★ 体感最强
+`interject`（**回合中途插话引导**——Claude Code 的 steering，目前 WanCode 只能排队或打断）、`queue/edit`、`queue/reorder`、`queue/interject`、`toggle_plan_mode`（通知路径的模式切换）、`permissions/reset`、`yolo_mode_changed`（bypass 模式同步给引擎）。
+验证：回合进行中插话，引擎在当前回合内响应；队列可编辑重排。
 
-### B. 打磨已有的，而不是再加新的
-1. **推理强度选择** —— 两家都有，WanCode 缺，且对 GLM/DeepSeek 的 thinking 模式有实际意义。
-2. **键盘快捷键** —— Esc 中断、Ctrl-B 后台。低成本，高频。
-3. **Skills 启停**（`skills/toggle`）—— 现在只能增删改，不能临时停用。
-4. **记忆编辑/刷新**（`memory/flush`、`memory/rewrite`）—— 引擎已有，界面未接。
+### P2.2 Skills 全套引擎化（6 项）
+`skills/list|add|remove|toggle|config|reset`。现在的 Skills 管理是自己读写 `~/.grok/skills/` 文件——换成引擎 API，顺带获得**启停**能力（路线图老 B3 项）。
+验证：toggle 后引擎注入的系统提示确实少了那个技能。
 
-### C. 需要先验证需求，不要直接做
-- **Home 统计仪表盘** —— 观赏性大于实用性，除非用户主动要。
-- **worktree 三方合并 UI** —— 目前冲突时如实列出让用户手工解决。是否值得做完整合并器，取决于真实冲突频率。
-- **模糊文件搜索** —— 等真的撞到 4000 文件上限再说。
+### P2.3 MCP 配置引擎化（4 项）
+`mcp/upsert|delete|read_resource`、`session/update_mcp_servers`。摆脱「自己改 TOML + 重开会话」，配置改动即时生效。
+验证：upsert 后 `mcp/list` 立刻可见，无需重开会话。
 
-### D. 结构性的，成本高
-- **沙箱执行** —— Windows 侧无 seatbelt/landlock 对应物。若要做，方向是 Job Object + 受限令牌，是独立项目量级。
+### P2.4 终端补全（7 项）
+`terminal/pty/load`（**断线重连整段回放**——切会话回来终端还在）、`terminal/list|output|create|background|release|wait_for_exit`。
+验证：切走再切回，PTY 内容完整回放（引擎 256KiB 环形缓冲）。
+
+### P2.5 Git 补全（8 项）
+`git/stash`、`git/info`、`git/current_commit`、`git/files`、`git/checkout_commit`、`git/checkout_session_head`、`git/git_repo_root`、`git/serialize_changes`。
+验证：一次性仓库实测 stash/恢复（沿用 wttest 模式，不碰真项目）。
+
+### P2.6 模糊文件搜索（4 项 + 1 通知）
+`search/fuzzy/open|change|close` + `search/fuzzy/status` 通知。此前因「复杂度不匹配」推迟；现在覆盖率目标使流式协议值得做，@ 引用直接受益（去掉 4000 文件上限）。
+验证：输入变化时结果流式更新，close 后通知停止。
+
+### P2.7 fs/* 引擎化（5 项）
+`fs/read_file|write_file|list|exists|delete_file`。文件树/预览改走引擎（当前是自己的 Tauri 命令），统一 .gitignore 语义。
+验证：与现有文件树行为一致后替换。
+
+### P2.8 会话管理补全（9 项）
+`session/list|close|load_history|repair`、`session/updates`、`session_summaries/session_list|workspace_list_recent`、`workspaces/list`、`sessions/list`。
+验证：close 后引擎侧会话资源释放；load_history 与现有侧栏数据一致。
+
+### P2.9 记忆 + 杂项状态（7 项）
+`memory/flush|rewrite`（老 B4 项）、`subagent/get`（子 Agent 详情钻取）、`recap`、`suggest`、`suggestPrompt`、`hooks/list`（hooks 面板改读引擎注册表）。
+验证：rewrite 后 GROK.md 内容变化；hooks/list 与配置文件一致。
+
+### P2.10 通知监听补全（约 15 项）+ worktree 深化（约 8 项）
+监听：`models/update`、`config_changed`、`git_head_changed`、`mcp/init_progress`、`mcp/server_status`、`mcp_initialized`、`sessions/changed`、`session/prompt_complete`、`session/interjection`、`monitor_event`、`announcements/update`、`follow_ups`、`settings/update`、`search/content/status`、`hooks/event`（反向 RPC）。
+worktree：`create`、`show`、`gc`、`db/stats`、`create_from_worktree(_sync)`、`worktree/status` 通知、`rehydrate`、`resolve_local_for_worktree_resume`。
+验证：抽样触发（改 config 文件看 config_changed 到达；外部 git commit 看 git_head_changed）。
+
+### 明确不接（约 20 个 REQ，理由入档）
+- `review`、`review/comment`、`review/comment/delete` —— 假能力（§3）
+- `feedback`、`btw`、`feedback/dismiss`、`rollout/survey`、`telemetry/*`×4 —— xAI 遥测汇
+- `auth/*`×6、`getApiKey`、`setApiKey`、`privacy/setCodingDataRetention` —— xAI 账号管理，本产品密钥走系统钥匙串
+- `bundle/*`×3、`pr/status`、`code/status` —— 依赖 xAI 侧基础设施/索引服务，价值存疑，留待验证
+- GATED 7 个、INTERNAL 15 个 —— 定义即排除
+
+### 完成后的账
+52 已覆盖 + P2.1~P2.10 约 75 项 ≈ **127/178 ≈ 71%**，其中 60% 门槛（107）预计在 P2.8 完成时越过。
+
+### 第二阶段之外（保持不变）
+- 推理强度选择、键盘快捷键 —— 打磨项，与接线并行安排
+- Home 统计仪表盘、worktree 三方合并 UI —— 先验证需求
+- 沙箱执行 —— Windows 侧独立项目量级
 
 ---
 
-## 附：本文事实来源
+## 附 A：本文事实来源
 
 - WanCode 命令清单：`src-tauri/src/lib.rs` 的 `invoke_handler`（70 条）
-- 实际调用的扩展方法：`grep -oE '"x\.ai/[A-Za-z0-9_/]+"' src-tauri/src/agent.rs | sort -u`（43 个）
-- 引擎扩展方法全集：`grep -rhoE '"x\.ai/[a-z_/]+"' grok-build/crates/codegen`（234 个）
+- 分子统计：agent.rs 的方法字符串（43，剔除 `x.ai/folderTrust` 能力键）+ App.tsx/PtyTerm.tsx 监听的通知（9）= 52
+- 引擎字符串全集：`grep -rhoE '"x\.ai/[A-Za-z0-9_/]+"' grok-build/crates/codegen | sort -u`（251 个）
 - §3、§4 的每一条均来自阅读引擎源码 + 实测验证，非推测。具体验证方式见对应 commit message。
 - Claude Code / Codex 功能集：基于公开文档与实际使用，标注 🟡 的项存在版本差异，落地前建议再确认。
+
+## 附 B：251 个字符串的分类审计（2026-07-19）
+
+逐一核对 dispatch 表（`acp_agent.rs` 的 ext_method/ext_notification 分支 + `extensions/` 各 handler）后的分类。**这个分母可复核——每个类别的判定依据都在引擎源码里，不是主观取舍。**
+
+- **FAKE（51）**：以 `/` 结尾的 dispatch 前缀 19 个（`x.ai/git/`、`x.ai/mcp/` 等）；`_meta` 能力键/元数据键 25 个（`bashOutputNoColor`、`hunkTracker`、`sessionConfig`、`x.ai/folderTrust`、`x.ai/tool` 等——它们随请求元数据传递，从不作为方法分发）；纯测试夹具 7 个（`x.ai/foo`、`x.ai/test`、`x.ai/queue/bogus`、`x.ai/child_thing` 等）。
+- **INTERNAL（15）**：`internal/*` 重载管线 7、leader 多客户端管线 3、`debug/*` 2、`mcp/call`/`mcp/sdk`/`mcp/sdk_call` 3——后三个看着像可调方法，实为**引擎→客户端**的 MCP 反向桥，当请求发直接 `method_not_found`。
+- **GATED（7）**：`billing`、`cloud/env/*`×4、`cloud/terminate`（全部 `require_xai_auth` + SandboxClient）、`share_session`（xAI auth + 服务端 `sharing_enabled` 默认 false）。
+- **REQ（127 = 90 未接 + 37 已接）**、**NOTIF-OUT（34）**、**NOTIF-IN（14）**、**反向 ExtMethod（3）**——构成真分母 178。
+- 特别标注：`hooks/event`、`hooks/run` 是引擎→客户端的反向 RPC（客户端要实现并应答），归入 NOTIF-OUT 侧计数。
