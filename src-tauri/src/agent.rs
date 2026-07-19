@@ -1440,6 +1440,387 @@ pub async fn recent_sessions(
     Ok(out)
 }
 
+/// Enveloped ext call: unwrap `{result, error}` — Err on engine error, else
+/// the inner result. 90% of the P2 surface is exactly this shape.
+async fn ext_ok(
+    state: &State<'_, AgentState>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(state, method, params).await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+// ── P2.3 MCP 配置引擎化 ────────────────────────────────────────────
+// upsert/delete 的字段是 snake_case（server_name）；config 由引擎侧
+// McpServerConfig flatten，直接把表单对象平铺进 params。
+
+#[tauri::command]
+pub async fn mcp_upsert(
+    state: State<'_, AgentState>,
+    server_name: String,
+    config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut params = config;
+    if !params.is_object() {
+        params = serde_json::json!({});
+    }
+    params["server_name"] = serde_json::json!(server_name);
+    ext_ok(&state, "x.ai/mcp/upsert", params).await
+}
+
+#[tauri::command]
+pub async fn mcp_delete(
+    state: State<'_, AgentState>,
+    server_name: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/mcp/delete", serde_json::json!({ "server_name": server_name })).await
+}
+
+#[tauri::command]
+pub async fn mcp_read_resource(
+    state: State<'_, AgentState>,
+    server: String,
+    uri: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/mcp/read_resource", serde_json::json!({ "server": server, "uri": uri }))
+        .await
+}
+
+#[tauri::command]
+pub async fn session_update_mcp_servers(
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/update_mcp_servers", serde_json::json!({})).await
+}
+
+// ── P2.4 终端补全 ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn terminal_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn terminal_output(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/output", serde_json::json!({ "terminalId": terminal_id })).await
+}
+
+#[tauri::command]
+pub async fn terminal_create(
+    state: State<'_, AgentState>,
+    command: String,
+    args: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(
+        &state,
+        "x.ai/terminal/create",
+        serde_json::json!({ "command": command, "args": args }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn terminal_background(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/background", serde_json::json!({ "terminalId": terminal_id }))
+        .await
+}
+
+#[tauri::command]
+pub async fn terminal_release(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/release", serde_json::json!({ "terminalId": terminal_id })).await
+}
+
+#[tauri::command]
+pub async fn terminal_wait_for_exit(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/wait_for_exit", serde_json::json!({ "terminalId": terminal_id }))
+        .await
+}
+
+/// Reattach to a PTY: replays the full ring buffer as one `isReplay` output
+/// notification, then returns {terminalId, rows, cols, exited, exitCode?}.
+#[tauri::command]
+pub async fn pty_load(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/terminal/pty/load", serde_json::json!({ "terminalId": terminal_id })).await
+}
+
+// ── P2.5 Git 补全 ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn git_stash(
+    state: State<'_, AgentState>,
+    message: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/stash", serde_json::json!({ "message": message })).await
+}
+
+#[tauri::command]
+pub async fn git_info(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/info", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_current_commit(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/current_commit", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_files(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/files", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_repo_root(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/git_repo_root", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_serialize_changes(
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/serialize_changes", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn git_checkout_commit(
+    state: State<'_, AgentState>,
+    commit: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/checkout_commit", serde_json::json!({ "commit": commit })).await
+}
+
+#[tauri::command]
+pub async fn git_checkout_session_head(
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/git/checkout_session_head", serde_json::json!({})).await
+}
+
+// ── P2.6 模糊文件搜索（有状态流式协议）────────────────────────────
+// open → searchId；change 只 ack；结果经 x.ai/search/fuzzy/status 通知
+// 异步到达（前端监听）；close 释放。
+
+#[tauri::command]
+pub async fn fuzzy_open(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/search/fuzzy/open", serde_json::json!({ "cwd": workspace })).await
+}
+
+#[tauri::command]
+pub async fn fuzzy_change(
+    state: State<'_, AgentState>,
+    search_id: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(
+        &state,
+        "x.ai/search/fuzzy/change",
+        serde_json::json!({ "searchId": search_id, "query": query, "limit": limit }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn fuzzy_close(
+    state: State<'_, AgentState>,
+    search_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/search/fuzzy/close", serde_json::json!({ "searchId": search_id })).await
+}
+
+// ── P2.7 fs/* 引擎化 ────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn fs_list(
+    state: State<'_, AgentState>,
+    path: String,
+    depth: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(
+        &state,
+        "x.ai/fs/list",
+        serde_json::json!({ "path": path, "depth": depth.unwrap_or(1) }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn fs_read(
+    state: State<'_, AgentState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/fs/read_file", serde_json::json!({ "path": path })).await
+}
+
+#[tauri::command]
+pub async fn fs_write(
+    state: State<'_, AgentState>,
+    path: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/fs/write_file", serde_json::json!({ "path": path, "content": content }))
+        .await
+}
+
+#[tauri::command]
+pub async fn fs_exists(
+    state: State<'_, AgentState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/fs/exists", serde_json::json!({ "path": path })).await
+}
+
+#[tauri::command]
+pub async fn fs_delete(
+    state: State<'_, AgentState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/fs/delete_file", serde_json::json!({ "path": path })).await
+}
+
+// ── P2.8 会话管理补全 ───────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn session_list_engine(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn session_close(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/close", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn session_load_history(
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/load_history", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn session_repair(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/repair", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn session_updates_fetch(
+    state: State<'_, AgentState>,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/session/updates", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn session_summaries_for_cwd(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(
+        &state,
+        "x.ai/session_summaries/session_list",
+        serde_json::json!({ "cwd": workspace }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn workspace_list_recent(
+    state: State<'_, AgentState>,
+    limit: usize,
+) -> Result<serde_json::Value, String> {
+    ext_ok(
+        &state,
+        "x.ai/session_summaries/workspace_list_recent",
+        serde_json::json!({ "limit": limit }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn workspaces_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/workspaces/list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn sessions_roster(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/sessions/list", serde_json::json!({})).await
+}
+
+// ── P2.9 记忆 + 杂项 ────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn memory_flush(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/memory/flush", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn memory_rewrite(
+    state: State<'_, AgentState>,
+    text: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/memory/rewrite", serde_json::json!({ "text": text })).await
+}
+
+#[tauri::command]
+pub async fn subagent_get(
+    state: State<'_, AgentState>,
+    subagent_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/subagent/get", serde_json::json!({ "subagentId": subagent_id })).await
+}
+
+#[tauri::command]
+pub async fn agent_recap(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/recap", serde_json::json!({ "auto": false })).await
+}
+
+#[tauri::command]
+pub async fn agent_suggest(
+    state: State<'_, AgentState>,
+    text: String,
+    cursor: usize,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    // suggest 是 raw 响应；ext_ok 对无信封响应会原样返回，兼容。
+    ext_ok(
+        &state,
+        "x.ai/suggest",
+        serde_json::json!({
+            "text": text, "cursor": cursor, "cwd": workspace,
+            "limit": 8, "generation": 0
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn hooks_engine_list(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/hooks/list", serde_json::json!({ "cwd": workspace })).await
+}
+
 // ── Git worktree 并行 Agent ────────────────────────────────────────
 //
 // 用法是：把当前会话在一个独立 worktree 里再开一份，两边各跑各的、互不

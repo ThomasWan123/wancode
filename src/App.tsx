@@ -322,6 +322,9 @@ function App() {
   const [wtMsg, setWtMsg] = useState<{ bad: boolean; text: string } | null>(null);
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
   const sentInterjectionsRef = useRef<Set<string>>(new Set());
+  // 模糊文件搜索：open 拿 searchId，结果经 x.ai/search/fuzzy/status 通知异步到达
+  const fuzzyRef = useRef<{ id: string | null; opening: boolean }>({ id: null, opening: false });
+  const [fuzzyHits, setFuzzyHits] = useState<{ path: string; isDir: boolean }[] | null>(null);
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -565,7 +568,22 @@ function App() {
   async function refreshOtherRecent(ws: string) {
     if (!sessionIdRef.current) return;
     try {
-      const all = await invoke<any[]>("recent_sessions", { limit: 30 });
+      // 引擎的 recent 列表（session_summaries/workspace_list_recent，raw 响应
+      // 是 Summary 数组）；失败退回本地聚合的 recent_sessions。
+      let all: any[];
+      try {
+        const r = await invoke<any>("workspace_list_recent", { limit: 30 });
+        all = (Array.isArray(r) ? r : []).map((s: any) => ({
+          path: s.info?.cwd ?? "",
+          sessionId: s.info?.id ?? "",
+          title: s.session_summary ?? "",
+          updatedAt: s.updated_at ?? "",
+          branch: s.head_branch ?? "",
+          messages: s.num_chat_messages ?? 0,
+        })).filter((x: any) => x.messages > 0);
+      } catch {
+        all = await invoke<any[]>("recent_sessions", { limit: 30 });
+      }
       const cur = (ws || "").replace(/[\\/]+$/, "").toLowerCase();
       // 每个项目只留最近一条：这一栏回答的是“哪些项目还有活儿”，
       // 同一个项目占掉三行只会把其他项目挤掉。
@@ -1001,6 +1019,36 @@ function App() {
           return;
         }
         if (m === "x.ai/mcp/servers_updated" || m === "x.ai/mcp/tools_changed") {
+          refreshMcpLive();
+          return;
+        }
+        // 模糊搜索结果流（generation 去重引擎侧已做，直接覆盖显示）
+        if (m === "x.ai/search/fuzzy/status") {
+          const p = e.payload?.params ?? {};
+          if (p.searchId === fuzzyRef.current.id && Array.isArray(p.matches)) {
+            setFuzzyHits(p.matches.map((x: any) => ({ path: x.path, isDir: !!x.is_dir })));
+          }
+          return;
+        }
+        // P2.10 通知监听：能力对应的刷新函数已存在，直接挂接
+        if (m === "x.ai/git_head_changed" || m === "x.ai/gitHeadChanged") {
+          refreshGit();
+          return;
+        }
+        if (m === "x.ai/sessions/changed") {
+          if (workspace) refreshSessions(workspace);
+          return;
+        }
+        if (
+          m === "x.ai/mcp_initialized" ||
+          m === "x.ai/mcp/init_progress" ||
+          m === "x.ai/mcp/server_status"
+        ) {
+          refreshMcpLive();
+          return;
+        }
+        if (m === "x.ai/config_changed") {
+          // 配置热变更（外部编辑 config.toml）
           refreshMcpLive();
           return;
         }
@@ -1443,10 +1491,19 @@ function App() {
   // ── @ file-mention / slash-command popup ──────────────────────────
   const popupItems: { label: string; desc?: string }[] =
     popup?.kind === "at"
-      ? fileList
-          .filter((f) => f.toLowerCase().includes(popup.query.toLowerCase()))
+      ? (fuzzyHits ??
+          fileList
+            .filter((f) => f.toLowerCase().includes(popup.query.toLowerCase()))
+            .map((f) => ({ path: f, isDir: false })))
           .slice(0, 8)
-          .map((f) => ({ label: f }))
+          .map((f) => {
+            // 引擎返回的是绝对路径；@ 引用要的是工作区相对路径
+            let rel = f.path.replace(/\\/g, "/");
+            const ws = workspace.replace(/\\/g, "/").replace(/\/+$/, "");
+            if (ws && rel.toLowerCase().startsWith(ws.toLowerCase() + "/"))
+              rel = rel.slice(ws.length + 1);
+            return { label: rel + (f.isDir ? "/" : "") };
+          })
       : popup?.kind === "slash"
         ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + popup.query.replace(/^\//, ""))).map(
             (c) => ({ label: c.cmd, desc: c.desc }),
@@ -1466,9 +1523,36 @@ function App() {
     const m = before.match(/(?:^|\s)@([^\s@]*)$/);
     if (m) {
       setPopup({ kind: "at", query: m[1], sel: 0 });
+      fuzzyKick(m[1]);
     } else {
+      if (popup?.kind === "at") fuzzyStop();
       setPopup(null);
     }
+  }
+
+  /// 引擎模糊搜索：首次打开拿 searchId，之后 change 只 ack、结果走通知。
+  async function fuzzyKick(q: string) {
+    if (!sessionIdRef.current) return;
+    const f = fuzzyRef.current;
+    try {
+      if (!f.id && !f.opening) {
+        f.opening = true;
+        const r = await invoke<any>("fuzzy_open", { workspace });
+        f.id = r?.searchId ?? null;
+        f.opening = false;
+      }
+      if (f.id) await invoke("fuzzy_change", { searchId: f.id, query: q, limit: 8 });
+    } catch {
+      f.opening = false;
+      // 失败退回本地 fileList 过滤，不打扰
+    }
+  }
+
+  function fuzzyStop() {
+    const id = fuzzyRef.current.id;
+    fuzzyRef.current = { id: null, opening: false };
+    setFuzzyHits(null);
+    if (id) invoke("fuzzy_close", { searchId: id }).catch(() => {});
   }
 
   function acceptPopup(index: number) {
@@ -2285,6 +2369,22 @@ function App() {
                   </button>
                   <button
                     className="ghost"
+                    disabled={(gitInfo.staged?.length ?? 0) + (gitInfo.unstaged?.length ?? 0) === 0}
+                    title={t.gitStashHint}
+                    onClick={async () => {
+                      try {
+                        await invoke("git_stash", { message: null });
+                        setItems((prev) => [...prev, { kind: "note", text: t.gitStashed }]);
+                        refreshGit();
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    }}
+                  >
+                    {t.gitStash}
+                  </button>
+                  <button
+                    className="ghost"
                     disabled={!gitInfo.files?.length}
                     onClick={() => {
                       setShowGit(false);
@@ -2294,6 +2394,22 @@ function App() {
                     }}
                   >
                     {t.gitCommit}
+                  </button>
+                  <button
+                    className="ghost"
+                    disabled={(gitInfo.staged?.length ?? 0) + (gitInfo.unstaged?.length ?? 0) === 0}
+                    title={t.gitStashHint}
+                    onClick={async () => {
+                      try {
+                        await invoke("git_stash", { message: null });
+                        setItems((prev) => [...prev, { kind: "note", text: t.gitStashed }]);
+                        refreshGit();
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    }}
+                  >
+                    {t.gitStash}
                   </button>
                   <button
                     className="ghost"
@@ -3128,7 +3244,7 @@ function App() {
               key 绑 sessionId：换会话时重建，避免旧 PTY 的输出串进新会话。 */}
           {ptyOpened && (
             <div className="pty-wrap" style={{ display: termTab === "shell" ? "flex" : "none" }}>
-              <PtyTerm key={sessionId} dark={theme !== "light"} onError={setError} />
+              <PtyTerm key={sessionId} sessionKey={sessionId} dark={theme !== "light"} onError={setError} />
             </div>
           )}
         </div>

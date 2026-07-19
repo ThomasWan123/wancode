@@ -21,6 +21,10 @@ const b64ToBytes = (b64: string) => {
   return out;
 };
 
+// 会话 → PTY id 映射（模块级，跨挂载存活）：切走标签/切会话回来时
+// 用 pty/load 重放整段缓冲重连，而不是杀掉重建。
+const ptyBySession = new Map<string, string>();
+
 const bytesToB64 = (bytes: Uint8Array) => {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
@@ -29,9 +33,11 @@ const bytesToB64 = (bytes: Uint8Array) => {
 
 export default function PtyTerm({
   dark,
+  sessionKey,
   onError,
 }: {
   dark: boolean;
+  sessionKey: string;
   onError: (e: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -76,14 +82,24 @@ export default function PtyTerm({
         });
         if (disposed) return;
 
-        const id = await invoke<string>("pty_create", {
-          rows: term.rows,
-          cols: term.cols,
-        });
-        if (disposed) {
-          invoke("pty_kill", { terminalId: id }).catch(() => {});
-          return;
+        // 已有存活 PTY → pty/load 重连（引擎重放 256KiB 环形缓冲），
+        // 否则新建。load 失败（进程已退出被回收等）退回新建。
+        let id = ptyBySession.get(sessionKey) ?? "";
+        if (id) {
+          try {
+            await invoke("pty_load", { terminalId: id });
+          } catch {
+            id = "";
+          }
         }
+        if (!id) {
+          id = await invoke<string>("pty_create", {
+            rows: term.rows,
+            cols: term.cols,
+          });
+        }
+        if (disposed) return;
+        ptyBySession.set(sessionKey, id);
         idRef.current = id;
 
         term.onData((s) => {
@@ -119,8 +135,8 @@ export default function PtyTerm({
       disposed = true;
       ro.disconnect();
       unlisten?.();
-      // PTY 在引擎里是 agent 级的、不随会话结束——不显式 kill 就会一直留着
-      if (idRef.current) invoke("pty_kill", { terminalId: idRef.current }).catch(() => {});
+      // 不再 unmount 即 kill：id 存在模块级映射里，下次挂载 pty/load 重连。
+      // 引擎在 agent 断开时统一回收（close_all）。
       term.dispose();
     };
     // dark 变化只改主题，不该重建终端（会丢掉整个 shell 会话）
