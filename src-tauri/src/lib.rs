@@ -64,6 +64,7 @@ pub fn run() {
             agent::agent_trust_respond,
             agent::agent_commands_list,
             agent::agent_prompt_history,
+            agent::search_content,
             agent::workspace_list,
             agent::mcp_live_list,
             agent::mcp_toggle,

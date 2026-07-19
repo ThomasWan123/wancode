@@ -347,6 +347,11 @@ function App() {
     { path: string; sessions: number; updatedAt: string }[]
   >([]);
   const [wsMenu, setWsMenu] = useState(false);
+  const [grepQuery, setGrepQuery] = useState("");
+  const [grepHits, setGrepHits] = useState<
+    { path: string; name: string; matches: { line: number; content: string }[] }[] | null
+  >(null);
+  const [grepping, setGrepping] = useState(false);
   const [trustReq, setTrustReq] = useState<{
     id: number;
     workspace: string;
@@ -470,6 +475,27 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSettings, settingsTab, sessionId]);
+
+  async function runGrep() {
+    const q = grepQuery.trim();
+    if (!q || !sessionIdRef.current) {
+      setGrepHits(null);
+      return;
+    }
+    setGrepping(true);
+    setError("");
+    try {
+      const r = await invoke<any>("search_content", { pattern: q });
+      if (r?.error) throw new Error(typeof r.error === "string" ? r.error : JSON.stringify(r.error));
+      const env = r?.result ?? r;
+      setGrepHits(env?.files ?? env?.matches ?? []);
+    } catch (e) {
+      setError(String(e));
+      setGrepHits([]);
+    } finally {
+      setGrepping(false);
+    }
+  }
 
   // 有过会话历史的工作区（引擎按 cwd 分组），用于跨项目切换。
   async function refreshWorkspaces() {
@@ -2208,13 +2234,61 @@ function App() {
           </nav>
 
           {sidebarTab === "files" ? (
-            <div className="session-list tree-list">
-              {fileList.length === 0 ? (
-                <div className="sidebar-empty">{sessionId ? "—" : t.emptySubStart}</div>
-              ) : (
-                <TreeView node={buildTree(fileList)} onPick={(p) => setInput((v) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + p + " ")} />
-              )}
-            </div>
+            <>
+              {/* 项目内容搜索 —— 引擎侧 ripgrep 语义，尊重 .gitignore */}
+              <input
+                className="session-search"
+                value={grepQuery}
+                placeholder={t.grepPlaceholder}
+                onChange={(e) => setGrepQuery(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") runGrep();
+                  if (e.key === "Escape") {
+                    setGrepQuery("");
+                    setGrepHits(null);
+                  }
+                }}
+              />
+              <div className="session-list tree-list">
+                {grepping && <div className="sidebar-empty">{t.searching}</div>}
+                {!grepping && grepHits !== null && grepHits.length === 0 && (
+                  <div className="sidebar-empty">{t.grepNoHits}</div>
+                )}
+                {!grepping &&
+                  grepHits !== null &&
+                  grepHits.map((f) => (
+                    <div key={f.path} className="grep-file">
+                      <div
+                        className="grep-file-head"
+                        title={f.path}
+                        onClick={() =>
+                          setInput((v) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + f.path + " ")
+                        }
+                      >
+                        <IconFile size={12} /> {f.name}
+                        <span className="grep-count">{f.matches.length}</span>
+                      </div>
+                      {f.matches.slice(0, 5).map((m, i) => (
+                        <div key={i} className="grep-line" title={m.content}>
+                          <span className="grep-lineno">{m.line}</span>
+                          <span className="grep-text">{m.content.trim().slice(0, 120)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                {grepHits === null &&
+                  (fileList.length === 0 ? (
+                    <div className="sidebar-empty">{sessionId ? "—" : t.emptySubStart}</div>
+                  ) : (
+                    <TreeView
+                      node={buildTree(fileList)}
+                      onPick={(p) =>
+                        setInput((v) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + p + " ")
+                      }
+                    />
+                  ))}
+              </div>
+            </>
           ) : (
           <>
           <div className="side-section">

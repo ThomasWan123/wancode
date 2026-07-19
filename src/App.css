@@ -2400,3 +2400,37 @@ button.ghost.small {
   border-radius: 6px;
   padding: 1px 8px;
 }
+
+/* ── 项目内容搜索结果 ─────────────────────────────────── */
+.grep-file { margin-bottom: 6px; }
+.grep-file-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.grep-file-head:hover { background: var(--bg2); }
+.grep-count {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--faint);
+  background: var(--bg2);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+.grep-line {
+  display: flex;
+  gap: 8px;
+  padding: 1px 8px 1px 22px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.grep-lineno { flex-shrink: 0; color: var(--border); }
+.grep-text { overflow: hidden; text-overflow: ellipsis; }

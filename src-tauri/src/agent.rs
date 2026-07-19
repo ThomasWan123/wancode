@@ -1173,6 +1173,30 @@ pub async fn agent_compact(
     .await
 }
 
+/// Grep the workspace (`x.ai/search/content`). Respects .gitignore.
+/// 引擎侧用 ripgrep 语义，比我们自己遍历文件靠谱得多。
+#[tauri::command]
+pub async fn search_content(
+    state: State<'_, AgentState>,
+    pattern: String,
+    is_regex: Option<bool>,
+    case_insensitive: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/search/content",
+        serde_json::json!({
+            "pattern": pattern,
+            "isRegex": is_regex.unwrap_or(false),
+            "caseInsensitive": case_insensitive.unwrap_or(true),
+            "respectGitignore": true,
+            "maxFiles": 200,
+            "maxMatches": 500,
+        }),
+    )
+    .await
+}
+
 /// Workspaces that have session history, newest-active first.
 /// 引擎按 cwd 分组返回全部会话摘要；我们只需要目录清单和各自的会话数。
 #[tauri::command]
