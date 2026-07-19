@@ -194,6 +194,8 @@ function changeLetter(t: unknown): string {
   return CHANGE_LETTER[String(t ?? "").toLowerCase()] ?? "M";
 }
 
+const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+
 function buildSuggestions(
   files: string[],
   git: any,
@@ -342,6 +344,13 @@ function App() {
   const [bgTasks, setBgTasks] = useState<any[]>([]);
   const [subagents, setSubagents] = useState<any[]>([]);
   const [showTasks, setShowTasks] = useState(false);
+  const [otherRecent, setOtherRecent] = useState<
+    { sessionId: string; path: string; title: string; branch: string; updatedAt: string }[]
+  >([]);
+  // 定时任务：引擎不提供 list，只能从通知流重建（见 applySchedUpdate）
+  const [schedTasks, setSchedTasks] = useState<
+    Record<string, { taskId: string; prompt: string; humanSchedule: string; nextFireAt?: string }>
+  >({});
   const [mcpLive, setMcpLive] = useState<any[]>([]);
   const [knownWorkspaces, setKnownWorkspaces] = useState<
     { path: string; sessions: number; updatedAt: string }[]
@@ -504,6 +513,29 @@ function App() {
       setKnownWorkspaces(await invoke("workspace_list"));
     } catch {
       /* 拿不到就只保留"浏览文件夹" */
+    }
+  }
+
+  // 首页的“别的项目干到哪了”。当前工作区排除掉——左栏已经列了它的会话。
+  async function refreshOtherRecent(ws: string) {
+    if (!sessionIdRef.current) return;
+    try {
+      const all = await invoke<any[]>("recent_sessions", { limit: 30 });
+      const cur = (ws || "").replace(/[\\/]+$/, "").toLowerCase();
+      // 每个项目只留最近一条：这一栏回答的是“哪些项目还有活儿”，
+      // 同一个项目占掉三行只会把其他项目挤掉。
+      const seen = new Set<string>();
+      const perProject = [];
+      for (const s of all) {
+        const key = (s.path || "").replace(/[\\/]+$/, "").toLowerCase();
+        if (key === cur || seen.has(key)) continue;
+        seen.add(key);
+        perProject.push(s);
+        if (perProject.length === 4) break;
+      }
+      setOtherRecent(perProject);
+    } catch (e) {
+      setError(`recent: ${String(e)}`);
     }
   }
 
@@ -753,6 +785,9 @@ function App() {
   }
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastSentRef = useRef("");
+  // 分叉回放上限：只在 forkFrom 设置，null 表示正常会话不限制
+  const replayCapRef = useRef<number | null>(null);
+  const replaySuppressRef = useRef(false);
   const execIdsRef = useRef<Set<string>>(new Set());
 
   async function refreshSessions(ws: string) {
@@ -780,6 +815,15 @@ function App() {
       listen<any>("agent://update", (e) => {
         const u = e.payload;
         if (!u || typeof u !== "object") return;
+        // 恢复会话时定时任务是通过重播 updates.jsonl 回来的，走这条路而不是
+        // ext 通知——两条都接才不会“重开应用定时任务就没了”。
+        if (typeof u.sessionUpdate === "string" && u.sessionUpdate.startsWith("scheduled_task_")) {
+          applySchedUpdate(u);
+          return;
+        }
+        // 分叉回放超出上限后，这一轮剩下的内容（回复/工具调用）一并丢弃，
+        // 直到用户真正发出下一条消息为止（sendText 会清掉这个标记）。
+        if (replaySuppressRef.current) return;
         if (u.sessionUpdate === "current_mode_update" || u.sessionUpdate === "current_mode") {
           const m = u.currentModeId ?? u.current_mode_id;
           // Engine only knows plan vs. default; reconcile without clobbering the
@@ -806,6 +850,14 @@ function App() {
           // replayed history (after resume) still renders.
           if (u.content.text === lastSentRef.current) {
             lastSentRef.current = "";
+          } else if (replayCapRef.current !== null) {
+            // 分叉回放：只放行模型上下文里真实存在的那几轮（见 forkFrom）
+            if (replayCapRef.current > 0) {
+              replayCapRef.current -= 1;
+              appendStream("user", u.content.text);
+            } else {
+              replaySuppressRef.current = true;
+            }
           } else {
             appendStream("user", u.content.text);
           }
@@ -903,6 +955,15 @@ function App() {
           refreshMcpLive();
           return;
         }
+        // 实时定时任务通知（恢复会话时引擎还会整体重播一遍 created）
+        if (
+          m === "x.ai/scheduled_task_created" ||
+          m === "x.ai/scheduled_task_deleted" ||
+          m === "x.ai/scheduled_task_fired"
+        ) {
+          applySchedUpdate(e.payload?.params?.update);
+          return;
+        }
         if (m !== "x.ai/queue/changed") return;
         const p = e.payload.params ?? {};
         const running = p.runningPromptId;
@@ -965,8 +1026,13 @@ function App() {
     });
   }
 
-  async function startSession(resume?: string, ws?: string): Promise<string> {
+  async function startSession(resume?: string, ws?: string, keepReplayCap = false): Promise<string> {
     const wsPath = ws ?? workspace;
+    // 普通会话切换必须清掉分叉回放上限，否则它会泄漏到下一个会话把内容吃掉
+    if (!keepReplayCap) {
+      replayCapRef.current = null;
+      replaySuppressRef.current = false;
+    }
     setStarting(true);
     setError("");
     setItems([]);
@@ -988,6 +1054,7 @@ function App() {
       refreshGit();
       refreshTasks();
       refreshMcpLive();
+      refreshOtherRecent(wsPath);
       // ↑ 历史（引擎按 cwd 维护，最近优先）
       invoke<string[]>("agent_prompt_history", { workspace: wsPath })
         .then((h) => {
@@ -1042,11 +1109,99 @@ function App() {
     }
   }
 
+  /// Fold one `scheduled_task_*` session-update into the scheduled-task view.
+  ///
+  /// The engine has no scheduler list method, so this notification stream *is*
+  /// the source of truth. Two behaviours are load-bearing:
+  ///
+  ///   - **created must be an upsert, not an insert.** On session restore the
+  ///     engine re-announces every live task, and the persisted updates.jsonl
+  ///     replays the original created event too — so the same taskId legitimately
+  ///     arrives twice.
+  ///   - **fired with nextFireAt == null must not self-heal.** That is the
+  ///     sentinel for a one-shot that already missed its window and is about to
+  ///     be deleted; inserting it would flash a row that vanishes next frame.
+  ///
+  /// Inner field names are raw snake_case: `rename_all` on the engine's
+  /// SessionUpdate enum renames the *variant tag*, not the fields.
+  function applySchedUpdate(u: any) {
+    const kind = u?.sessionUpdate;
+    const id = u?.task_id;
+    if (!id) return;
+    if (kind === "scheduled_task_deleted") {
+      setSchedTasks((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      return;
+    }
+    if (kind === "scheduled_task_created") {
+      setSchedTasks((prev) => ({
+        ...prev,
+        [id]: {
+          taskId: id,
+          prompt: u.prompt ?? "",
+          humanSchedule: u.human_schedule ?? "",
+          nextFireAt: u.next_fire_at ?? undefined,
+        },
+      }));
+      return;
+    }
+    if (kind === "scheduled_task_fired") {
+      setSchedTasks((prev) => {
+        if (prev[id]) return { ...prev, [id]: { ...prev[id], nextFireAt: u.next_fire_at ?? undefined } };
+        if (!u.next_fire_at) return prev; // missed one-shot, delete is coming
+        return {
+          ...prev,
+          [id]: {
+            taskId: id,
+            prompt: u.prompt ?? "",
+            humanSchedule: u.human_schedule ?? "",
+            nextFireAt: u.next_fire_at,
+          },
+        };
+      });
+    }
+  }
+
   async function copyMessage(text: string, idx: number) {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedIdx(idx);
       setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /// Branch the conversation at a user message: fork the session keeping only
+  /// the turns *before* it, switch to the fork, and put the original text back
+  /// in the composer so it can be reworded. (Claude Code's rewind-and-edit.)
+  ///
+  /// `targetPromptIndex = N` keeps the first N user turns and drops everything
+  /// from the (N+1)th onward — so the 0-based ordinal of the clicked message is
+  /// exactly the index to pass.
+  async function forkFrom(itemIdx: number, text: string) {
+    if (!workspace || busy) return;
+    const ordinal = items
+      .slice(0, itemIdx)
+      .filter((x) => x.kind === "user").length;
+    setError("");
+    try {
+      const newId = await invoke<string>("session_fork", {
+        workspace,
+        targetPromptIndex: ordinal,
+      });
+      // 引擎里两处截断的约定不一致：chat_history（模型真实上下文）保留 N 轮，
+      // 而 updates.jsonl（我们回放界面用的）按 `count > N + 1` 截，多留一轮。
+      // 不设这个上限的话，屏幕上会显示一轮模型根本不记得的对话。
+      // 必须在 startSession 之前设置——回放事件可能在它返回前就到了。
+      replayCapRef.current = ordinal;
+      replaySuppressRef.current = false;
+      // fork only writes files — the session still has to be opened.
+      await startSession(newId, undefined, true);
+      setInput(text);
     } catch (e) {
       setError(String(e));
     }
@@ -1061,6 +1216,9 @@ function App() {
     // they show in the queue strip, and when the engine finally runs one it
     // emits the normal user_message_chunk. Setting lastSentRef here would make
     // that echo get deduped away and the message would vanish.
+    // 用户开口了，分叉回放阶段结束
+    replayCapRef.current = null;
+    replaySuppressRef.current = false;
     const queueing = busy;
     if (!queueing) {
       setOpenThoughts(new Set()); // 新回合：收起上一轮展开过的思考
@@ -1961,9 +2119,11 @@ function App() {
               <IconTerminal size={16} /> {t.tasksTitle}
             </div>
 
-            {bgTasks.length === 0 && subagents.length === 0 && (
-              <div className="sidebar-empty">{t.tasksEmpty}</div>
-            )}
+            {bgTasks.length === 0 &&
+              subagents.length === 0 &&
+              Object.keys(schedTasks).length === 0 && (
+                <div className="sidebar-empty">{t.tasksEmpty}</div>
+              )}
 
             {bgTasks.length > 0 && (
               <div className="git-group">
@@ -2028,6 +2188,39 @@ function App() {
                         );
                         refreshTasks();
                       }}
+                    >
+                      {t.taskCancel}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {Object.keys(schedTasks).length > 0 && (
+              <div className="git-group">
+                <div className="git-group-head">
+                  <span>{t.tasksSched(Object.keys(schedTasks).length)}</span>
+                </div>
+                {Object.values(schedTasks).map((s) => (
+                  <div key={s.taskId} className="task-row">
+                    <span className="task-dot run" />
+                    <span className="task-cmd" title={s.prompt}>
+                      <b>{s.humanSchedule}</b> {s.prompt}
+                    </span>
+                    {s.nextFireAt && (
+                      <span className="task-exit" title={s.nextFireAt}>
+                        {t.tasksNextFire} {new Date(s.nextFireAt).toLocaleTimeString()}
+                      </span>
+                    )}
+                    <button
+                      className="git-mini danger"
+                      onClick={() =>
+                        // 删除成功后引擎会发 scheduled_task_deleted，由它移除该行；
+                        // 这里不做乐观删除，免得和通知重复处理。
+                        invoke("scheduler_delete", { taskId: s.taskId }).catch((e) =>
+                          setError(String(e)),
+                        )
+                      }
                     >
                       {t.taskCancel}
                     </button>
@@ -2482,6 +2675,33 @@ function App() {
             </div>
           )}
 
+          {/* 跨工作区的近期会话。刻意排除当前工作区——那部分左栏已经列了，
+              首页再列一遍就是和左栏打架（之前踩过）。这里只回答左栏答不了的
+              问题：我在别的项目干到哪了。 */}
+          {otherRecent.length > 0 && (
+            <div className="home-recent">
+              <div className="home-recent-head">{t.homeOtherProjects}</div>
+              {otherRecent.map((s) => (
+                <button
+                  key={s.sessionId}
+                  className="home-recent-row"
+                  title={s.path}
+                  onClick={() => startSession(s.sessionId, s.path)}
+                >
+                  <span className="home-recent-proj">{baseName(s.path)}</span>
+                  <span className="home-recent-title">
+                    {s.title || t.untitledSession}
+                  </span>
+                  {s.branch && (
+                    <span className="home-recent-branch">
+                      <IconGitBranch size={11} /> {s.branch}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="empty-hint">{t.emptyHint}</div>
         </div>
       )}
@@ -2504,8 +2724,25 @@ function App() {
         {items.map((it, i) => {
           if (it.kind === "user")
             return (
-              <div key={i} className="msg user">
-                {it.text}
+              <div key={i} className="msg-wrap user">
+                <div className="msg user">{it.text}</div>
+                <div className="msg-actions">
+                  <button
+                    className="icon-btn msg-action"
+                    title={t.forkHere}
+                    disabled={busy || !workspace}
+                    onClick={() => forkFrom(i, it.text)}
+                  >
+                    <IconGitBranch size={14} />
+                  </button>
+                  <button
+                    className="icon-btn msg-action"
+                    title={copiedIdx === i ? t.copied : t.copyMessage}
+                    onClick={() => copyMessage(it.text, i)}
+                  >
+                    {copiedIdx === i ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                  </button>
+                </div>
               </div>
             );
           if (it.kind === "assistant")

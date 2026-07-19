@@ -1173,6 +1173,128 @@ pub async fn agent_compact(
     .await
 }
 
+/// Flatten `session_summaries/workspace_list` into a cross-workspace "recent
+/// sessions" list for the home screen, newest first.
+///
+/// The engine groups summaries by cwd; the home screen wants the opposite view
+/// — the last N sessions regardless of which project they belong to — so the
+/// regrouping happens here rather than in the UI.
+#[tauri::command]
+pub async fn recent_sessions(
+    state: State<'_, AgentState>,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/session_summaries/workspace_list",
+        serde_json::json!({}),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    let map = v
+        .get("result")
+        .and_then(|r| r.get("all_sessions"))
+        .or_else(|| v.get("all_sessions"))
+        .and_then(|m| m.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out: Vec<serde_json::Value> = map
+        .into_iter()
+        .flat_map(|(path, sessions)| {
+            let path = path.clone();
+            sessions
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |s| {
+                    let get = |k: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    serde_json::json!({
+                        "path": path,
+                        "sessionId": s.get("info").and_then(|i| i.get("id"))
+                            .and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        "title": get("session_summary"),
+                        "updatedAt": get("updated_at"),
+                        "branch": get("head_branch"),
+                        "messages": s.get("num_chat_messages")
+                            .and_then(|x| x.as_u64()).unwrap_or(0),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        // 空会话（一条消息都没有）对首页没有意义
+        .filter(|s| s.get("messages").and_then(|m| m.as_u64()).unwrap_or(0) > 0)
+        .collect();
+
+    out.sort_by(|a, b| {
+        b.get("updatedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(a.get("updatedAt").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    out.truncate(limit.unwrap_or(8));
+    Ok(out)
+}
+
+/// Cancel a scheduled (cron / `/loop`) task.
+///
+/// `x.ai/scheduler/delete` is the **only** scheduler ext method the engine
+/// exposes — there is no create or list. Tasks are created by the model
+/// invoking the `scheduler_create` tool, and the client rebuilds its view from
+/// the `x.ai/scheduled_task_*` notification stream. A successful delete makes
+/// the engine emit `scheduled_task_deleted`, so the UI drops the row from that
+/// notification rather than optimistically removing it here.
+#[tauri::command]
+pub async fn scheduler_delete(
+    state: State<'_, AgentState>,
+    task_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/scheduler/delete",
+        serde_json::json!({ "taskId": task_id }),
+    )
+    .await
+}
+
+/// Fork the current session (`x.ai/session/fork`) and return the new id.
+///
+/// `target_prompt_index` truncates the copy at that prompt, i.e. branch from an
+/// earlier point in the conversation; omit it to copy everything.
+///
+/// Two things about this method differ from the rest of the ext surface:
+///   1. The response is **raw** — no `{result, error}` envelope — so we read
+///      `newSessionId` straight off the body.
+///   2. Fork only writes files to disk; it does **not** start the session. The
+///      caller has to `start(resume = newSessionId)` afterwards.
+#[tauri::command]
+pub async fn session_fork(
+    state: State<'_, AgentState>,
+    workspace: String,
+    target_prompt_index: Option<usize>,
+) -> Result<String, String> {
+    let source = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+    };
+    let mut params = serde_json::json!({
+        "sourceSessionId": source,
+        "sourceCwd": workspace,
+        "newCwd": workspace,
+    });
+    if let Some(i) = target_prompt_index {
+        params["targetPromptIndex"] = serde_json::json!(i);
+    }
+    let v = ext_call(&state, "x.ai/session/fork", params).await?;
+    v.get("newSessionId")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("fork 未返回 newSessionId: {v}"))
+}
+
 /// Grep the workspace (`x.ai/search/content`). Respects .gitignore.
 /// 引擎侧用 ripgrep 语义，比我们自己遍历文件靠谱得多。
 #[tauri::command]
