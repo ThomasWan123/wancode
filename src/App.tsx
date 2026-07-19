@@ -14,6 +14,7 @@ import {
   IconX, IconPencil, IconTrash, IconFile, IconFolderClosed,
   IconCheck, IconShield, IconChevron, IconSearch, IconCopy,
 } from "./icons";
+import PtyTerm from "./PtyTerm";
 import "./App.css";
 
 type SessionEntry = {
@@ -314,6 +315,8 @@ function App() {
   const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
+  const [termTab, setTermTab] = useState<"output" | "shell">("output");
+  const [ptyOpened, setPtyOpened] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -2860,18 +2863,48 @@ function App() {
         <div className="terminal-panel">
           <div className="terminal-head">
             <span className="panel-title"><IconTerminal size={14} /> {lang === "zh" ? "终端" : "Terminal"}</span>
-            <div>
-              <button className="ghost small" title={lang === "zh" ? "清空" : "Clear"} onClick={() => setTerminalLines([])}>
-                🧹
+            {/* Agent 的命令输出（只读）和可交互 shell 是两回事，分开两页 */}
+            <div className="term-tabs">
+              <button
+                className={`term-tab ${termTab === "output" ? "on" : ""}`}
+                onClick={() => setTermTab("output")}
+              >
+                {t.termTabOutput}
               </button>
+              <button
+                className={`term-tab ${termTab === "shell" ? "on" : ""}`}
+                onClick={() => {
+                  setPtyOpened(true);
+                  setTermTab("shell");
+                }}
+              >
+                {t.termTabShell}
+              </button>
+            </div>
+            <div>
+              {termTab === "output" && (
+                <button className="ghost small" title={lang === "zh" ? "清空" : "Clear"} onClick={() => setTerminalLines([])}>
+                  🧹
+                </button>
+              )}
               <button className="ghost small" onClick={() => setShowTerminal(false)}>
                 ✕
               </button>
             </div>
           </div>
-          <pre className="terminal-body">
-            {terminalLines.length ? terminalLines.join("\n") : lang === "zh" ? "（暂无命令输出）" : "(no command output yet)"}
-          </pre>
+          {termTab === "output" && (
+            <pre className="terminal-body">
+              {terminalLines.length ? terminalLines.join("\n") : lang === "zh" ? "（暂无命令输出）" : "(no command output yet)"}
+            </pre>
+          )}
+          {/* 一旦开过就保持挂载，只用 CSS 藏起来：卸载会 kill 掉 PTY，
+              切一下标签就把用户敲了一半的命令和整个 shell 会话丢了。
+              key 绑 sessionId：换会话时重建，避免旧 PTY 的输出串进新会话。 */}
+          {ptyOpened && (
+            <div className="pty-wrap" style={{ display: termTab === "shell" ? "flex" : "none" }}>
+              <PtyTerm key={sessionId} dark={theme !== "light"} onError={setError} />
+            </div>
+          )}
         </div>
       )}
 

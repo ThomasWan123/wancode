@@ -1239,6 +1239,87 @@ pub async fn recent_sessions(
     Ok(out)
 }
 
+// ── 交互式 PTY 终端 ────────────────────────────────────────────────
+//
+// 引擎侧已经把重活做完了：PTY 按 terminalId 寻址、输出按 16ms 批量推送、
+// 自带 256KiB 环形缓冲，重连时整段重放。客户端只要转发字节。
+//
+// 三个不能想当然的地方：
+//   1. `pty/input` 是 **通知** 不是请求——当请求发会 method_not_found。
+//   2. 输入输出都是 **base64 的裸字节**，不是 UTF-8 文本；PTY 输出会在
+//      任意字节边界切断，按文本解码必然切坏多字节字符和转义序列。
+//   3. `x.ai/terminal/pty/*` 的响应是带 {result,error} 信封的。
+
+/// Open an interactive PTY. Returns its `terminalId` — every later
+/// input/resize/kill and every output notification keys off it.
+#[tauri::command]
+pub async fn pty_create(
+    state: State<'_, AgentState>,
+    rows: u16,
+    cols: u16,
+) -> Result<String, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/terminal/pty/create",
+        serde_json::json!({ "rows": rows, "cols": cols }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    v.get("result")
+        .and_then(|r| r.get("terminalId"))
+        .and_then(|s| s.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("pty/create 未返回 terminalId: {v}"))
+}
+
+/// Send keystrokes. `data` is base64 of the raw bytes.
+///
+/// Fire-and-forget by design — the engine handles this on the notification
+/// path and silently drops undecodable input, so there is nothing to await.
+#[tauri::command]
+pub async fn pty_input(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+    data: String,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/terminal/pty/input",
+        serde_json::json!({ "terminalId": terminal_id, "data": data }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pty_resize(
+    state: State<'_, AgentState>,
+    terminal_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    ext_call(
+        &state,
+        "x.ai/terminal/pty/resize",
+        serde_json::json!({ "terminalId": terminal_id, "rows": rows, "cols": cols }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Kill a terminal (PTY or piped — the engine tries the PTY registry first).
+#[tauri::command]
+pub async fn pty_kill(state: State<'_, AgentState>, terminal_id: String) -> Result<(), String> {
+    ext_call(
+        &state,
+        "x.ai/terminal/kill",
+        serde_json::json!({ "terminalId": terminal_id }),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Cancel a scheduled (cron / `/loop`) task.
 ///
 /// `x.ai/scheduler/delete` is the **only** scheduler ext method the engine

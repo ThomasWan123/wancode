@@ -2500,3 +2500,51 @@ button.ghost.small {
   font-size: 11px;
   flex-shrink: 0;
 }
+
+/* 终端面板的两个标签：Agent 命令输出（只读）/ 可交互 shell */
+.term-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.term-tab {
+  background: transparent;
+  border: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+
+.term-tab:hover:not(.on) {
+  color: var(--text);
+  background: var(--bg2);
+  opacity: 1;
+}
+
+.term-tab.on {
+  color: var(--text);
+  background: var(--bg3);
+}
+
+/* xterm 容器：撑满面板剩余高度 */
+.pty-host {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+}
+
+.pty-host .xterm {
+  height: 100%;
+}
+
+/* 切标签只隐藏不卸载：卸载会 kill 掉 PTY，把 shell 会话丢了 */
+.pty-wrap {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
