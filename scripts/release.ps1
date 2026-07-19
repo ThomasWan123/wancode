@@ -40,7 +40,10 @@ $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
 
 Write-Host "[3/4] 补签 setup.exe（signer sign，空密码走 CLI 参数）..."
-npx --yes @tauri-apps/cli signer sign -f $key -p "" $setup
+# -p 传空密码：PowerShell spawn 原生进程时会把空字符串参数整个丢掉，
+# $setup 就顶上变成了密码、FILE 缺参报错。'""' 让 Windows 参数解析
+# 得到一个真正的空字符串。（bash 里不需要这个把戏。）
+npx --yes @tauri-apps/cli signer sign -f $key -p '""' $setup
 if ($LASTEXITCODE -ne 0) { throw "签名失败" }
 $sig = Get-Content "$setup.sig" -Raw
 
