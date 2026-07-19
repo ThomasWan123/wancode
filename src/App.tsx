@@ -434,18 +434,42 @@ function App() {
   }
   const [planApproval, setPlanApproval] = useState<{ id: number; planContent: string } | null>(null);
   const [planFeedback, setPlanFeedback] = useState("");
-  const [skills, setSkills] = useState<{ name: string; description: string; path: string }[]>([]);
+  const [skills, setSkills] = useState<
+    { name: string; description: string; path: string; enabled?: boolean; scope?: string }[]
+  >([]);
   const [skillForm, setSkillForm] = useState({ name: "", description: "" });
-  const [editingSkill, setEditingSkill] = useState<{ name: string; content: string } | null>(null);
+  const [editingSkill, setEditingSkill] = useState<{ name: string; path: string; content: string } | null>(null);
   const [migrateMsg, setMigrateMsg] = useState("");
 
-  async function openSkillEditor(name: string) {
+  async function openSkillEditor(name: string, path: string) {
     try {
-      const content = await invoke<string>("skill_read", { name });
-      setEditingSkill({ name, content });
+      const content = await invoke<string>("skill_read", { path });
+      setEditingSkill({ name, path, content });
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /// 引擎版技能列表。响应外层 camelCase、内层 SkillInfo 是 snake_case。
+  async function refreshSkills() {
+    if (!workspaceRefSafe()) return;
+    try {
+      const r = await invoke<any>("skills_list", { workspace: workspaceRefSafe() });
+      setSkills(
+        (r?.skills ?? []).map((sk: any) => ({
+          name: sk.name,
+          description: sk.short_description ?? sk.description ?? "",
+          path: sk.path,
+          enabled: sk.enabled !== false,
+          scope: typeof sk.scope === "string" ? sk.scope : "",
+        })),
+      );
+    } catch (e) {
+      setError(`skills: ${String(e)}`);
+    }
+  }
+  function workspaceRefSafe() {
+    return workspace;
   }
 
   async function respondPlan(outcome: string) {
@@ -490,9 +514,7 @@ function App() {
       refreshMcpConfig();
       refreshMcpLive();
     } else if (settingsTab === "skills") {
-      invoke<{ name: string; description: string; path: string }[]>("skills_list")
-        .then(setSkills)
-        .catch(() => {});
+      refreshSkills();
     } else if (settingsTab === "models") {
       refreshModels();
     } else if (settingsTab === "hooks") {
@@ -745,11 +767,7 @@ function App() {
     } catch {
       /* ignore */
     }
-    try {
-      setSkills(await invoke<{ name: string; description: string; path: string }[]>("skills_list"));
-    } catch {
-      /* ignore */
-    }
+    refreshSkills();
     refreshModels();
   }
 
@@ -1939,14 +1957,42 @@ function App() {
                 {skills.length === 0 && <div className="sidebar-empty">{t.skillsEmpty}</div>}
                 {skills.map((sk) => (
                   <div
-                    key={sk.name}
-                    className="mcp-item clickable"
-                    onClick={() => openSkillEditor(sk.name)}
+                    key={sk.path}
+                    className={`mcp-item clickable ${sk.enabled === false ? "off" : ""}`}
+                    onClick={() => openSkillEditor(sk.name, sk.path)}
                   >
                     <div className="mcp-info">
                       <b>{sk.name}</b>
                       <span className="mcp-detail">{sk.description}</span>
                     </div>
+                    {/* 启停走引擎（写 [skills].disabled），返回全量刷新列表 */}
+                    <button
+                      className={`mcp-switch ${sk.enabled === false ? "" : "on"}`}
+                      title={sk.enabled === false ? t.mcpEnable : t.mcpDisable}
+                      onClick={async (ev) => {
+                        ev.stopPropagation();
+                        try {
+                          const r = await invoke<any>("skills_toggle", {
+                            name: sk.name,
+                            enabled: sk.enabled === false,
+                            workspace,
+                          });
+                          setSkills(
+                            (r?.skills ?? []).map((x: any) => ({
+                              name: x.name,
+                              description: x.short_description ?? x.description ?? "",
+                              path: x.path,
+                              enabled: x.enabled !== false,
+                              scope: typeof x.scope === "string" ? x.scope : "",
+                            })),
+                          );
+                        } catch (e) {
+                          setError(String(e));
+                        }
+                      }}
+                    >
+                      <span className="mcp-knob" />
+                    </button>
                     <IconPencil size={13} className="skill-edit-icon" />
                   </div>
                 ))}
@@ -1973,7 +2019,7 @@ function App() {
                           description: skillForm.description,
                         });
                         setSkillForm({ name: "", description: "" });
-                        setSkills(await invoke("skills_list"));
+                        refreshSkills();
                       } catch (e) {
                         setError(String(e));
                       }
@@ -2287,9 +2333,9 @@ function App() {
                 <button
                   onClick={async () => {
                     try {
-                      await invoke("skill_write", { name: editingSkill.name, content: editingSkill.content });
+                      await invoke("skill_write", { path: editingSkill.path, content: editingSkill.content });
                       setEditingSkill(null);
-                      setSkills(await invoke("skills_list"));
+                      refreshSkills();
                     } catch (e) {
                       setError(String(e));
                     }
@@ -2577,11 +2623,7 @@ function App() {
               onClick={async () => {
                 setSettingsTab("skills");
                 setShowSettings(true);
-                setSkills(
-                  await invoke<{ name: string; description: string; path: string }[]>(
-                    "skills_list",
-                  ).catch(() => []),
-                );
+                refreshSkills();
               }}
             >
               <IconClipboard size={15} /> {t.navSkills}

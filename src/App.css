@@ -2592,3 +2592,8 @@ button.ghost.small {
   border-top: 1px solid var(--border-soft);
   opacity: 0.85;
 }
+
+/* 停用的技能：变暗但仍可点开编辑 */
+.mcp-item.off .mcp-info {
+  opacity: 0.45;
+}

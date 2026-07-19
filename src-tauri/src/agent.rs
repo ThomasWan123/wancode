@@ -279,11 +279,24 @@ async fn start_inner(
         .unwrap_or_default();
 
     *state.handle.lock().await = Some(AgentHandle {
-        acp_tx,
+        acp_tx: acp_tx.clone(),
         session_id: session_id.clone(),
         cancel,
         model_ids: model_ids.clone(),
     });
+
+    // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
+    // 的 [skills].disabled 它看不见——引擎没有任何回灌路径。开一个会话就补
+    // 发一次 refresh-baseline，让它立刻从磁盘配置重新同步。失败无所谓：
+    // 最坏就是退回旧行为。
+    {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({})).expect("static json");
+        let _ = acp_send(
+            acp::ExtRequest::new("x.ai/skills/refresh-baseline".to_string(), raw.into()),
+            &acp_tx,
+        )
+        .await as Result<acp::ExtResponse, _>;
+    }
 
     Ok(StartResult {
         session_id: session_id.0.to_string(),
@@ -801,19 +814,29 @@ pub async fn migrate_env_keys() -> Result<usize, String> {
     Ok(moved)
 }
 
-/// Read a skill's SKILL.md content for in-app editing.
+/// Read a skill's SKILL.md for in-app editing.
+///
+/// Takes the ABSOLUTE path from the engine's skills/list — skills can live in
+/// plugin dirs / project dirs, not just ~/.grok/skills, so deriving the path
+/// from a name would silently miss those.
 #[tauri::command]
-pub async fn skill_read(name: String) -> Result<String, String> {
-    let path = skills_dir().join(&name).join("SKILL.md");
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+pub async fn skill_read(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let file = if p.is_dir() { p.join("SKILL.md") } else { p };
+    std::fs::read_to_string(&file).map_err(|e| e.to_string())
 }
 
-/// Write a skill's SKILL.md content.
+/// Write a skill's SKILL.md content (absolute path, same rule as skill_read).
 #[tauri::command]
-pub async fn skill_write(name: String, content: String) -> Result<(), String> {
-    let dir = skills_dir().join(&name);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("SKILL.md"), content).map_err(|e| e.to_string())
+pub async fn skill_write(path: String, content: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let file = if p.is_dir() || !path.ends_with(".md") {
+        std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+        p.join("SKILL.md")
+    } else {
+        p
+    };
+    std::fs::write(file, content).map_err(|e| e.to_string())
 }
 
 /// Inject managed model keys from keyring into the process env so the engine's
@@ -852,43 +875,112 @@ fn skills_dir() -> PathBuf {
     xai_grok_shell::util::grok_home::grok_home().join("skills")
 }
 
-/// List skills discovered under ~/.grok/skills (each is a dir with SKILL.md).
+/// List skills via the engine (x.ai/skills/list). Replaces the old
+/// filesystem scan of ~/.grok/skills: the engine also discovers project-level
+/// and plugin skills, and knows each skill's enabled state.
 #[tauri::command]
-pub async fn skills_list() -> Result<Vec<SkillEntry>, String> {
-    let dir = skills_dir();
-    let mut out = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(out), // no skills dir yet
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_md = path.join("SKILL.md");
-        if !skill_md.is_file() {
-            continue;
-        }
-        let body = std::fs::read_to_string(&skill_md).unwrap_or_default();
-        // description: YAML frontmatter `description:` or first non-heading line.
-        let description = body
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("description:").map(|d| d.trim().to_string()))
-            .or_else(|| {
-                body.lines()
-                    .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#') && !l.contains("---"))
-                    .map(|l| l.trim().to_string())
-            })
-            .unwrap_or_default();
-        out.push(SkillEntry {
-            name: entry.file_name().to_string_lossy().into_owned(),
-            description: description.chars().take(120).collect(),
-            path: path.to_string_lossy().into_owned(),
-        });
+pub async fn skills_list(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(&state, "x.ai/skills/list", serde_json::json!({ "cwd": workspace })).await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(out)
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Enable/disable a skill (x.ai/skills/toggle). Persists to [skills].disabled
+/// in the engine config; returns the full refreshed list.
+#[tauri::command]
+pub async fn skills_toggle(
+    state: State<'_, AgentState>,
+    name: String,
+    enabled: bool,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/skills/toggle",
+        serde_json::json!({ "name": name, "enabled": enabled, "cwd": workspace }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    // toggle 只写配置。会话（含之后新建的）用的是 agent 启动时的技能基线
+    // 快照——不刷新基线，停用就只是改了个没人读的配置项。实测踩过：停用
+    // 后新会话的模型面向清单里技能还在。
+    let _ = ext_call(&state, "x.ai/skills/refresh-baseline", serde_json::json!({})).await;
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Register an extra skills directory (x.ai/skills/add). `path` may be a dir
+/// or a SKILL.md; `~` expands engine-side.
+#[tauri::command]
+pub async fn skills_add_path(
+    state: State<'_, AgentState>,
+    path: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/skills/add",
+        serde_json::json!({ "path": path, "cwd": workspace }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    let _ = ext_call(&state, "x.ai/skills/refresh-baseline", serde_json::json!({})).await;
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Unregister a skills path (x.ai/skills/remove).
+#[tauri::command]
+pub async fn skills_remove_path(
+    state: State<'_, AgentState>,
+    path: String,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/skills/remove",
+        serde_json::json!({ "path": path, "cwd": workspace }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    let _ = ext_call(&state, "x.ai/skills/refresh-baseline", serde_json::json!({})).await;
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Reset skills config to defaults (x.ai/skills/reset).
+#[tauri::command]
+pub async fn skills_reset(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(&state, "x.ai/skills/reset", serde_json::json!({ "cwd": workspace })).await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    let _ = ext_call(&state, "x.ai/skills/refresh-baseline", serde_json::json!({})).await;
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Skills config summary — paths / ignore / totals (x.ai/skills/config).
+#[tauri::command]
+pub async fn skills_config(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(&state, "x.ai/skills/config", serde_json::json!({ "cwd": workspace })).await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    Ok(v.get("result").cloned().unwrap_or(v))
 }
 
 /// Ensure ~/.grok/skills exists and open it in the OS file manager.
