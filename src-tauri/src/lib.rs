@@ -61,6 +61,7 @@ pub fn run() {
             agent::agent_queue_clear,
             agent::agent_compact,
             agent::agent_question_respond,
+            agent::agent_trust_respond,
             agent::agent_commands_list,
             agent::agent_prompt_history,
             agent::workspace_list,

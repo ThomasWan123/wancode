@@ -347,6 +347,12 @@ function App() {
     { path: string; sessions: number; updatedAt: string }[]
   >([]);
   const [wsMenu, setWsMenu] = useState(false);
+  const [trustReq, setTrustReq] = useState<{
+    id: number;
+    workspace: string;
+    cwd: string;
+    configKinds: string[];
+  } | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
@@ -883,6 +889,17 @@ function App() {
     );
 
     unsubs.push(
+      listen<any>("agent://folder-trust", (e) => {
+        setTrustReq({
+          id: e.payload.id,
+          workspace: e.payload.workspace ?? "",
+          cwd: e.payload.cwd ?? "",
+          configKinds: e.payload.configKinds ?? [],
+        });
+      }),
+    );
+
+    unsubs.push(
       listen<any>("agent://ask-question", (e) => {
         setQuestion({ id: e.payload.id, questions: e.payload.questions ?? [] });
         setAnswers({});
@@ -944,6 +961,7 @@ function App() {
         .catch(() => {});
       refreshGit();
       refreshTasks();
+      refreshMcpLive();
       // ↑ 历史（引擎按 cwd 维护，最近优先）
       invoke<string[]>("agent_prompt_history", { workspace: wsPath })
         .then((h) => {
@@ -2000,6 +2018,53 @@ function App() {
         </div>
       )}
 
+      {/* 文件夹信任：这个仓库自带 MCP/hooks/LSP 配置，未授权前引擎已挡住它们。 */}
+      {trustReq && (
+        <div className="modal-mask">
+          <div className="modal trust-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">{t.trustTitle}</div>
+            <div className="trust-path">{trustReq.workspace || trustReq.cwd}</div>
+            <div className="trust-body">
+              {t.trustBody}
+              {trustReq.configKinds.length > 0 && (
+                <div className="trust-kinds">
+                  {trustReq.configKinds.map((k) => (
+                    <span key={k} className="trust-kind">
+                      {k}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="question-actions">
+              <button
+                onClick={async () => {
+                  const id = trustReq.id;
+                  setTrustReq(null);
+                  await invoke("agent_trust_respond", { id, trust: true }).catch((e) =>
+                    setError(String(e)),
+                  );
+                }}
+              >
+                {t.trustYes}
+              </button>
+              <button
+                className="ghost"
+                onClick={async () => {
+                  const id = trustReq.id;
+                  setTrustReq(null);
+                  await invoke("agent_trust_respond", { id, trust: false }).catch((e) =>
+                    setError(String(e)),
+                  );
+                }}
+              >
+                {t.trustNo}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 引擎主动提问。之前这个请求被兜底应答成空对象，用户根本看不到。 */}
       {question && (
         <div className="modal-mask">
@@ -2121,7 +2186,15 @@ function App() {
               }}
             >
               <IconGitBranch size={15} /> {t.navMcp}
-              {mcpServers.length > 0 && <span className="side-nav-count">{mcpServers.length}</span>}
+              {/* 有实时数据时数"真正启用的"，而不是配置文件里的条目数 ——
+                  被文件夹信任挡住的服务器不该被算成可用。 */}
+              {(mcpLive.length ? mcpLive.filter((s) => s.session?.enabled !== false).length : mcpServers.length) > 0 && (
+                <span className="side-nav-count">
+                  {mcpLive.length
+                    ? mcpLive.filter((s) => s.session?.enabled !== false).length
+                    : mcpServers.length}
+                </span>
+              )}
             </button>
             <button
               className="side-nav-item"

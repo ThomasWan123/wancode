@@ -1,0 +1,20 @@
+# WanCode —— 让引擎把本二进制当作"已发布构建"，从而启用文件夹信任。
+#
+# 引擎的判据是编译期是否有 GROK_VERSION 戳记：
+#   xai-grok-workspace/src/folder_trust.rs
+#   is_local_build() -> option_env!("GROK_VERSION").is_none()
+# 没有戳记 = 本地/开发构建 → 整个文件夹信任被关闭：不提示，也不 gate
+# 仓库自带的 .mcp.json / hooks / LSP。WanCode 是对外分发的二进制，
+# 应当和 shipped build 行为一致。
+#
+# 位置很关键：cargo 只从**当前目录向上**查找 .cargo/config.toml。
+# tauri 在 src-tauri/ 下调用 cargo，所以放在 grok-build/（兄弟目录）
+# 是读不到的 —— 那样编译能过、看起来配了，但 option_env! 仍为 None。
+#
+# option_env! 在**引擎 crate 编译时**求值，所以必须是进程环境变量，
+# 不能用 wancode 自己 build.rs 里的 cargo:rustc-env（只影响本 crate）。
+#
+# VERSION 只作为不透明字符串使用（x-grok-client-version 头），
+# 不做 semver 解析，因此 wancode- 前缀是安全且诚实的。
+[env]
+GROK_VERSION = "wancode-0.11.0"

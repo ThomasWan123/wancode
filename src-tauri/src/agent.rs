@@ -42,6 +42,8 @@ pub struct AgentState {
     /// Pending `x.ai/ask_user_question` requests: answers keyed by question text.
     pending_questions:
         Mutex<HashMap<u64, oneshot::Sender<Option<HashMap<String, Vec<String>>>>>>,
+    /// Pending `x.ai/folder_trust/request` prompts → true = trust.
+    pending_trust: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -163,8 +165,19 @@ async fn start_inner(
     agent_config.default_auto_mode =
         xai_grok_shell::util::config::effective_auto_for_launch(false, None, None);
 
-    // Trust the workspace folder the user explicitly opened.
-    xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd);
+    // NOTE: we deliberately do NOT grant_folder_trust() here.
+    //
+    // That blanket grant was written when opening a workspace always meant the
+    // user had just picked it in the folder dialog. Since 0.8.2 WanCode
+    // auto-opens the last-used folder (or the home directory on first run), so
+    // the grant was trusting folders the user never approved — and folder trust
+    // is what gates repo-local MCP servers and LSP, i.e. config a cloned repo
+    // can ship to make the agent run things.
+    //
+    // Instead we advertise `x.ai/folderTrust.interactive` below and let the
+    // engine prompt through `x.ai/folder_trust/request`. The engine keeps
+    // project-scoped config gated until an explicit grant, and treats any
+    // undecodable answer as reject.
 
     let cancel = CancellationToken::new();
     let memory_config = agent_config.memory_config.clone();
@@ -175,12 +188,17 @@ async fn start_inner(
     let mut acp_rx = spawned.channel.rx;
 
     // ── Initialize ─────────────────────────────────────────────────
+    // The trust capability is read from `client_capabilities.meta`, NOT the
+    // request meta — putting it on the request silently does nothing.
+    let mut caps = acp::ClientCapabilities::new()
+        .fs(acp::FileSystemCapabilities::new())
+        .terminal(false);
+    caps.meta = serde_json::json!({ "x.ai/folderTrust": { "interactive": true } })
+        .as_object()
+        .cloned();
+
     let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-        .client_capabilities(
-            acp::ClientCapabilities::new()
-                .fs(acp::FileSystemCapabilities::new())
-                .terminal(false),
-        )
+        .client_capabilities(caps)
         .meta(
             serde_json::json!({
                 "clientType": "wancode",
@@ -386,6 +404,36 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
                         }
                         None => serde_json::json!({ "outcome": "cancelled" }),
                     };
+                    let raw = serde_json::value::to_raw_value(&resp).unwrap();
+                    let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
+                });
+            } else if args.request.method.as_ref() == "x.ai/folder_trust/request" {
+                // 引擎问：这个工作区里有 repo 自带的 MCP/hooks/LSP 配置，
+                // 要不要信任？未信任前引擎已把这些配置挡住了。
+                let params: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).unwrap_or(serde_json::Value::Null);
+                let state: State<'_, AgentState> = app.state();
+                let id = state.next_permission_id.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = oneshot::channel::<bool>();
+                state.pending_trust.lock().await.insert(id, tx);
+                let _ = app.emit(
+                    "agent://folder-trust",
+                    serde_json::json!({
+                        "id": id,
+                        "workspace": params.get("workspace").and_then(|v| v.as_str()).unwrap_or(""),
+                        "cwd": params.get("cwd").and_then(|v| v.as_str()).unwrap_or(""),
+                        "configKinds": params.get("configKinds").cloned()
+                            .unwrap_or(serde_json::Value::Array(vec![])),
+                    }),
+                );
+                tauri::async_runtime::spawn(async move {
+                    // 超时/关闭一律按拒绝——引擎也把任何无法解码的回复当拒绝。
+                    let trusted =
+                        matches!(tokio::time::timeout(std::time::Duration::from_secs(600), rx).await,
+                            Ok(Ok(true)));
+                    let resp = serde_json::json!({
+                        "outcome": if trusted { "trust" } else { "reject" }
+                    });
                     let raw = serde_json::value::to_raw_value(&resp).unwrap();
                     let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw.into())));
                 });
@@ -1361,6 +1409,21 @@ pub async fn git_checkout(
     branch: String,
 ) -> Result<serde_json::Value, String> {
     ext_call(&state, "x.ai/git/checkout", serde_json::json!({ "branch": branch })).await
+}
+
+/// Answer a pending folder-trust prompt. Anything but an explicit `true`
+/// leaves repo-local MCP/hooks/LSP gated.
+#[tauri::command]
+pub async fn agent_trust_respond(
+    state: State<'_, AgentState>,
+    id: u64,
+    trust: bool,
+) -> Result<(), String> {
+    let sender = state.pending_trust.lock().await.remove(&id);
+    sender
+        .ok_or("该信任请求已失效")?
+        .send(trust)
+        .map_err(|_| "回传信任决定失败".to_string())
 }
 
 /// Answer a pending `x.ai/ask_user_question`. `answers` maps each question's
