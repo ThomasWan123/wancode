@@ -1385,8 +1385,10 @@ function App() {
             {t.connected}
           </span>
         )}
-        {/* 只在真有后台活动时出现 —— 平时不占位置 */}
-        {sessionId && bgTasks.length + subagents.length > 0 && (
+        {/* 只在真有后台活动时出现 —— 平时不占位置。
+            定时任务也要算进来：否则只有定时任务时按钮不出现，面板打不开，
+            等于这个功能不存在。 */}
+        {sessionId && bgTasks.length + subagents.length + Object.keys(schedTasks).length > 0 && (
           <button
             className="icon-btn tasks-btn"
             title={t.tasksTitle}
@@ -1396,7 +1398,9 @@ function App() {
             }}
           >
             <IconTerminal size={15} />
-            <span className="tasks-count">{bgTasks.length + subagents.length}</span>
+            <span className="tasks-count">
+              {bgTasks.length + subagents.length + Object.keys(schedTasks).length}
+            </span>
           </button>
         )}
         {sessionId && (
