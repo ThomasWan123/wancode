@@ -317,6 +317,9 @@ function App() {
   const [showTerminal, setShowTerminal] = useState(false);
   const [termTab, setTermTab] = useState<"output" | "shell">("output");
   const [ptyOpened, setPtyOpened] = useState(false);
+  const [worktrees, setWorktrees] = useState<{ path: string; branch: string }[]>([]);
+  const [wtBusy, setWtBusy] = useState(false);
+  const [wtMsg, setWtMsg] = useState<{ bad: boolean; text: string } | null>(null);
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -518,6 +521,13 @@ function App() {
       /* 拿不到就只保留"浏览文件夹" */
     }
   }
+
+  // Git 面板一打开就拉 worktree 列表。挂在面板可见状态而不是某个入口按钮
+  // 上——之前设置页就是因为把数据加载挂在入口按钮，换个路径进去就是空的。
+  useEffect(() => {
+    if (showGit) { setWtMsg(null); refreshWorktrees(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showGit, sessionId]);
 
   // 首页的“别的项目干到哪了”。当前工作区排除掉——左栏已经列了它的会话。
   async function refreshOtherRecent(ws: string) {
@@ -1165,6 +1175,83 @@ function App() {
           },
         };
       });
+    }
+  }
+
+  // ── worktree 并行 Agent ────────────────────────────────────────
+  async function refreshWorktrees() {
+    if (!sessionIdRef.current) return;
+    try {
+      const r = await invoke<any>("worktree_list");
+      const arr = Array.isArray(r) ? r : (r?.worktrees ?? r?.data ?? []);
+      setWorktrees(
+        (Array.isArray(arr) ? arr : [])
+          .map((w: any) => ({
+            path: w.path ?? w.worktree_path ?? w.worktreePath ?? "",
+            branch: w.branch ?? w.head_branch ?? "",
+          }))
+          .filter((w: any) => w.path),
+      );
+    } catch (e) {
+      setError(`worktree: ${String(e)}`);
+    }
+  }
+
+  /// 把当前会话搬进一个新 worktree 并切过去。
+  /// 引擎返回的是 **fork 出来的新 session id**，不是传进去的那个。
+  async function forkIntoWorktree() {
+    if (!workspace || wtBusy) return;
+    setWtBusy(true);
+    setError("");
+    try {
+      const r = await invoke<any>("worktree_resume_session", { workspace });
+      const newId = r?.sessionId;
+      const cwd = r?.effectiveCwd || r?.worktreePath;
+      if (!newId || !cwd) throw new Error(`返回缺字段: ${JSON.stringify(r)}`);
+      setShowGit(false);
+      setWorkspace(cwd);
+      await startSession(newId, cwd);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setWtBusy(false);
+    }
+  }
+
+  /// 合回主目录。响应是 status 分派的：conflicts 分支必须如实报出来，
+  /// 当成成功处理的话用户会以为改动已经合上了。
+  async function applyWorktree(path: string) {
+    setWtBusy(true);
+    setWtMsg(null);
+    try {
+      const r = await invoke<any>("worktree_apply", { worktreePath: path });
+      if (r?.status === "conflicts") {
+        const files = (r.conflicts ?? []).map((c: any) => c.path ?? "?").join(", ");
+        // 就地显示：这条曾经写进 setError，而错误条渲染在聊天区、被 Git 弹窗
+        // 盖住——用户点完“合回”什么都看不到，冲突就成了静默无事发生。
+        setWtMsg({ bad: true, text: t.wtConflicts(files || String((r.conflicts ?? []).length)) });
+      } else {
+        const n = (r?.files ?? []).length;
+        setWtMsg({ bad: false, text: t.wtApplied(n) });
+        setItems((prev) => [...prev, { kind: "note", text: t.wtApplied(n) }]);
+        refreshGit();
+      }
+    } catch (e) {
+      setWtMsg({ bad: true, text: String(e) });
+    } finally {
+      setWtBusy(false);
+    }
+  }
+
+  async function removeWorktree(path: string) {
+    setWtBusy(true);
+    try {
+      await invoke("worktree_remove", { idOrPath: path, force: true });
+      await refreshWorktrees();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setWtBusy(false);
     }
   }
 
@@ -2036,6 +2123,52 @@ function App() {
                     ))}
                   </div>
                 )}
+
+                {/* worktree：把当前会话在独立工作树里再开一份，两边互不干扰
+                    文件；做完要么合回主目录，要么整个丢掉。 */}
+                <div className="git-group">
+                  <div className="git-group-head">
+                    <span>{t.wtSection}</span>
+                    <button
+                      className="git-mini"
+                      disabled={wtBusy}
+                      onClick={forkIntoWorktree}
+                      title={t.wtNewHint}
+                    >
+                      {wtBusy ? t.wtWorking : t.wtNew}
+                    </button>
+                  </div>
+                  {wtMsg && (
+                    <div className={`wt-msg ${wtMsg.bad ? "bad" : "ok"}`}>{wtMsg.text}</div>
+                  )}
+                  {worktrees.length === 0 && <div className="sidebar-empty">{t.wtEmpty}</div>}
+                  {worktrees.map((w) => (
+                    <div key={w.path} className="git-row">
+                      <span className="git-path" title={w.path}>
+                        {baseName(w.path)}
+                      </span>
+                      {w.branch && <span className="git-track">{w.branch}</span>}
+                      <button
+                        className="git-mini"
+                        disabled={wtBusy}
+                        title={t.wtApplyHint}
+                        onClick={() => applyWorktree(w.path)}
+                      >
+                        {t.wtApply}
+                      </button>
+                      <button
+                        className="git-mini danger"
+                        disabled={wtBusy}
+                        onClick={() => {
+                          if (window.confirm(t.wtRemoveConfirm(baseName(w.path))))
+                            removeWorktree(w.path);
+                        }}
+                      >
+                        {t.wtRemove}
+                      </button>
+                    </div>
+                  ))}
+                </div>
 
                 <input
                   className="git-msg"

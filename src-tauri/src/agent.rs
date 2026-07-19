@@ -1239,6 +1239,116 @@ pub async fn recent_sessions(
     Ok(out)
 }
 
+// ── Git worktree 并行 Agent ────────────────────────────────────────
+//
+// 用法是：把当前会话在一个独立 worktree 里再开一份，两边各跑各的、互不
+// 干扰文件；试完了要么把改动合回主目录，要么整个丢掉。
+//
+// 注意 list 的请求结构是这一片里唯一不用 camelCase 的：`include_all` 是
+// snake_case，且 `repo` 没有 serde(default)——**必须显式传，哪怕是 null**，
+// 少了整个反序列化就失败。（官方 TUI 自己发的是 includeAll，那个过滤参数
+// 在人家客户端里是静默失效的。）
+
+/// Take the current session into a fresh worktree.
+///
+/// Returns the **forked** session id (not the one passed in) plus the worktree
+/// path — the caller then opens that session at that path.
+#[tauri::command]
+pub async fn worktree_resume_session(
+    state: State<'_, AgentState>,
+    workspace: String,
+) -> Result<serde_json::Value, String> {
+    let source = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+    };
+    let v = ext_call(
+        &state,
+        "x.ai/git/worktree/resume_session",
+        serde_json::json!({
+            "sessionId": source,
+            "sourceCwd": workspace,
+            "copyMode": "dirty",
+            "restoreCode": true,
+        }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    v.get("result")
+        .cloned()
+        .ok_or_else(|| format!("resume_session 未返回结果: {v}"))
+}
+
+/// List worktrees. See the casing note above — this one is snake_case.
+#[tauri::command]
+pub async fn worktree_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/git/worktree/list",
+        serde_json::json!({ "repo": null, "type": [], "include_all": false }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Merge a worktree's changes back into the main working directory.
+///
+/// The response is status-tagged: `{"status":"success", files}` or
+/// `{"status":"conflicts", files, conflicts}`. Conflicts are surfaced to the
+/// user verbatim — we deliberately do not attempt a three-way merge UI.
+#[tauri::command]
+pub async fn worktree_apply(
+    state: State<'_, AgentState>,
+    worktree_path: String,
+) -> Result<serde_json::Value, String> {
+    let source = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+    };
+    let v = ext_call(
+        &state,
+        "x.ai/git/worktree/apply",
+        serde_json::json!({
+            "sessionId": source,
+            "worktreePath": worktree_path,
+            // merge 而不是 overwrite：overwrite 是无条件把 worktree 的内容写进
+            // 主目录，**从不报冲突**——用户在主目录里对同一文件的改动会被静默
+            // 销毁。merge 只在主目录没动过时才应用，两边都改了就报冲突。
+            "mode": "merge",
+        }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// Remove a worktree. `idOrPath` and the legacy `worktreePath` are mutually
+/// exclusive — sending both is an error, so only send one.
+#[tauri::command]
+pub async fn worktree_remove(
+    state: State<'_, AgentState>,
+    id_or_path: String,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    let v = ext_call(
+        &state,
+        "x.ai/git/worktree/remove",
+        serde_json::json!({ "idOrPath": id_or_path, "force": force, "dryRun": false }),
+    )
+    .await?;
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_string());
+    }
+    Ok(v.get("result").cloned().unwrap_or(v))
+}
+
 // ── 交互式 PTY 终端 ────────────────────────────────────────────────
 //
 // 引擎侧已经把重活做完了：PTY 按 terminalId 寻址、输出按 16ms 批量推送、

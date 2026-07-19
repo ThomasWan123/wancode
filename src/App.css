@@ -2548,3 +2548,20 @@ button.ghost.small {
   min-height: 0;
   flex-direction: column;
 }
+
+/* worktree 操作结果就地显示（冲突信息必须留在按钮旁边，别丢到聊天区） */
+.wt-msg {
+  font-size: 12px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  margin: 4px 0;
+  line-height: 1.5;
+}
+.wt-msg.ok {
+  color: var(--ok);
+  background: rgba(107, 191, 138, 0.1);
+}
+.wt-msg.bad {
+  color: var(--err);
+  background: rgba(224, 115, 107, 0.1);
+}
