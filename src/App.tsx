@@ -320,6 +320,8 @@ function App() {
   const [worktrees, setWorktrees] = useState<{ path: string; branch: string }[]>([]);
   const [wtBusy, setWtBusy] = useState(false);
   const [wtMsg, setWtMsg] = useState<{ bad: boolean; text: string } | null>(null);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const sentInterjectionsRef = useRef<Set<string>>(new Set());
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
   const [showSearch, setShowSearch] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -469,6 +471,14 @@ function App() {
         permModeRef.current = prev;
         localStorage.setItem("wancode-perm-mode", prev);
       });
+    }
+    // bypass/auto 此前只是客户端自动应答——引擎照样发权限请求、走一个来回。
+    // 同步给引擎后它直接跳过请求。失败不回滚 UI：客户端自动应答仍兜底。
+    if (sessionId) {
+      invoke("agent_sync_permission_mode", {
+        yolo: next === "bypass",
+        auto: next === "auto",
+      }).catch(() => {});
     }
   }
 
@@ -861,7 +871,15 @@ function App() {
         } else if (u.sessionUpdate === "user_message_chunk" && u.content?.type === "text") {
           // Skip the engine echo of the message we just sent locally;
           // replayed history (after resume) still renders.
-          if (u.content.text === lastSentRef.current) {
+          // 恢复会话重播：插话在 chat_history 里是包了
+          // "The user sent a message while you were working:\n<user_query>…</user_query>"
+          // 的合成消息。解包还原成 ⚡ 样式，而不是把包装文本原样糊出来。
+          const ijm = /^The user sent a message while you were working:\s*\n<user_query>\n?([\s\S]*?)\n?<\/user_query>\s*$/.exec(
+            u.content.text,
+          );
+          if (ijm) {
+            appendStream("user", `⚡ ${ijm[1]}`);
+          } else if (u.content.text === lastSentRef.current) {
             lastSentRef.current = "";
           } else if (replayCapRef.current !== null) {
             // 分叉回放：只放行模型上下文里真实存在的那几轮（见 forkFrom）
@@ -966,6 +984,20 @@ function App() {
         }
         if (m === "x.ai/mcp/servers_updated" || m === "x.ai/mcp/tools_changed") {
           refreshMcpLive();
+          return;
+        }
+        // 插话回显：引擎向所有窗格广播；自己发的（id 在集合里）跳过，
+        // 其他客户端发起的照常渲染
+        if (m === "x.ai/session/interjection") {
+          const p = e.payload?.params ?? {};
+          // 广播里的键是 interjectionId（不是 id）——读错键 = 去重永不命中，
+          // 自己的插话会显示两遍。实测踩过。
+          const iid = p.interjectionId;
+          if (iid && sentInterjectionsRef.current.has(iid)) {
+            sentInterjectionsRef.current.delete(iid);
+          } else if (p.text) {
+            setItems((prev) => [...prev, { kind: "user", text: `⚡ ${p.text}` }]);
+          }
           return;
         }
         // 实时定时任务通知（恢复会话时引擎还会整体重播一遍 created）
@@ -1292,6 +1324,25 @@ function App() {
       // fork only writes files — the session still has to be opened.
       await startSession(newId, undefined, true);
       setInput(text);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /// Mid-turn steering: inject the composer text into the RUNNING turn
+  /// without cancelling it and without queueing. The engine broadcasts
+  /// `x.ai/session/interjection` to all panes — we mint the id so the
+  /// listener can skip our own echo (we render optimistically here).
+  async function sendInterject() {
+    const text = input.trim();
+    if (!text || !sessionIdRef.current) return;
+    const id = crypto.randomUUID();
+    sentInterjectionsRef.current.add(id);
+    setInput("");
+    onComposerChange("");
+    setItems((prev) => [...prev, { kind: "user", text: `⚡ ${text}` }]);
+    try {
+      await invoke("agent_interject", { text, interjectionId: id });
     } catch (e) {
       setError(String(e));
     }
@@ -3065,7 +3116,77 @@ function App() {
             {queue.map((q, n) => (
               <div key={q.id} className="queue-row">
                 <span className="queue-idx">{n + 1}</span>
-                <span className="queue-text">{q.text}</span>
+                {editingQueueId === q.id ? (
+                  <input
+                    className="queue-edit-input"
+                    autoFocus
+                    defaultValue={q.text}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const v = e.currentTarget.value.trim();
+                        setEditingQueueId(null);
+                        // 引擎确认后经 queue/changed 广播回来刷新文本，不乐观更新
+                        if (v && v !== q.text)
+                          invoke("agent_queue_edit", { id: q.id, newText: v }).catch((err) =>
+                            setError(String(err)),
+                          );
+                      } else if (e.key === "Escape") setEditingQueueId(null);
+                    }}
+                    onBlur={() => setEditingQueueId(null)}
+                  />
+                ) : (
+                  <span className="queue-text" title={q.text}>
+                    {q.text}
+                  </span>
+                )}
+                <button
+                  className="icon-btn queue-x"
+                  title={t.queueMoveUp}
+                  disabled={n === 0}
+                  onClick={() => {
+                    const ids = queue.map((x) => x.id);
+                    [ids[n - 1], ids[n]] = [ids[n], ids[n - 1]];
+                    invoke("agent_queue_reorder", { orderedIds: ids }).catch((e) =>
+                      setError(String(e)),
+                    );
+                  }}
+                >
+                  ↑
+                </button>
+                <button
+                  className="icon-btn queue-x"
+                  title={t.queueMoveDown}
+                  disabled={n === queue.length - 1}
+                  onClick={() => {
+                    const ids = queue.map((x) => x.id);
+                    [ids[n], ids[n + 1]] = [ids[n + 1], ids[n]];
+                    invoke("agent_queue_reorder", { orderedIds: ids }).catch((e) =>
+                      setError(String(e)),
+                    );
+                  }}
+                >
+                  ↓
+                </button>
+                <button
+                  className="icon-btn queue-x"
+                  title={t.queueEdit}
+                  onClick={() => setEditingQueueId(q.id)}
+                >
+                  <IconPencil size={12} />
+                </button>
+                <button
+                  className="icon-btn queue-x"
+                  title={t.queueInterjectNow}
+                  onClick={() =>
+                    // 立即插话：这条排队消息不等回合结束，当前回合内注入执行。
+                    // 版本守卫同 remove——过期就是良性 no-op + 引擎重播队列。
+                    invoke("agent_queue_interject", { id: q.id, expectedVersion: q.version }).catch(
+                      (e) => setError(String(e)),
+                    )
+                  }
+                >
+                  ⚡
+                </button>
                 <button
                   className="icon-btn queue-x"
                   title={t.queueRemove}
@@ -3161,7 +3282,20 @@ function App() {
                 onComposerChange(next < 0 ? draftRef.current : historyRef.current[next]);
                 return;
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              // Alt+Enter：忙时插话（不打断当前回合）
+              if (e.key === "Enter" && e.altKey && busy) {
+                e.preventDefault();
+                sendInterject();
+                return;
+              }
+              // Shift+Tab：切换计划模式（对标 Claude Code 的模式循环键）。
+              // 走引擎的 toggle 通知，它回发 current_mode_update，UI 跟随。
+              if (e.key === "Tab" && e.shiftKey && sessionId) {
+                e.preventDefault();
+                invoke("agent_toggle_plan_mode").catch(() => {});
+                return;
+              }
+              if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
                 e.preventDefault();
                 histIdxRef.current = -1;
                 send();
@@ -3294,6 +3428,25 @@ function App() {
                           {permMode === m && <IconCheck size={15} className="mode-item-check" />}
                         </button>
                       ))}
+                      <button
+                        className="mode-item mode-reset"
+                        onClick={() => {
+                          setModeMenu(false);
+                          invoke("permissions_reset")
+                            .then(() =>
+                              setItems((prev) => [
+                                ...prev,
+                                { kind: "note", text: t.permResetDone },
+                              ]),
+                            )
+                            .catch((e) => setError(String(e)));
+                        }}
+                      >
+                        <span className="mode-item-text">
+                          <span className="mode-item-label">{t.permReset}</span>
+                          <span className="mode-item-desc">{t.permResetDesc}</span>
+                        </span>
+                      </button>
                     </div>
                   </>
                 )}
@@ -3310,13 +3463,24 @@ function App() {
                 </button>
               )}
               {busy ? (
-                <button
-                  className="send-btn stop"
-                  onClick={() => invoke("agent_cancel").catch(() => {})}
-                  title={t.stopTitle}
-                >
-                  <IconStop size={16} />
-                </button>
+                <>
+                  {/* 插话：不打断也不排队，当前回合内注入引导（Alt+Enter） */}
+                  <button
+                    className="send-btn interject"
+                    onClick={sendInterject}
+                    disabled={!input.trim()}
+                    title={t.interjectTitle}
+                  >
+                    ⚡
+                  </button>
+                  <button
+                    className="send-btn stop"
+                    onClick={() => invoke("agent_cancel").catch(() => {})}
+                    title={t.stopTitle}
+                  >
+                    <IconStop size={16} />
+                  </button>
+                </>
               ) : (
                 <button
                   className="send-btn"

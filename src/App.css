@@ -2565,3 +2565,30 @@ button.ghost.small {
   color: var(--err);
   background: rgba(224, 115, 107, 0.1);
 }
+
+/* 插话按钮：琥珀色区分于发送/停止 */
+.send-btn.interject {
+  background: var(--warn);
+  color: #1a1a1a;
+  font-size: 15px;
+}
+
+/* 队列行内编辑 */
+.queue-edit-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+/* 权限菜单底部的重置项：弱化显示 */
+.mode-item.mode-reset {
+  border-top: 1px solid var(--border-soft);
+  opacity: 0.85;
+}

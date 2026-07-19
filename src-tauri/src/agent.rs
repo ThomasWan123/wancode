@@ -1137,6 +1137,115 @@ async fn ext_notify(
     Ok(())
 }
 
+/// Mid-turn interjection (`x.ai/interject`): steer the agent WITHOUT waiting
+/// for the turn to finish and without cancelling it. The session actor drains
+/// it at the next safe point. Distinct from queueing (runs after the turn).
+///
+/// The engine broadcasts `x.ai/session/interjection` to every attached pane;
+/// we mint `interjectionId` so the frontend can dedup its own optimistic echo.
+#[tauri::command]
+pub async fn agent_interject(
+    state: State<'_, AgentState>,
+    text: String,
+    interjection_id: String,
+) -> Result<serde_json::Value, String> {
+    ext_call(
+        &state,
+        "x.ai/interject",
+        serde_json::json!({ "text": text, "interjectionId": interjection_id }),
+    )
+    .await
+}
+
+/// Edit a queued prompt in place (`x.ai/queue/edit`, notification path).
+#[tauri::command]
+pub async fn agent_queue_edit(
+    state: State<'_, AgentState>,
+    id: String,
+    new_text: String,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/queue/edit",
+        serde_json::json!({ "id": id, "newText": new_text }),
+    )
+    .await
+}
+
+/// Reorder the queue (`x.ai/queue/reorder`). Full ordered id list wins.
+#[tauri::command]
+pub async fn agent_queue_reorder(
+    state: State<'_, AgentState>,
+    ordered_ids: Vec<String>,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/queue/reorder",
+        serde_json::json!({ "orderedIds": ordered_ids }),
+    )
+    .await
+}
+
+/// Promote a queued prompt to a mid-turn interjection (`x.ai/queue/interject`):
+/// it runs NOW instead of waiting its turn. Version-guarded like remove.
+#[tauri::command]
+pub async fn agent_queue_interject(
+    state: State<'_, AgentState>,
+    id: String,
+    expected_version: u64,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/queue/interject",
+        serde_json::json!({ "id": id, "expectedVersion": expected_version }),
+    )
+    .await
+}
+
+/// Toggle plan mode (`x.ai/toggle_plan_mode`, notification path). The engine
+/// flips plan⇄default and emits `current_mode_update`, which the UI already
+/// follows — so this needs no response handling. Bound to Shift+Tab.
+#[tauri::command]
+pub async fn agent_toggle_plan_mode(state: State<'_, AgentState>) -> Result<(), String> {
+    ext_notify(&state, "x.ai/toggle_plan_mode", serde_json::json!({})).await
+}
+
+/// Forget all "always allow" tool-permission grants (`x.ai/permissions/reset`).
+#[tauri::command]
+pub async fn permissions_reset(state: State<'_, AgentState>) -> Result<(), String> {
+    ext_notify(&state, "x.ai/permissions/reset", serde_json::json!({})).await
+}
+
+/// Sync the client-side permission mode to the engine
+/// (`x.ai/yolo_mode_changed`). Until now bypass/auto were client-side only —
+/// the engine still raised permission requests and we auto-answered them.
+/// With this the engine skips the round-trip entirely.
+///
+/// Key casing is the engine's, verbatim: `clientIdentifier` is camelCase,
+/// `yolo_mode` / `auto_mode` / `permission_mode` are snake_case.
+#[tauri::command]
+pub async fn agent_sync_permission_mode(
+    state: State<'_, AgentState>,
+    yolo: bool,
+    auto: bool,
+) -> Result<(), String> {
+    ext_notify(
+        &state,
+        "x.ai/yolo_mode_changed",
+        // 不传 clientIdentifier：引擎按 origin_client.product == sender 匹配
+        // 会话，而我们从未在 initialize meta 里声明过 origin client（= None），
+        // 传了标识就永远匹配不上——同步变成静默 no-op（实测踩过：切了自动
+        // 模式引擎照样发权限请求）。单客户端应用走 sender_id.is_none() 分支
+        // 匹配全部会话即可。
+        serde_json::json!({
+            "yolo_mode": yolo,
+            "auto_mode": auto,
+            "permission_mode": if yolo { "yolo" } else if auto { "auto" } else { "default" },
+        }),
+    )
+    .await
+}
+
 /// Drop one queued prompt. `expected_version` guards against acting on a stale
 /// view (mismatch = benign no-op + the engine rebroadcasts the queue).
 #[tauri::command]
