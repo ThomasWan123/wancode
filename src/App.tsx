@@ -2397,22 +2397,6 @@ function App() {
                   </button>
                   <button
                     className="ghost"
-                    disabled={(gitInfo.staged?.length ?? 0) + (gitInfo.unstaged?.length ?? 0) === 0}
-                    title={t.gitStashHint}
-                    onClick={async () => {
-                      try {
-                        await invoke("git_stash", { message: null });
-                        setItems((prev) => [...prev, { kind: "note", text: t.gitStashed }]);
-                        refreshGit();
-                      } catch (e) {
-                        setError(String(e));
-                      }
-                    }}
-                  >
-                    {t.gitStash}
-                  </button>
-                  <button
-                    className="ghost"
                     disabled={!gitInfo.files?.length}
                     onClick={() => {
                       setShowGit(false);
