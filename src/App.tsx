@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
 import { GitPanel } from "./features/git/GitPanel";
+import { TasksPanel } from "./features/tasks/TasksPanel";
+import { TerminalPanel } from "./features/terminal/TerminalPanel";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
@@ -17,7 +19,6 @@ import {
   IconX, IconPencil, IconTrash, IconFile, IconFolderClosed,
   IconCheck, IconShield, IconChevron, IconSearch, IconCopy,
 } from "./icons";
-import PtyTerm from "./PtyTerm";
 import "./App.css";
 
 type SessionEntry = {
@@ -1866,130 +1867,7 @@ function App() {
         </div>
       )}
 
-      {showTasks && (
-        <div className="modal-mask" onClick={() => setShowTasks(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title panel-title">
-              <IconTerminal size={16} /> {t.tasksTitle}
-            </div>
-
-            {bgTasks.length === 0 &&
-              subagents.length === 0 &&
-              Object.keys(schedTasks).length === 0 && (
-                <div className="sidebar-empty">{t.tasksEmpty}</div>
-              )}
-
-            {bgTasks.length > 0 && (
-              <div className="git-group">
-                <div className="git-group-head">
-                  <span>{t.tasksBg(bgTasks.length)}</span>
-                </div>
-                {bgTasks.map((b) => {
-                  // TaskSnapshot 是 snake_case
-                  const id = b.task_id ?? b.taskId;
-                  const cmd = b.display_command ?? b.command ?? "";
-                  const done = b.completed === true;
-                  return (
-                    <div key={id} className="task-row">
-                      <span className={`task-dot ${done ? "done" : "run"}`} />
-                      <span className="task-cmd" title={cmd}>
-                        {cmd}
-                      </span>
-                      {done ? (
-                        <span className="task-exit">
-                          {b.exit_code === 0 ? "exit 0" : `exit ${b.exit_code ?? "?"}`}
-                        </span>
-                      ) : (
-                        <button
-                          className="git-mini danger"
-                          onClick={async () => {
-                            await invoke("task_kill", { taskId: id }).catch((e) =>
-                              setError(String(e)),
-                            );
-                            refreshTasks();
-                          }}
-                        >
-                          {t.taskKill}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {subagents.length > 0 && (
-              <div className="git-group">
-                <div className="git-group-head">
-                  <span>{t.tasksSub(subagents.length)}</span>
-                </div>
-                {subagents.map((sa) => (
-                  // SubagentLiveSnapshotDto 是 camelCase
-                  <div key={sa.subagentId} className="task-row">
-                    <span className="task-dot run" />
-                    <span className="task-cmd" title={sa.description}>
-                      <b>{sa.subagentType}</b> {sa.description}
-                    </span>
-                    <span className="task-exit">
-                      {Math.round((sa.durationMs ?? 0) / 1000)}s · {sa.turnCount ?? 0}
-                      {t.tasksTurns} · {sa.contextUsagePct ?? 0}%
-                    </span>
-                    <button
-                      className="git-mini danger"
-                      onClick={async () => {
-                        await invoke("subagent_cancel", { subagentId: sa.subagentId }).catch((e) =>
-                          setError(String(e)),
-                        );
-                        refreshTasks();
-                      }}
-                    >
-                      {t.taskCancel}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {Object.keys(schedTasks).length > 0 && (
-              <div className="git-group">
-                <div className="git-group-head">
-                  <span>{t.tasksSched(Object.keys(schedTasks).length)}</span>
-                </div>
-                {Object.values(schedTasks).map((s) => (
-                  <div key={s.taskId} className="task-row">
-                    <span className="task-dot run" />
-                    <span className="task-cmd" title={s.prompt}>
-                      <b>{s.humanSchedule}</b> {s.prompt}
-                    </span>
-                    {s.nextFireAt && (
-                      <span className="task-exit" title={s.nextFireAt}>
-                        {t.tasksNextFire} {new Date(s.nextFireAt).toLocaleTimeString()}
-                      </span>
-                    )}
-                    <button
-                      className="git-mini danger"
-                      onClick={() =>
-                        // 删除成功后引擎会发 scheduled_task_deleted，由它移除该行；
-                        // 这里不做乐观删除，免得和通知重复处理。
-                        invoke("scheduler_delete", { taskId: s.taskId }).catch((e) =>
-                          setError(String(e)),
-                        )
-                      }
-                    >
-                      {t.taskCancel}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="modal-footer">
-              <span />
-              <button onClick={() => setShowTasks(false)}>{t.close}</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, t }} />
 
       {/* 文件夹信任：这个仓库自带 MCP/hooks/LSP 配置，未授权前引擎已挡住它们。 */}
       {trustReq && (
@@ -2602,54 +2480,7 @@ function App() {
         </div>
       )}
 
-      {showTerminal && (
-        <div className="terminal-panel">
-          <div className="terminal-head">
-            <span className="panel-title"><IconTerminal size={14} /> {lang === "zh" ? "终端" : "Terminal"}</span>
-            {/* Agent 的命令输出（只读）和可交互 shell 是两回事，分开两页 */}
-            <div className="term-tabs">
-              <button
-                className={`term-tab ${termTab === "output" ? "on" : ""}`}
-                onClick={() => setTermTab("output")}
-              >
-                {t.termTabOutput}
-              </button>
-              <button
-                className={`term-tab ${termTab === "shell" ? "on" : ""}`}
-                onClick={() => {
-                  setPtyOpened(true);
-                  setTermTab("shell");
-                }}
-              >
-                {t.termTabShell}
-              </button>
-            </div>
-            <div>
-              {termTab === "output" && (
-                <button className="ghost small" title={lang === "zh" ? "清空" : "Clear"} onClick={() => setTerminalLines([])}>
-                  🧹
-                </button>
-              )}
-              <button className="ghost small" onClick={() => setShowTerminal(false)}>
-                ✕
-              </button>
-            </div>
-          </div>
-          {termTab === "output" && (
-            <pre className="terminal-body">
-              {terminalLines.length ? terminalLines.join("\n") : lang === "zh" ? "（暂无命令输出）" : "(no command output yet)"}
-            </pre>
-          )}
-          {/* 一旦开过就保持挂载，只用 CSS 藏起来：卸载会 kill 掉 PTY，
-              切一下标签就把用户敲了一半的命令和整个 shell 会话丢了。
-              key 绑 sessionId：换会话时重建，避免旧 PTY 的输出串进新会话。 */}
-          {ptyOpened && (
-            <div className="pty-wrap" style={{ display: termTab === "shell" ? "flex" : "none" }}>
-              <PtyTerm key={sessionId} sessionKey={sessionId} dark={theme !== "light"} onError={setError} />
-            </div>
-          )}
-        </div>
-      )}
+      <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
 
       <input
         ref={fileInputRef}
