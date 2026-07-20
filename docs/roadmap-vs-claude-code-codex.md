@@ -19,6 +19,12 @@
 | ⛔ INTERNAL — leader/debug/内部重载 | 15 | 含 mcp/call、mcp/sdk*（是引擎→客户端的反向桥，当请求发= method_not_found） |
 | ⛔ FAKE — 测试夹具/前缀/`_meta` 键 | 51 | `x.ai/foo`、`x.ai/test`、`bashOutputNoColor`、`x.ai/folderTrust` 等 |
 
+> **v0.12.0 增补（2026-07-20）**：#83 git 串仓库根修（引擎 resolve 失败被 .ok() 吞掉后
+> 回退到 workspace-hub 根——嵌入式场景即宿主仓库；客户端现对 git/* 强制显式 gitRoot）、
+> API 一键配置（三预设卡 + fail-closed，假 Key/错端点双重实证零落盘）、默认联网搜索
+> MCP 播种（web-search/web-reader，${ZHIPU_API_KEY} 引用零明文，只播一次不覆盖）。
+> stash 等 git 补全随 #83 解锁行为级验证。
+
 ### 覆盖率（真分母 = **179**，含分类审计漏掉的 skills/refresh-baseline）
 
 | 指标 | 数值 |
@@ -249,10 +255,22 @@ worktree：`create`、`show`、`gc`、`db/stats`、`create_from_worktree(_sync)`
 ### 完成后的账
 52 已覆盖 + P2.1~P2.10 约 75 项 ≈ **127/178 ≈ 71%**，其中 60% 门槛（107）预计在 P2.8 完成时越过。
 
-### 第二阶段之外（保持不变）
-- 推理强度选择、键盘快捷键 —— 打磨项，与接线并行安排
+### 第二阶段之外（2026-07-20 修订）
+
+**进行中：新手引导（v0.12.x）**
+从 GitHub 下载后的第一分钟决定留存。首次运行（零模型配置）自动弹向导：
+① 选服务商卡片 → 贴 Key → 测连接（fail-closed）；② 智谱系自动播种
+web-search/web-reader MCP（DeepSeek 用户如实提示需智谱 Key，不装假）；
+③ 引导打开工作区。两步进入可用状态。可跳过，设置里随时补。
+
+**待排（按优先级）**
+- 推理强度选择、键盘快捷键 —— 打磨项
 - Home 统计仪表盘、worktree 三方合并 UI —— 先验证需求
 - 沙箱执行 —— Windows 侧独立项目量级
+
+**遗留验证债（如实记账）**
+- P2.3/4/7/8/9 仍为通路级；pty/load 重连回放行为级验证欠一次
+- P2.2 启用方向的增量公告仅代码级确认
 
 ---
 
