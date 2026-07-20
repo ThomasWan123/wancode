@@ -347,17 +347,37 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
                 serde_json::to_value(&boxed.request.update).unwrap_or(serde_json::Value::Null);
             if std::env::var("WANCODE_AUTOTEST").is_ok() {
                 use std::io::Write;
+                let kind = payload
+                    .get("sessionUpdate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
                 let log = std::env::temp_dir().join("wancode-autotest.log");
                 if let Ok(mut f) =
                     std::fs::OpenOptions::new().create(true).append(true).open(&log)
                 {
-                    let _ = writeln!(f, "update: {payload}");
+                    let _ = writeln!(f, "update: {kind}");
                 }
             }
             let _ = app.emit("agent://update", payload);
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessage::RequestPermission(req) => {
+            // 无头 smoke：自动选第一个选项（引擎约定首项为放行），否则
+            // S3/S4 的命令权限会等前端 600 秒。仅 AUTOTEST 模式生效。
+            if std::env::var("WANCODE_AUTOTEST").is_ok() {
+                let first = req.request.options.first().map(|o| o.option_id.clone());
+                let outcome = match first {
+                    Some(id) => acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(id),
+                    ),
+                    None => acp::RequestPermissionOutcome::Cancelled,
+                };
+                let _ = req
+                    .response_tx
+                    .send(Ok(acp::RequestPermissionResponse::new(outcome)));
+                return;
+            }
             let state: State<'_, AgentState> = app.state();
             let id = state.next_permission_id.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = oneshot::channel::<Option<String>>();
@@ -518,47 +538,192 @@ pub async fn agent_plan_respond(
 
 /// Self-test driven by `WANCODE_AUTOTEST=<workspace-dir>`: exercises the full
 /// backend glue (start → prompt → events) without the UI and logs the result
-/// to `%TEMP%\wancode-autotest.log`.
+/// Headless smoke suite (v0.13 refactor safety net).
+///
+/// `WANCODE_AUTOTEST=<fixture-dir>` 启动即运行：6 个场景全部走真实引擎，
+/// 断言全部落在磁盘/git2 层（无 UI 依赖，坐标点击的维护成本教训）。
+/// 结果写 %TEMP%/wancode-autotest.log，结尾一行 `SMOKE DONE pass=N fail=M`，
+/// 随后进程自杀（scripts/smoke.ps1 轮询日志取结果）。
 pub async fn autotest(app: AppHandle, workspace: String) {
     let log = std::env::temp_dir().join("wancode-autotest.log");
+    let _ = std::fs::remove_file(&log);
     let write = |s: &str| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
             let _ = writeln!(f, "{s}");
         }
     };
-    write("autotest: starting session");
+    let mut pass = 0u32;
+    let mut fail = 0u32;
+    macro_rules! check {
+        ($name:expr, $ok:expr, $detail:expr) => {{
+            let ok: bool = $ok;
+            if ok { pass += 1 } else { fail += 1 }
+            write(&format!("SMOKE {} {}: {}", $name, if ok { "PASS" } else { "FAIL" }, $detail));
+        }};
+    }
+
     let state: State<'_, AgentState> = app.state();
-    let started =
-        start_inner(app.clone(), &state, workspace, Some("glm-4-flash".into()), None).await;
-    match &started {
-        Ok(r) => write(&format!(
-            "autotest: session={} models={:?}",
-            r.session_id, r.models
-        )),
+
+    // ── S1 会话启动（默认模型）──────────────────────────────────────
+    let started = start_inner(app.clone(), &state, workspace.clone(), None, None).await;
+    let (sid, cwd) = match &started {
+        Ok(r) => {
+            check!("S1-start", true, format!("session={}", r.session_id));
+            (r.session_id.clone(), r.cwd.clone())
+        }
         Err(e) => {
-            write(&format!("autotest: START FAILED: {e:#}"));
-            return;
+            check!("S1-start", false, format!("{e:#}"));
+            write(&format!("SMOKE DONE pass={pass} fail={fail}"));
+            std::process::exit(1);
+        }
+    };
+    let sessions_base = xai_grok_shell::util::grok_home::grok_home().join("sessions");
+    let chat_text = || -> String {
+        walkdir_find(&sessions_base, &sid)
+            .map(|d| d.join("chat_history.jsonl"))
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .unwrap_or_default()
+    };
+    let acp_tx = {
+        let g = state.handle.lock().await;
+        g.as_ref().unwrap().acp_tx.clone()
+    };
+    let send = |text: String| {
+        let tx = acp_tx.clone();
+        let sid = acp::SessionId::new(sid.clone());
+        async move {
+            let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+            {
+                let r: Result<acp::PromptResponse, _> =
+                    acp_send(acp::PromptRequest::new(sid, blocks), &tx).await;
+                r
+            }
+        }
+    };
+
+    // ── S2 基本回复 ────────────────────────────────────────────────
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        send("reply with exactly: SMOKE-BASIC".into()),
+    )
+    .await;
+    let detail = match &r {
+        Err(_) => "timeout-120s".to_string(),
+        Ok(Err(e)) => format!("err={e}"),
+        Ok(Ok(resp)) => format!("stop={:?}", resp.stop_reason),
+    };
+    let ok = matches!(&r, Ok(Ok(_))) && chat_text().contains("SMOKE-BASIC");
+    check!("S2-reply", ok, detail);
+
+    // ── S3 忙时排队（长任务 + 两条排队，全部完成且顺序保留）────────
+    let long = tauri::async_runtime::spawn(send("Run the command ping -n 8 127.0.0.1 once, then reply SMOKE-LONG".into()));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let qa = tauri::async_runtime::spawn(send("reply with exactly: SMOKE-QA".into()));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let qb = tauri::async_runtime::spawn(send("reply with exactly: SMOKE-QB".into()));
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(180), long).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), qa).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), qb).await;
+    let text = chat_text();
+    let order_ok = match (text.find("SMOKE-QA"), text.find("SMOKE-QB")) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    };
+    check!(
+        "S3-queue",
+        text.contains("SMOKE-LONG") && order_ok,
+        format!("long={} order={order_ok}", text.contains("SMOKE-LONG"))
+    );
+
+    // ── S4 回合中插话 ──────────────────────────────────────────────
+    let long2 = tauri::async_runtime::spawn(send("Run the command ping -n 20 127.0.0.1 once, then reply SMOKE-D".into()));
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let ij = ext_call(
+        &state,
+        "x.ai/interject",
+        serde_json::json!({ "text": "Stop now. Reply with exactly: SMOKE-IJ" }),
+    )
+    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(180), long2).await;
+    let ok = ij.is_ok() && chat_text().contains("SMOKE-IJ");
+    check!("S4-interject", ok, format!("call={}", ij.is_ok()));
+
+    // ── S5 Git 状态 + 贮藏（git2 断言，不依赖 git CLI）────────────
+    let fixture = (|| -> Result<(), String> {
+        let repo = git2::Repository::init(&cwd).map_err(|e| e.to_string())?;
+        let f = std::path::Path::new(&cwd).join("smoke.txt");
+        std::fs::write(&f, "base").map_err(|e| e.to_string())?;
+        let mut idx = repo.index().map_err(|e| e.to_string())?;
+        idx.add_path(std::path::Path::new("smoke.txt")).map_err(|e| e.to_string())?;
+        idx.write().map_err(|e| e.to_string())?;
+        let tree_id = idx.write_tree().map_err(|e| e.to_string())?;
+        let tree = repo.find_tree(tree_id).map_err(|e| e.to_string())?;
+        let sig = git2::Signature::now("smoke", "smoke@t").map_err(|e| e.to_string())?;
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&f, "changed").map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    match fixture {
+        Ok(()) => {
+            let st = git_status_ext(state.clone()).await;
+            let has_change = st
+                .as_ref()
+                .ok()
+                .and_then(|v| v.pointer("/result/data/unstaged"))
+                .and_then(|u| u.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            let stash = git_stash(state.clone(), None).await;
+            let clean_after = git2::Repository::open(&cwd)
+                .ok()
+                .map(|mut r| {
+                    let mut n = 0;
+                    let _ = r.stash_foreach(|_, _, _| {
+                        n += 1;
+                        true
+                    });
+                    let dirty = r
+                        .statuses(None)
+                        .map(|s| s.iter().any(|e| e.status() != git2::Status::CURRENT))
+                        .unwrap_or(true);
+                    n == 1 && !dirty
+                })
+                .unwrap_or(false);
+            check!(
+                "S5-git-stash",
+                has_change && stash.is_ok() && clean_after,
+                format!("change={has_change} stash={} clean={clean_after}", stash.is_ok())
+            );
+        }
+        Err(e) => check!("S5-git-stash", false, format!("fixture: {e}")),
+    }
+
+    // ── S6 会话恢复（同 id 续接，历史保留）────────────────────────
+    let before_len = chat_text().lines().count();
+    let resumed = start_inner(app.clone(), &state, workspace, None, Some(sid.clone())).await;
+    let same_id = resumed.as_ref().map(|r| r.session_id == sid).unwrap_or(false);
+    let after_len = chat_text().lines().count();
+    check!(
+        "S6-resume",
+        same_id && after_len >= before_len,
+        format!("same_id={same_id} lines {before_len}->{after_len}")
+    );
+
+    write(&format!("SMOKE DONE pass={pass} fail={fail}"));
+    std::process::exit(if fail > 0 { 1 } else { 0 });
+}
+
+/// 在 sessions 目录下找包含指定会话 id 的目录（两层结构：cwd 编码/会话 id）。
+fn walkdir_find(base: &std::path::Path, sid: &str) -> Option<std::path::PathBuf> {
+    for cwd_dir in std::fs::read_dir(base).ok()?.flatten() {
+        let cand = cwd_dir.path().join(sid);
+        if cand.is_dir() {
+            return Some(cand);
         }
     }
-    let (acp_tx, session_id) = {
-        let guard = state.handle.lock().await;
-        let h = guard.as_ref().expect("session just started");
-        (h.acp_tx.clone(), h.session_id.clone())
-    };
-    let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-        "读取当前目录下的 notes.md 文件，然后告诉我文件里的秘密口令是什么".to_string(),
-    ))];
-    write("autotest: sending prompt");
-    let result: Result<acp::PromptResponse, _> =
-        acp_send(acp::PromptRequest::new(session_id, blocks), &acp_tx).await;
-    match result {
-        Ok(resp) => write(&format!(
-            "autotest: TURN OK stop_reason={:?}",
-            resp.stop_reason
-        )),
-        Err(e) => write(&format!("autotest: TURN FAILED: {e}")),
-    }
+    None
 }
 
 /// A pasted image: base64 data + mime type.
