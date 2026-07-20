@@ -786,23 +786,41 @@ pub async fn provider_quick_setup(
         return Err(format!("连接测试未通过，未保存任何配置。{e}"));
     }
 
-    for (key, name, model) in &models {
-        model_upsert(
-            key.to_string(),
-            name.to_string(),
-            model.to_string(),
-            base_url.to_string(),
-            Some(api_key.clone()),
-        )
-        .await?;
-    }
-
+    // ── 配置事务（v0.12.2）─────────────────────────────────────────
+    // 顺序：内存组装完整 TOML（模型 + MCP 播种同一事务）→ 临时文件 →
+    // 原子替换 → 钥匙串。钥匙串任一项失败 → 回滚本次新写入的钥匙串项 +
+    // 原子写回原配置文本。任何路径下都不存在"半配置"。
+    let path = user_config_path();
+    let original = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut =
+        original.parse().map_err(|e| format!("配置解析失败（原文件未动）: {e}"))?;
+    apply_provider_preset(&mut doc, &models, base_url);
     let mut seeded = false;
     if preset.starts_with("glm") {
-        // 让 ${ZHIPU_API_KEY} 即刻可解析（无需重启），并播种默认 MCP。
+        seeded = seed_default_mcp_into(&mut doc);
+    }
+    write_config_atomic(&path, &doc.to_string())?;
+
+    let mut written_keys: Vec<&str> = Vec::new();
+    for (key, _, _) in &models {
+        match keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.set_password(&api_key)) {
+            Ok(()) => written_keys.push(key),
+            Err(e) => {
+                // 回滚：删掉本次写入的钥匙串项，恢复原配置
+                for k in &written_keys {
+                    let _ = keyring::Entry::new(KEYRING_SERVICE, k)
+                        .and_then(|en| en.delete_credential());
+                }
+                let _ = write_config_atomic(&path, &original);
+                return Err(format!("保存密钥失败，已回滚全部改动: {e}"));
+            }
+        }
+    }
+
+    if preset.starts_with("glm") {
+        // 让 ${ZHIPU_API_KEY} 即刻可解析（无需重启）。
         // Safety: 单线程配置路径，会话尚未启动或与其无关。
         unsafe { std::env::set_var("ZHIPU_API_KEY", &api_key) };
-        seeded = seed_default_mcp().unwrap_or(false);
     }
 
     Ok(serde_json::json!({
@@ -814,34 +832,63 @@ pub async fn provider_quick_setup(
     }))
 }
 
-/// Seed the default 智谱 web-search / web-reader MCP servers, exactly once.
-///
-/// - headers 用 `${ZHIPU_API_KEY}` 环境变量引用，配置文件里不落明文 Key。
-/// - `[ui].wancode_mcp_seeded` 标记保证只播一次：用户删了不复活。
-fn seed_default_mcp() -> Result<bool, String> {
-    let path = user_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+/// Atomically replace a config file: write to a sibling temp file, then
+/// rename over the target. On Windows `std::fs::rename` maps to
+/// MoveFileExW(REPLACE_EXISTING) — the reader never sees a half-written file.
+fn write_config_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, content).map_err(|e| format!("写入临时配置失败: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("原子替换配置失败: {e}")
+    })
+}
 
+/// Apply a provider preset's model entries onto an in-memory config doc.
+/// 纯函数：不做 IO，事务由调用方统一提交（v0.12.2 配置事务化）。
+fn apply_provider_preset(
+    doc: &mut toml_edit::DocumentMut,
+    models: &[(&str, &str, &str)],
+    base_url: &str,
+) {
+    let tbl = doc["model"]
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .expect("model 段");
+    for (key, name, model) in models {
+        let mut entry = toml_edit::Table::new();
+        entry["model"] = toml_edit::value(*model);
+        entry["name"] = toml_edit::value(*name);
+        entry["base_url"] = toml_edit::value(base_url);
+        entry["env_key"] = toml_edit::value(wancode_env_key(key));
+        entry["api_backend"] = toml_edit::value("chat_completions");
+        entry["context_window"] = toml_edit::value(128000i64);
+        tbl.insert(key, toml_edit::Item::Table(entry));
+    }
+}
+
+/// In-memory MCP seeding — same rules as before (marker once / never
+/// overwrite), but operating on the doc so it commits in the SAME atomic
+/// write as the models. Returns whether anything was seeded.
+fn seed_default_mcp_into(doc: &mut toml_edit::DocumentMut) -> bool {
     let already = doc
         .get("ui")
         .and_then(|u| u.get("wancode_mcp_seeded"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if already {
-        return Ok(false);
+        return false;
     }
-
     let servers = doc["mcp_servers"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or("mcp_servers 段类型异常")?;
+        .expect("mcp_servers 段");
     for (name, url) in [
         ("web-search", "https://open.bigmodel.cn/api/mcp/web_search/mcp"),
         ("web-reader", "https://open.bigmodel.cn/api/mcp/web_reader/mcp"),
     ] {
         if servers.contains_key(name) {
-            continue; // 用户已有同名配置，绝不覆盖
+            continue;
         }
         let mut entry = toml_edit::Table::new();
         entry["url"] = toml_edit::value(url);
@@ -850,16 +897,14 @@ fn seed_default_mcp() -> Result<bool, String> {
         entry["headers"] = toml_edit::Item::Table(headers);
         servers.insert(name, toml_edit::Item::Table(entry));
     }
-
     let ui = doc["ui"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or("ui 段类型异常")?;
+        .expect("ui 段");
     ui["wancode_mcp_seeded"] = toml_edit::value(true);
-
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
-    Ok(true)
+    true
 }
+
 
 /// Remove a model preset and its keyring entry.
 #[tauri::command]
@@ -1101,6 +1146,68 @@ pub fn validate_startup_models_at(path: &std::path::Path) -> StartupModels {
         return StartupModels::RepairedDefault(fixed);
     }
     StartupModels::Ok
+}
+
+#[cfg(test)]
+mod config_txn_tests {
+    use super::*;
+
+    const GLM_OPEN: &[(&str, &str, &str)] =
+        &[("glm", "智谱 GLM-5.2", "glm-5.2"), ("glm-air", "智谱 GLM-5-Air", "glm-5-air")];
+
+    #[test]
+    fn preset_writes_all_models_with_env_keys() {
+        let mut doc = toml_edit::DocumentMut::new();
+        apply_provider_preset(&mut doc, GLM_OPEN, "https://open.bigmodel.cn/api/paas/v4");
+        let out = doc.to_string();
+        assert!(out.contains(r#"[model.glm]"#));
+        assert!(out.contains(r#"[model.glm-air]"#));
+        assert!(out.contains(r#"env_key = "WANCODE_KEY_GLM""#));
+        assert!(out.contains(r#"model = "glm-5-air""#));
+    }
+
+    #[test]
+    fn seeding_is_once_and_never_overwrites() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[mcp_servers.web-reader]
+url = "https://example.com/custom"
+"#
+        .parse()
+        .unwrap();
+        assert!(seed_default_mcp_into(&mut doc));
+        let out = doc.to_string();
+        // 已有的 web-reader 绝不覆盖；web-search 补上；标记写入
+        assert!(out.contains("https://example.com/custom"));
+        assert!(!out.contains("web_reader/mcp"));
+        assert!(out.contains("web_search/mcp"));
+        assert!(out.contains("wancode_mcp_seeded = true"));
+        // 零明文：只允许环境变量引用
+        assert!(out.contains("Bearer ${ZHIPU_API_KEY}"));
+        // 第二次是 no-op
+        assert!(!seed_default_mcp_into(&mut doc));
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing() {
+        let p = std::env::temp_dir().join(format!("wancode-atomic-{}.toml", std::process::id()));
+        std::fs::write(&p, "old").unwrap();
+        write_config_atomic(&p, "new-content").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new-content");
+        // 临时文件不残留
+        let tmp = p.with_extension(format!("tmp-{}", std::process::id()));
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn preset_plus_seed_commit_in_one_doc() {
+        // 模型与播种同一事务：单个 doc 内两者都在，一次写盘
+        let mut doc = toml_edit::DocumentMut::new();
+        apply_provider_preset(&mut doc, GLM_OPEN, "https://open.bigmodel.cn/api/paas/v4");
+        assert!(seed_default_mcp_into(&mut doc));
+        let out = doc.to_string();
+        assert!(out.contains("[model.glm]") && out.contains("web_search/mcp"));
+    }
 }
 
 #[cfg(test)]
