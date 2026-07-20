@@ -30,19 +30,30 @@ Agent 引擎复用了开源的 [grok-build](https://github.com/ThomasWan123/grok
 - 🗂️ **会话管理**：历史侧栏、一键恢复重放、重命名、删除
 - 🔌 **MCP 可视化配置**：设置页增删 MCP 服务器（stdio / HTTP）
 - 🧠 **项目记忆**：自动注入工作区根目录的 `AGENTS.md`（兼容 `CLAUDE.md`、`.grok/rules/*.md`）
+- 🚀 **一键配置**：首启向导选卡贴 Key 即可用；连接测试通过才保存，绝无半配置
+- 🔍 **默认联网搜索**：智谱系配置后自动启用 web-search / web-reader MCP（配置零明文）
 - 🌐 **中英双语界面**
 
 ## 快速开始 / Quick Start
 
-### 安装 / Install
+> ⚠️ 请使用 **v0.12.1 及以上**版本。更早的版本在全新安装（从未配置过模型）时无法启动。
+> Use **v0.12.1+**. Earlier versions fail to launch on a fresh install.
 
-从 [Releases](https://github.com/ThomasWan123/wancode/releases) 下载 `.msi` 或 `-setup.exe` 安装即可。
+四步开始干活（无需碰任何配置文件）：
 
-Download the `.msi` or `-setup.exe` from [Releases](https://github.com/ThomasWan123/wancode/releases).
+1. 从 [Releases](https://github.com/ThomasWan123/wancode/releases) 下载 `-setup.exe`（或 `.msi`）安装并启动
+2. 首次启动自动弹出向导：**选择你的服务商卡片**（GLM Coding Plan / 智谱开放平台 / DeepSeek，或自定义 OpenAI 兼容端点）
+3. **粘贴 API Key** —— 自动测试连接，通过才保存；智谱系 Key 会同时自动启用联网搜索（web-search MCP）
+4. **打开一个项目文件夹**，开始对话
 
-### 配置模型 / Configure a model
+Four steps, no config files: install → pick your provider card in the first-run wizard → paste an API key (connection-tested before saving; Zhipu keys also enable web-search MCP automatically) → open a project folder.
 
-编辑 `%USERPROFILE%\.grok\config.toml`（示例接入 DeepSeek）：
+**常见错误 / Common pitfall**：智谱 **Coding Plan**（包月订阅）与**开放平台**（按量计费）是不同端点、Key 不通用。向导里分成两张卡片——按你实际购买的类型选。
+Zhipu's monthly *Coding Plan* and pay-as-you-go *Open Platform* use different endpoints with non-interchangeable keys — pick the card that matches what you bought.
+
+### 高级：手工配置 / Advanced: manual config
+
+不想用向导也可以直接编辑 `%USERPROFILE%\.grok\config.toml`（示例接入 DeepSeek）：
 
 ```toml
 [models]
@@ -56,9 +67,7 @@ api_backend = "chat_completions"
 context_window = 65536
 ```
 
-然后设置环境变量 `DEEPSEEK_API_KEY`（或 `ZHIPU_API_KEY` 等），启动应用 → 选择工作区文件夹 → 打开工作区 → 开始对话。
-
-Set the matching `*_API_KEY` env var, launch the app, pick a workspace folder, and start chatting.
+然后设置对应的 `*_API_KEY` 环境变量。注意：删光所有模型后应用会回到首次运行向导。
 
 ## 从源码构建 / Build from source
 
