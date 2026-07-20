@@ -174,7 +174,15 @@ pub fn run() {
             agent::mcp_config_list,
             agent::mcp_config_upsert,
             agent::mcp_config_remove,
+            agent::crash_recovery_info,
+            agent::crash_recovery_ack,
         ])
+        .on_window_event(|_w, e| {
+            // 优雅关闭 → 标记 clean，崩溃则标记保持 dirty（下次启动出恢复横幅）
+            if matches!(e, tauri::WindowEvent::CloseRequested { .. }) {
+                agent::mark_clean_exit();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

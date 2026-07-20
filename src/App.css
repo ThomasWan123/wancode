@@ -2643,3 +2643,13 @@ button.ghost.small {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   width: 100%; padding: 14px; font-size: 14.5px; border-radius: 10px;
 }
+
+/* 崩溃恢复横幅 */
+.crash-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.crash-banner button { padding: 4px 12px; font-size: 12.5px; }

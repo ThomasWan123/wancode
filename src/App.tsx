@@ -251,6 +251,8 @@ function App() {
   const [modelForm, setModelForm] = useState({ key: "", name: "", model: "", base_url: "", api_key: "" });
   // 首次运行向导：检测到零模型配置时弹出。step 1 = 配 Key，step 2 = 开工作区
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // 上次异常退出的会话（崩溃恢复横幅）
+  const [crashInfo, setCrashInfo] = useState<{ sessionId: string; workspace: string } | null>(null);
   const [obStep, setObStep] = useState<1 | 2>(1);
   const [quickPreset, setQuickPreset] = useState("");
   const [quickKey, setQuickKey] = useState("");
@@ -414,6 +416,16 @@ function App() {
         }
       } catch {
         /* model_list 失败不拦启动 */
+      }
+      // 崩溃恢复：上次异常退出且有会话 → 出横幅，让用户选择恢复或忽略。
+      // 不自动恢复——上次崩溃可能正是那个会话引起的。
+      try {
+        const c = await invoke<any>("crash_recovery_info");
+        if (c?.sessionId) {
+          setCrashInfo({ sessionId: c.sessionId, workspace: c.workspace ?? "" });
+        }
+      } catch {
+        /* 标记读取失败不影响启动 */
       }
       let ws = workspace;
       if (!ws) {
@@ -1776,6 +1788,31 @@ function App() {
               {t.cancel}
             </button>
           </div>
+        </div>
+      )}
+
+      {crashInfo && (
+        <div className="crash-banner">
+          <span>{t.crashPrompt}</span>
+          <button
+            onClick={async () => {
+              const c = crashInfo;
+              setCrashInfo(null);
+              await invoke("crash_recovery_ack").catch(() => {});
+              if (c) startSession(c.sessionId, c.workspace || undefined);
+            }}
+          >
+            {t.crashRestore}
+          </button>
+          <button
+            className="ghost"
+            onClick={() => {
+              setCrashInfo(null);
+              invoke("crash_recovery_ack").catch(() => {});
+            }}
+          >
+            {t.crashDismiss}
+          </button>
         </div>
       )}
 
