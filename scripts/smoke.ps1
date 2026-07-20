@@ -36,9 +36,13 @@ Get-Process wancode -EA SilentlyContinue | Stop-Process -Force -Confirm:$false
 $log = Join-Path $env:TEMP "wancode-autotest.log"
 Remove-Item $log -EA SilentlyContinue
 
+# 进程 cwd 必须在任何 git 仓库之外——引擎存在按进程 cwd 回退的路径（#83 同族）
+Set-Location $env:TEMP
 Write-Host "[smoke] launching with WANCODE_AUTOTEST=$fixture"
 $env:WANCODE_AUTOTEST = $fixture
-$proc = Start-Process -FilePath $exe -PassThru
+$stderr = Join-Path $env:TEMP "wancode-smoke-stderr.log"
+Remove-Item $stderr -EA SilentlyContinue
+$proc = Start-Process -FilePath $exe -PassThru -RedirectStandardError $stderr
 $env:WANCODE_AUTOTEST = $null
 
 # 轮询日志直到 SMOKE DONE（上限 8 分钟——含多次真实模型回合）
@@ -47,12 +51,13 @@ $done = $false
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 5
   if ((Test-Path $log) -and (Select-String -Path $log -Pattern "SMOKE DONE" -Quiet)) { $done = $true; break }
-  if ($proc.HasExited -and -not (Test-Path $log)) { break }  # 启动即崩
+  if ($proc.HasExited) { Write-Host "[smoke] 应用中途退出 exit=$($proc.ExitCode)"; break }
 }
 
 Write-Host "──── wancode-autotest.log ────"
 if (Test-Path $log) { Get-Content $log } else { Write-Host "(无日志——启动失败？)" }
 Write-Host "──────────────────────────────"
+if (Test-Path $stderr) { Write-Host "──── stderr ────"; Get-Content $stderr -Tail 20; Write-Host "────────────────" }
 
 Get-Process wancode -EA SilentlyContinue | Stop-Process -Force -Confirm:$false
 Remove-Item -Recurse -Force $fixture -EA SilentlyContinue

@@ -115,6 +115,13 @@ pub async fn agent_start(
     model: Option<String>,
     resume: Option<String>,
 ) -> Result<StartResult, String> {
+    // smoke 模式：前端不许动会话。debug 构建的 webview 若碰到活着的 dev
+    // server 会加载完整前端并自动启动会话，把 autotest 的 handle 换成
+    // localStorage 工作区（宿主仓库！）——run3 的 stash 事故 + S2/S4 全部
+    // 抖动皆源于此。autotest 走 start_inner 内部路径，不经过这里。
+    if std::env::var("WANCODE_AUTOTEST").is_ok() {
+        return Err("AUTOTEST 模式：前端会话启动被禁用".into());
+    }
     // Tear down any previous session first.
     if let Some(old) = state.handle.lock().await.take() {
         old.cancel.cancel();
@@ -646,6 +653,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     )
     .await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(180), long2).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let ok = ij.is_ok() && chat_text().contains("SMOKE-IJ");
     check!("S4-interject", ok, format!("call={}", ij.is_ok()));
 
@@ -667,11 +675,29 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     })();
     match fixture {
         Ok(()) => {
+            // 事故防线（2026-07-21：一次 stash 打到了宿主仓库，未提交代码
+            // 被回退）：先确认客户端解析的 gitRoot 就是 fixture，不是就
+            // FAIL 并拒绝执行任何写操作。探针同时落日志供根因分析。
+            let resolved = session_git_root(&state).await.ok().flatten();
+            write(&format!("SMOKE S5 resolved gitRoot={resolved:?} fixture={cwd}"));
+            let fixture_ok = resolved
+                .as_deref()
+                .map(|r| {
+                    let norm = |x: &str| x.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+                    norm(r) == norm(&cwd)
+                })
+                .unwrap_or(false);
+            if !fixture_ok {
+                check!("S5-git-stash", false, format!("resolved root 不是 fixture：{resolved:?}——拒绝执行 stash"));
+            } else {
             let st = git_status_ext(state.clone()).await;
             let has_change = st
                 .as_ref()
                 .ok()
-                .and_then(|v| v.pointer("/result/data/unstaged"))
+                .and_then(|v| {
+                    v.pointer("/result/unstaged")
+                        .or_else(|| v.pointer("/result/data/unstaged"))
+                })
                 .and_then(|u| u.as_array())
                 .map(|a| !a.is_empty())
                 .unwrap_or(false);
@@ -686,7 +712,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                     });
                     let dirty = r
                         .statuses(None)
-                        .map(|s| s.iter().any(|e| e.status() != git2::Status::CURRENT))
+                        .map(|s| {
+                            s.iter().any(|e| {
+                                let st = e.status();
+                                st != git2::Status::CURRENT && st != git2::Status::WT_NEW
+                            })
+                        })
                         .unwrap_or(true);
                     n == 1 && !dirty
                 })
@@ -696,6 +727,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                 has_change && stash.is_ok() && clean_after,
                 format!("change={has_change} stash={} clean={clean_after}", stash.is_ok())
             );
+            }
         }
         Err(e) => check!("S5-git-stash", false, format!("fixture: {e}")),
     }
