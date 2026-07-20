@@ -2633,3 +2633,13 @@ button.ghost.small {
 }
 .quick-key-row input:focus { border-color: var(--accent); }
 .quick-result { font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+
+/* 首次运行向导 */
+.ob-modal { max-width: 620px; padding: 28px 30px; }
+.ob-title { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+.ob-sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.6; }
+.ob-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.ob-open {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; padding: 14px; font-size: 14.5px; border-radius: 10px;
+}

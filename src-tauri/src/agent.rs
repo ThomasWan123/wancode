@@ -849,8 +849,43 @@ pub async fn model_remove(key: String) -> Result<(), String> {
     let path = user_config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+    let mut removed_model_id: Option<String> = None;
+    let mut survivor_model_id: Option<String> = None;
     if let Some(models) = doc.get_mut("model").and_then(|v| v.as_table_mut()) {
+        removed_model_id = models
+            .get(&key)
+            .and_then(|e| e.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         models.remove(&key);
+        survivor_model_id = models
+            .iter()
+            .next()
+            .and_then(|(_, e)| e.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
+    // [models].default 指向被删模型时必须跟着清理：悬空 default 会让引擎在
+    // 下次启动时直接 panic（capacity overflow，实测）。有幸存者就指过去，
+    // 一个不剩就删掉整个 [models] 段（零模型时前端不会再启动引擎）。
+    if let Some(removed) = removed_model_id {
+        let dangling = doc
+            .get("models")
+            .and_then(|m| m.get("default"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d == removed);
+        if dangling {
+            match survivor_model_id {
+                Some(next) => {
+                    if let Some(models_tbl) = doc.get_mut("models").and_then(|v| v.as_table_mut()) {
+                        models_tbl["default"] = toml_edit::value(next);
+                    }
+                }
+                None => {
+                    doc.remove("models");
+                }
+            }
+        }
     }
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
 }

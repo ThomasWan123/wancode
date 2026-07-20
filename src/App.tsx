@@ -249,6 +249,9 @@ function App() {
   const [hookForm, setHookForm] = useState({ event: "PostToolUse", command: "" });
   const [modelList, setModelList] = useState<any[]>([]);
   const [modelForm, setModelForm] = useState({ key: "", name: "", model: "", base_url: "", api_key: "" });
+  // 首次运行向导：检测到零模型配置时弹出。step 1 = 配 Key，step 2 = 开工作区
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [obStep, setObStep] = useState<1 | 2>(1);
   const [quickPreset, setQuickPreset] = useState("");
   const [quickKey, setQuickKey] = useState("");
   const [quickBusy, setQuickBusy] = useState(false);
@@ -400,6 +403,18 @@ function App() {
     if (didAutoStart.current) return;
     didAutoStart.current = true;
     (async () => {
+      // 零模型 = 新用户：只弹向导，不启动引擎——引擎在没有任何模型时
+      // 会在启动路径 panic（实测 capacity overflow / RefCell 双崩），
+      // 所以「配好模型再启引擎」不只是体验，是活下来的前提。
+      try {
+        const models = await invoke<any[]>("model_list");
+        if (!models || models.length === 0) {
+          setShowOnboarding(true);
+          return;
+        }
+      } catch {
+        /* model_list 失败不拦启动 */
+      }
       let ws = workspace;
       if (!ws) {
         try {
@@ -1752,6 +1767,109 @@ function App() {
             <button className="ghost" onClick={() => setRewindPoints(null)}>
               {t.cancel}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 首次运行向导：贴 Key → 开工作区，两步进入可用状态 */}
+      {showOnboarding && (
+        <div className="modal-mask">
+          <div className="modal ob-modal">
+            <div className="ob-title">{t.obWelcome}</div>
+            <div className="ob-sub">{obStep === 1 ? t.obStep1Sub : t.obStep2Sub}</div>
+            {obStep === 1 && (
+              <>
+                <div className="preset-cards">
+                  {([
+                    ["glm-coding", "GLM Coding Plan", t.presetGlmCoding],
+                    ["glm-open", "智谱开放平台", t.presetGlmOpen],
+                    ["deepseek", "DeepSeek", t.presetDeepseek],
+                  ] as const).map(([id, label, hint]) => (
+                    <button
+                      key={id}
+                      className={`preset-card ${quickPreset === id ? "active" : ""}`}
+                      onClick={() => setQuickPreset(quickPreset === id ? "" : id)}
+                    >
+                      <b>{label}</b>
+                      <span>{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                {quickPreset && (
+                  <div className="quick-key-row">
+                    <input
+                      type="password"
+                      placeholder={t.quickKeyPlaceholder}
+                      value={quickKey}
+                      onChange={(e) => setQuickKey(e.target.value)}
+                      autoFocus
+                    />
+                    <button
+                      disabled={!quickKey.trim() || quickBusy}
+                      onClick={async () => {
+                        setQuickBusy(true);
+                        setQuickResult("");
+                        try {
+                          const r = await invoke<any>("provider_quick_setup", {
+                            preset: quickPreset,
+                            apiKey: quickKey,
+                          });
+                          setQuickKey("");
+                          refreshModels();
+                          setQuickResult(
+                            `✅ ${t.quickDone}${(r.models ?? [])
+                              .map((m: any) => m.name)
+                              .join("、")}${r.mcpSeeded ? ` · ${t.quickMcpSeeded}` : ""}`,
+                          );
+                          setObStep(2);
+                        } catch (e) {
+                          setQuickResult(`❌ ${String(e)}`);
+                        } finally {
+                          setQuickBusy(false);
+                        }
+                      }}
+                    >
+                      {quickBusy ? t.quickTesting : t.quickGo}
+                    </button>
+                  </div>
+                )}
+                {quickResult && <div className="quick-result">{quickResult}</div>}
+                <div className="ob-foot">
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      setShowOnboarding(false);
+                      setShowSettings(true);
+                      setSettingsTab("models");
+                    }}
+                  >
+                    {t.obCustom}
+                  </button>
+                  <button className="ghost" onClick={() => setShowOnboarding(false)}>
+                    {t.obSkip}
+                  </button>
+                </div>
+              </>
+            )}
+            {obStep === 2 && (
+              <>
+                {quickResult && <div className="quick-result">{quickResult}</div>}
+                <button
+                  className="ob-open"
+                  onClick={() => {
+                    setShowOnboarding(false);
+                    pickFolderAndConnect();
+                  }}
+                >
+                  <IconFolder size={16} /> {t.obOpenFolder}
+                </button>
+                <div className="ob-foot">
+                  <button className="ghost" onClick={() => setShowOnboarding(false)}>
+                    {t.obSkip}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
