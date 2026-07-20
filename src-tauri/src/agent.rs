@@ -135,6 +135,25 @@ async fn start_inner(
 ) -> Result<StartResult> {
     // Make WanCode-managed API keys (stored in the OS keyring) visible to the
     // engine's `env_key` resolution for this process.
+    // ── 启动不变量（v0.12.2）：零模型绝不进入引擎 ─────────────────
+    // 引擎在零模型状态下启动即 panic（capacity overflow / RefCell 双崩，
+    // 实测）。此前的门控只在前端——恢复会话/切工作区/删最后一个模型后
+    // 继续操作都可能绕过它直达这里。校验必须住在所有入口的必经之路上。
+    // 错误码是前端契约：MODEL_REQUIRED → 重开向导；MODEL_CONFIG_INVALID
+    // → 提示修配置。改动前先跑 config 单测。
+    match validate_startup_models() {
+        StartupModels::Ok => {}
+        StartupModels::NoModels => {
+            return Err(anyhow!("MODEL_REQUIRED: 尚未配置任何模型"));
+        }
+        StartupModels::RepairedDefault(fixed) => {
+            tracing::warn!("[models].default 悬空，已自动修复为 {fixed}");
+        }
+        StartupModels::Invalid(reason) => {
+            return Err(anyhow!("MODEL_CONFIG_INVALID: {reason}"));
+        }
+    }
+
     inject_managed_keys();
     let cwd = PathBuf::from(&workspace);
     if !cwd.is_dir() {
@@ -1017,6 +1036,151 @@ pub async fn skill_write(path: String, content: String) -> Result<(), String> {
         p
     };
     std::fs::write(file, content).map_err(|e| e.to_string())
+}
+
+/// Startup model-config verdict. See `validate_startup_models`.
+pub enum StartupModels {
+    Ok,
+    NoModels,
+    /// default 悬空但已就地修复（写回磁盘），携带修复后的模型 id
+    RepairedDefault(String),
+    Invalid(String),
+}
+
+/// The single startup gate: every engine-boot path must pass through this.
+///
+/// 纯配置检查，不碰引擎。规则：
+/// - 无 [model.*] 条目 → NoModels（前端应转向导）
+/// - [models].default 指向不存在的模型 → 自动改指第一个存在的模型并写回；
+///   写回失败 → Invalid
+/// - 配置文件解析失败 → Invalid（绝不吞成"没有模型"，那会误开向导覆盖
+///   用户配置的心智）
+pub fn validate_startup_models() -> StartupModels {
+    validate_startup_models_at(&user_config_path())
+}
+
+/// 路径可注入版本——单测用（首启状态矩阵，v0.12.2）。
+pub fn validate_startup_models_at(path: &std::path::Path) -> StartupModels {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StartupModels::NoModels,
+        Err(e) => return StartupModels::Invalid(format!("读取配置失败: {e}")),
+    };
+    let mut doc: toml_edit::DocumentMut = match text.parse() {
+        Ok(d) => d,
+        Err(e) => return StartupModels::Invalid(format!("配置解析失败: {e}")),
+    };
+
+    let model_ids: Vec<String> = doc
+        .get("model")
+        .and_then(|v| v.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(_, e)| e.get("model").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if model_ids.is_empty() {
+        return StartupModels::NoModels;
+    }
+
+    let dangling = doc
+        .get("models")
+        .and_then(|m| m.get("default"))
+        .and_then(|v| v.as_str())
+        .map(|d| !model_ids.iter().any(|m| m == d))
+        .unwrap_or(false);
+    if dangling {
+        let fixed = model_ids[0].clone();
+        if let Some(models_tbl) = doc.get_mut("models").and_then(|v| v.as_table_mut()) {
+            models_tbl["default"] = toml_edit::value(fixed.as_str());
+        }
+        if let Err(e) = std::fs::write(path, doc.to_string()) {
+            return StartupModels::Invalid(format!("default 悬空且写回修复失败: {e}"));
+        }
+        return StartupModels::RepairedDefault(fixed);
+    }
+    StartupModels::Ok
+}
+
+#[cfg(test)]
+mod startup_gate_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str, content: Option<&str>) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("wancode-test-{name}-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        if let Some(c) = content {
+            std::fs::write(&p, c).unwrap();
+        }
+        p
+    }
+
+    const VALID: &str = r#"
+[models]
+default = "glm-5.2"
+
+[model.glm]
+model = "glm-5.2"
+name = "g"
+base_url = "https://x"
+"#;
+
+    const DANGLING: &str = r#"
+[models]
+default = "ghost"
+
+[model.glm]
+model = "glm-5.2"
+name = "g"
+base_url = "https://x"
+"#;
+
+    #[test]
+    fn no_file_means_no_models() {
+        let p = tmp("nofile", None);
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::NoModels));
+    }
+
+    #[test]
+    fn features_only_means_no_models() {
+        let p = tmp("features", Some("[features]
+telemetry = false
+"));
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::NoModels));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn valid_config_is_ok() {
+        let p = tmp("valid", Some(VALID));
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::Ok));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn dangling_default_gets_repaired_and_persisted() {
+        let p = tmp("dangling", Some(DANGLING));
+        assert!(matches!(
+            validate_startup_models_at(&p),
+            StartupModels::RepairedDefault(f) if f == "glm-5.2"
+        ));
+        // 修复必须落盘——只修内存等于没修（下次启动照样崩）
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains(r#"default = "glm-5.2""#));
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::Ok));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn broken_toml_is_invalid_not_no_models() {
+        // 解析失败绝不能吞成 NoModels：那会开向导、把用户带向覆盖自己配置的路
+        let p = tmp("broken", Some("[model.glm
+model = \"x\""));
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::Invalid(_)));
+        let _ = std::fs::remove_file(&p);
+    }
 }
 
 /// Inject managed model keys from keyring into the process env so the engine's

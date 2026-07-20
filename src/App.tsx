@@ -1209,7 +1209,15 @@ function App() {
         .catch(() => {});
       return r.session_id;
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      // 后端启动不变量的结构化错误（v0.12.2 契约）：
+      // MODEL_REQUIRED = 零模型 → 这不是"报错"，是"该走向导了"。
+      if (msg.includes("MODEL_REQUIRED")) {
+        setShowOnboarding(true);
+        setObStep(1);
+      } else {
+        setError(msg);
+      }
       return "";
     } finally {
       setStarting(false);
