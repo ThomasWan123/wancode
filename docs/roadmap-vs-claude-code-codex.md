@@ -171,6 +171,7 @@ P2 各批验证深度（如实分级）：
 这些不是抱怨，是接下来任何一次接线都可能再踩的。
 
 1. **同级方法命名不一致。** `mcp/list` 要 camelCase `sessionId`，`mcp/toggle` 系列要 snake_case `session_id`。确认引擎无 `deny_unknown_fields` 后，`ext_call` 现在**两种都注入**。
+   **但双注入对带 `#[serde(alias)]` 的方法是毒药**：alias 让两个键映射到同一字段，serde 报 `duplicate field`（rewind 面板因此从未打开过，错误还被首页藏掉了）。引擎里目前只有 `rewind/*`（snake 主名）和 `debug/*`（camel 主名）用 alias——`ext_call` 对这两族只注入单键。新接方法前先看引擎参数结构体有没有 alias。
    同类：`worktree/list` 的 `include_all` 是 snake_case，且 `repo` **没有 `serde(default)`，必须显式传（哪怕 null）**——官方 TUI 自己发的是 `includeAll`，那个过滤参数在人家客户端里是静默失效的。
 
 2. **两套响应信封。** 多数方法包 `{result, error}`，但 `session/fork`、`share_session`、`review/*` 是**裸响应**。失败时 `result` 为 null —— 解析时若退回信封本身，会把引擎错误渲染成「不是 git 仓库」这类无害状态。**必须先判 `error`**。

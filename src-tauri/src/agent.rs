@@ -1890,9 +1890,19 @@ async fn ext_call(
         // 而 mcp/toggle / toggle_tool / auth_trigger 用 snake_case 的
         // session_id。两个都塞进去——没有 deny_unknown_fields，多余的键会被
         // 忽略，但少一个就是静默的 missing field 失败。
+        //
+        // 例外：参数结构体上带 #[serde(alias)] 的方法，两个键会映射到同一
+        // 字段，serde 直接报 duplicate field。目前引擎里只有 rewind/*
+        // （snake 为主名）和 debug/*（camel 为主名）用 alias——这两族只塞一个。
         let sid = serde_json::Value::String(session_id.0.to_string());
-        obj.entry("sessionId").or_insert(sid.clone());
-        obj.entry("session_id").or_insert(sid);
+        if method.starts_with("x.ai/rewind") {
+            obj.entry("session_id").or_insert(sid);
+        } else if method.starts_with("x.ai/debug") {
+            obj.entry("sessionId").or_insert(sid);
+        } else {
+            obj.entry("sessionId").or_insert(sid.clone());
+            obj.entry("session_id").or_insert(sid);
+        }
     }
     // #83：git/*（worktree 除外）一律显式带 gitRoot。引擎在会话目录不是
     // 仓库时会静默回退到 workspace-hub 根——嵌入式场景那是本应用自己的
