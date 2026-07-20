@@ -5,6 +5,8 @@ import { SettingsModal } from "./features/settings/SettingsModal";
 import { GitPanel } from "./features/git/GitPanel";
 import { Composer } from "./features/composer/Composer";
 import { Messages } from "./features/messages/Messages";
+import { Dialogs } from "./features/dialogs/Dialogs";
+import { Home } from "./features/home/Home";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
 import { Sidebar } from "./features/sidebar/Sidebar";
@@ -13,13 +15,10 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
-  IconClipboard, IconTerminal, IconFile, IconFolderClosed,
-  IconCheck,
+  IconTerminal, IconFile, IconFolderClosed,
 } from "./icons";
 import "./App.css";
 
@@ -1751,43 +1750,7 @@ function App() {
         </div>
       )}
 
-      {rewindPoints && (
-        <div className="modal-mask" onClick={() => setRewindPoints(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{t.rewindTitle}</div>
-            <div className="modal-section">
-              <div className="modal-label">{t.rewindWhat}</div>
-              <select value={rewindMode} onChange={(e) => setRewindMode(e.currentTarget.value)}>
-                <option value="all">{t.rewindAll}</option>
-                <option value="conversation_only">{t.rewindConversation}</option>
-                <option value="files_only">{t.rewindFiles}</option>
-              </select>
-            </div>
-            <div className="rewind-list">
-              {rewindPoints.length === 0 && (
-                <div className="sidebar-empty">{t.noCheckpoints}</div>
-              )}
-              {rewindPoints.map((p: any) => {
-                const idx = p.promptIndex ?? p.prompt_index;
-                const files = p.numFileSnapshots ?? p.num_file_snapshots ?? 0;
-                return (
-                  <div key={idx} className="session-item" onClick={() => doRewind(idx)}>
-                    <div className="session-title">
-                      #{idx} {p.promptPreview ?? p.prompt_preview ?? t.noPreview}
-                    </div>
-                    <div className="session-meta">
-                      {(p.createdAt ?? p.created_at ?? "").slice(0, 19).replace("T", " ")} · {files} {t.fileSnapshots}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <button className="ghost" onClick={() => setRewindPoints(null)}>
-              {t.cancel}
-            </button>
-          </div>
-        </div>
-      )}
+      <Dialogs {...{ answers, doRewind, editingSkill, planApproval, planFeedback, question, refreshSkills, respondPlan, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setPlanFeedback, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t }} />
 
       {crashInfo && (
         <div className="crash-banner">
@@ -1836,236 +1799,17 @@ function App() {
 
       <GitPanel {...{ applyWorktree, changeLetter, commitMsg, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
 
-      {editingSkill && (
-        <div className="modal-mask" onClick={() => setEditingSkill(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 620 }}>
-            <div className="modal-title">{t.skillEditTitle} · {editingSkill.name}</div>
-            <textarea
-              className="skill-editor"
-              value={editingSkill.content}
-              onChange={(e) => setEditingSkill({ ...editingSkill, content: e.currentTarget.value })}
-              spellCheck={false}
-            />
-            <div className="modal-footer">
-              <span />
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="ghost" onClick={() => setEditingSkill(null)}>{t.cancel}</button>
-                <button
-                  onClick={async () => {
-                    try {
-                      await invoke("skill_write", { path: editingSkill.path, content: editingSkill.content });
-                      setEditingSkill(null);
-                      refreshSkills();
-                    } catch (e) {
-                      setError(String(e));
-                    }
-                  }}
-                >
-                  {t.save}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, t }} />
 
-      {/* 文件夹信任：这个仓库自带 MCP/hooks/LSP 配置，未授权前引擎已挡住它们。 */}
-      {trustReq && (
-        <div className="modal-mask">
-          <div className="modal trust-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{t.trustTitle}</div>
-            <div className="trust-path">{trustReq.workspace || trustReq.cwd}</div>
-            <div className="trust-body">
-              {t.trustBody}
-              {trustReq.configKinds.length > 0 && (
-                <div className="trust-kinds">
-                  {trustReq.configKinds.map((k) => (
-                    <span key={k} className="trust-kind">
-                      {k}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="question-actions">
-              <button
-                onClick={async () => {
-                  const id = trustReq.id;
-                  setTrustReq(null);
-                  await invoke("agent_trust_respond", { id, trust: true }).catch((e) =>
-                    setError(String(e)),
-                  );
-                }}
-              >
-                {t.trustYes}
-              </button>
-              <button
-                className="ghost"
-                onClick={async () => {
-                  const id = trustReq.id;
-                  setTrustReq(null);
-                  await invoke("agent_trust_respond", { id, trust: false }).catch((e) =>
-                    setError(String(e)),
-                  );
-                }}
-              >
-                {t.trustNo}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* 引擎主动提问。之前这个请求被兜底应答成空对象，用户根本看不到。 */}
-      {question && (
-        <div className="modal-mask">
-          <div className="modal question-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{t.questionTitle}</div>
-            <div className="question-body">
-              {question.questions.map((q) => (
-                <div key={q.question} className="question-block">
-                  <div className="question-text">{q.question}</div>
-                  {q.multiSelect && <div className="question-multi">{t.questionMulti}</div>}
-                  <div className="question-options">
-                    {(q.options ?? []).map((o) => {
-                      const picked = (answers[q.question] ?? []).includes(o.label);
-                      return (
-                        <button
-                          key={o.label}
-                          className={`question-option ${picked ? "picked" : ""}`}
-                          onClick={() => toggleAnswer(q.question, o.label, !!q.multiSelect)}
-                        >
-                          <span className="question-option-label">
-                            {picked && <IconCheck size={13} />}
-                            {o.label}
-                          </span>
-                          {o.description && (
-                            <span className="question-option-desc">{o.description}</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="question-actions">
-              <button
-                disabled={Object.keys(answers).length === 0}
-                onClick={() => respondQuestion(true)}
-              >
-                {t.questionSubmit}
-              </button>
-              <button className="ghost" onClick={() => respondQuestion(false)}>
-                {t.cancel}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {planApproval && (
-        <div className="modal-mask">
-          <div className="modal plan-approval-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{t.planApprovalTitle}</div>
-            <div className="plan-approval-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
-            </div>
-            <textarea
-              className="plan-feedback"
-              value={planFeedback}
-              placeholder={t.planFeedbackPlaceholder}
-              onChange={(e) => setPlanFeedback(e.currentTarget.value)}
-              rows={2}
-            />
-            <div className="plan-approval-actions">
-              <button onClick={() => respondPlan("approved")}>{t.planApprove}</button>
-              <button className="ghost" onClick={() => respondPlan("cancelled")}>
-                {t.planRequestChanges}
-              </button>
-              <button className="deny" onClick={() => respondPlan("abandoned")}>
-                {t.planAbandon}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="body-row">
         <Sidebar {...{ sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang }} />
 
         <div className="main-col">
-      {items.length === 0 && !busy && (
-        <div className="empty-state">
-          <div className="empty-logo">W</div>
-          <div className="empty-title">{t.appTagline}</div>
-
-          {/* 建议来自当前工作区（有改动就先建议审查改动，有 README 才建议总结…）
-              工作区信息不在这里重复 —— 左栏底部和输入框上方已经显示。 */}
-          {sessionId && (
-            <div className="chips">
-              {buildSuggestions(fileList, gitInfo, t).map((s) => (
-                <button
-                  key={s.label}
-                  className="chip"
-                  onClick={() => {
-                    setInput(s.prompt);
-                    onComposerChange(s.prompt);
-                    taRef.current?.focus();
-                  }}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* 跨工作区的近期会话。刻意排除当前工作区——那部分左栏已经列了，
-              首页再列一遍就是和左栏打架（之前踩过）。这里只回答左栏答不了的
-              问题：我在别的项目干到哪了。 */}
-          {otherRecent.length > 0 && (
-            <div className="home-recent">
-              <div className="home-recent-head">{t.homeOtherProjects}</div>
-              {otherRecent.map((s) => (
-                <button
-                  key={s.sessionId}
-                  className="home-recent-row"
-                  title={s.path}
-                  onClick={() => startSession(s.sessionId, s.path)}
-                >
-                  <span className="home-recent-proj">{baseName(s.path)}</span>
-                  <span className="home-recent-title">
-                    {s.title || t.untitledSession}
-                  </span>
-                  {s.branch && (
-                    <span className="home-recent-branch">
-                      <IconGitBranch size={11} /> {s.branch}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="empty-hint">{t.emptyHint}</div>
-        </div>
-      )}
-
-      {planSteps.length > 0 && (
-        <div className="plan-panel">
-          <div className="plan-head"><IconClipboard size={14} /> {t.planTitle}</div>
-          {planSteps.map((p, i) => (
-            <div key={i} className={`plan-step ${p.status ?? ""}`}>
-              <span className="plan-mark">
-                {p.status === "completed" ? "✅" : p.status === "in_progress" ? "▶" : "○"}
-              </span>
-              <span>{p.content}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t }} />
 
       <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, workspace, t }} />
 
