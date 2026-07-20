@@ -30,6 +30,8 @@ pub struct AgentHandle {
     session_id: acp::SessionId,
     cancel: CancellationToken,
     pub model_ids: Vec<String>,
+    /// 会话工作区。git 命令用它本地解析 gitRoot（见 session_git_root）。
+    pub cwd: PathBuf,
 }
 
 #[derive(Default)]
@@ -50,6 +52,9 @@ pub struct AgentState {
 pub struct StartResult {
     pub session_id: String,
     pub models: Vec<String>,
+    /// 会话真实 cwd——前端必须用它当工作区标签（#83：标签来自
+    /// localStorage 而会话另有其主时，面板显示的是别的仓库）。
+    pub cwd: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -134,6 +139,14 @@ async fn start_inner(
     let cwd = PathBuf::from(&workspace);
     if !cwd.is_dir() {
         return Err(anyhow!("工作区目录不存在: {workspace}"));
+    }
+
+    // 先拆掉旧会话。此前旧 handle 一直留到函数末尾才被替换——本次启动
+    // 半路失败时它就成了僵尸：前端以为没会话/换了工作区，ext 调用却仍
+    // 注入旧 sessionId，git 面板显示的是**另一个仓库**的改动（#83，
+    // 在那个状态下 stash/丢弃会打错目标）。失败宁可「会话未启动」。
+    if let Some(old) = state.handle.lock().await.take() {
+        old.cancel.cancel();
     }
 
     // ── Config (mirrors headless.rs) ────────────────────────────────
@@ -283,6 +296,7 @@ async fn start_inner(
         session_id: session_id.clone(),
         cancel,
         model_ids: model_ids.clone(),
+        cwd: cwd.clone(),
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
@@ -301,6 +315,7 @@ async fn start_inner(
     Ok(StartResult {
         session_id: session_id.0.to_string(),
         models: model_ids,
+        cwd: cwd.to_string_lossy().into_owned(),
     })
 }
 
@@ -697,6 +712,136 @@ pub async fn model_upsert(
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
 }
 
+/// One-click provider setup for novice users: pick a preset, paste ONE key.
+///
+/// Writes every model of the preset (shared key in the keyring under each
+/// model key), tests the first model, and for 智谱 presets seeds the default
+/// web-search MCP servers (see seed_default_mcp).
+///
+/// Preset ids are stable API: "glm-coding" (Coding Plan 专属端点)、"glm-open"
+/// (开放平台)、"deepseek".
+#[tauri::command]
+pub async fn provider_quick_setup(
+    preset: String,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("请输入 API Key".into());
+    }
+    // (key, 显示名, 模型ID)
+    let (base_url, models): (&str, Vec<(&str, &str, &str)>) = match preset.as_str() {
+        // Coding Plan 是包月订阅的专属端点——按量计费的开放平台 Key 在这里
+        // 会 401，反之亦然。这正是小白最容易配错的地方，所以分成两张卡。
+        "glm-coding" => (
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            vec![("glm-coding", "GLM Coding Plan", "glm-5.2")],
+        ),
+        "glm-open" => (
+            "https://open.bigmodel.cn/api/paas/v4",
+            vec![
+                ("glm", "智谱 GLM-5.2", "glm-5.2"),
+                ("glm-air", "智谱 GLM-5-Air", "glm-5-air"),
+            ],
+        ),
+        "deepseek" => (
+            "https://api.deepseek.com",
+            vec![
+                ("deepseek", "DeepSeek Chat", "deepseek-chat"),
+                ("deepseek-r", "DeepSeek Reasoner", "deepseek-reasoner"),
+            ],
+        ),
+        other => return Err(format!("未知预设: {other}")),
+    };
+
+    // 先测连接（用第一个模型），失败就不落任何配置——半配置状态最坑小白。
+    let first_model = models[0].2;
+    let test = model_test(
+        base_url.to_string(),
+        first_model.to_string(),
+        Some(api_key.clone()),
+        None,
+    )
+    .await;
+    if let Err(e) = test {
+        return Err(format!("连接测试未通过，未保存任何配置。{e}"));
+    }
+
+    for (key, name, model) in &models {
+        model_upsert(
+            key.to_string(),
+            name.to_string(),
+            model.to_string(),
+            base_url.to_string(),
+            Some(api_key.clone()),
+        )
+        .await?;
+    }
+
+    let mut seeded = false;
+    if preset.starts_with("glm") {
+        // 让 ${ZHIPU_API_KEY} 即刻可解析（无需重启），并播种默认 MCP。
+        // Safety: 单线程配置路径，会话尚未启动或与其无关。
+        unsafe { std::env::set_var("ZHIPU_API_KEY", &api_key) };
+        seeded = seed_default_mcp().unwrap_or(false);
+    }
+
+    Ok(serde_json::json!({
+        "models": models.iter().map(|(k, n, m)| serde_json::json!({
+            "key": k, "name": n, "model": m
+        })).collect::<Vec<_>>(),
+        "testReply": test.ok(),
+        "mcpSeeded": seeded,
+    }))
+}
+
+/// Seed the default 智谱 web-search / web-reader MCP servers, exactly once.
+///
+/// - headers 用 `${ZHIPU_API_KEY}` 环境变量引用，配置文件里不落明文 Key。
+/// - `[ui].wancode_mcp_seeded` 标记保证只播一次：用户删了不复活。
+fn seed_default_mcp() -> Result<bool, String> {
+    let path = user_config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
+
+    let already = doc
+        .get("ui")
+        .and_then(|u| u.get("wancode_mcp_seeded"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already {
+        return Ok(false);
+    }
+
+    let servers = doc["mcp_servers"]
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers 段类型异常")?;
+    for (name, url) in [
+        ("web-search", "https://open.bigmodel.cn/api/mcp/web_search/mcp"),
+        ("web-reader", "https://open.bigmodel.cn/api/mcp/web_reader/mcp"),
+    ] {
+        if servers.contains_key(name) {
+            continue; // 用户已有同名配置，绝不覆盖
+        }
+        let mut entry = toml_edit::Table::new();
+        entry["url"] = toml_edit::value(url);
+        let mut headers = toml_edit::Table::new();
+        headers["Authorization"] = toml_edit::value("Bearer ${ZHIPU_API_KEY}");
+        entry["headers"] = toml_edit::Item::Table(headers);
+        servers.insert(name, toml_edit::Item::Table(entry));
+    }
+
+    let ui = doc["ui"]
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("ui 段类型异常")?;
+    ui["wancode_mcp_seeded"] = toml_edit::value(true);
+
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+    Ok(true)
+}
+
 /// Remove a model preset and its keyring entry.
 #[tauri::command]
 pub async fn model_remove(key: String) -> Result<(), String> {
@@ -846,17 +991,24 @@ fn inject_managed_keys() {
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else { return };
     if let Some(models) = doc.get("model").and_then(|v| v.as_table()) {
-        for (key, _item) in models.iter() {
-            let env_key = wancode_env_key(key);
-            if std::env::var(&env_key).is_ok() {
-                continue;
-            }
-            if let Some(pw) = keyring::Entry::new(KEYRING_SERVICE, key)
+        for (key, item) in models.iter() {
+            let pw = keyring::Entry::new(KEYRING_SERVICE, key)
                 .ok()
-                .and_then(|e| e.get_password().ok())
-            {
+                .and_then(|e| e.get_password().ok());
+            let Some(pw) = pw else { continue };
+            let env_key = wancode_env_key(key);
+            if std::env::var(&env_key).is_err() {
                 // Safety: single-threaded startup path before session spawn.
-                unsafe { std::env::set_var(&env_key, pw) };
+                unsafe { std::env::set_var(&env_key, &pw) };
+            }
+            // 播种的默认 MCP 用 ${ZHIPU_API_KEY} 引用——智谱模型的 Key 顺带
+            // 导出到这个名字，重启后 web-search MCP 才能解析出授权头。
+            let is_zhipu = item
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|u| u.contains("bigmodel.cn"));
+            if is_zhipu && std::env::var("ZHIPU_API_KEY").is_err() {
+                unsafe { std::env::set_var("ZHIPU_API_KEY", &pw) };
             }
         }
     }
@@ -1190,6 +1342,26 @@ async fn ext_call(
         let sid = serde_json::Value::String(session_id.0.to_string());
         obj.entry("sessionId").or_insert(sid.clone());
         obj.entry("session_id").or_insert(sid);
+    }
+    // #83：git/*（worktree 除外）一律显式带 gitRoot。引擎在会话目录不是
+    // 仓库时会静默回退到 workspace-hub 根——嵌入式场景那是本应用自己的
+    // 仓库。客户端解析不出仓库就本地拒绝，绝不触发那个回退。
+    if method.starts_with("x.ai/git/") && !method.starts_with("x.ai/git/worktree") {
+        if let Some(obj) = params.as_object_mut() {
+            if !obj.contains_key("gitRoot") && !obj.contains_key("git_root") {
+                let root = {
+                    let guard = state.handle.lock().await;
+                    let h = guard.as_ref().ok_or("会话未启动")?;
+                    git2::Repository::discover(&h.cwd)
+                        .ok()
+                        .and_then(|r| r.workdir().map(|p| p.to_string_lossy().into_owned()))
+                };
+                let Some(root) = root else {
+                    return Err("当前工作区不是 git 仓库".into());
+                };
+                obj.insert("gitRoot".into(), serde_json::Value::String(root));
+            }
+        }
     }
     let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
     let resp: acp::ExtResponse =
@@ -2257,12 +2429,36 @@ pub async fn subagent_cancel(
 // 我们只转发。`ext_call` 会自动带上 sessionId，引擎据此定位仓库。
 
 /// Full status: branch / ahead / behind / staged / unstaged。
+/// Resolve the session workspace's git root LOCALLY (git2 discover).
+///
+/// #83 的根修：引擎的 git/* 在「会话目录不是仓库」时把 resolve 失败
+/// `.ok()` 吞成 None，随后 git_op_cwd 回退到 workspace-hub 根——嵌入式
+/// 场景那是本应用自己的仓库，于是「不是仓库」被静默替换成「另一个仓库
+/// 的状态」，stash/丢弃会打错目标。gitRoot 一律客户端解析、显式传入；
+/// 解析不出就本地拒绝，引擎的回退路径永远不被触发。
+async fn session_git_root(state: &State<'_, AgentState>) -> Result<Option<String>, String> {
+    let cwd = state
+        .handle
+        .lock()
+        .await
+        .as_ref()
+        .map(|h| h.cwd.clone())
+        .ok_or("会话未启动")?;
+    Ok(git2::Repository::discover(&cwd)
+        .ok()
+        .and_then(|r| r.workdir().map(|p| p.to_string_lossy().into_owned())))
+}
+
 #[tauri::command]
 pub async fn git_status_ext(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    let Some(root) = session_git_root(&state).await? else {
+        // 明确的「不是仓库」标记；前端渲染为 非 git 仓库，绝不显示别的仓库
+        return Ok(serde_json::json!({ "result": { "data": null } }));
+    };
     ext_call(
         &state,
         "x.ai/git/status",
-        serde_json::json!({ "includeUntracked": true, "includeStats": true }),
+        serde_json::json!({ "gitRoot": root, "includeUntracked": true, "includeStats": true }),
     )
     .await
 }

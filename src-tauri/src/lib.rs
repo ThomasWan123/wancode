@@ -166,6 +166,7 @@ pub fn run() {
             agent::model_list,
             agent::model_upsert,
             agent::model_remove,
+            agent::provider_quick_setup,
             agent::model_test,
             agent::migrate_env_keys,
             agent::skill_read,

@@ -2597,3 +2597,39 @@ button.ghost.small {
 .mcp-item.off .mcp-info {
   opacity: 0.45;
 }
+
+/* 一键配置预设卡片 */
+.preset-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+}
+.preset-card span { color: var(--muted); font-size: 11.5px; font-weight: 400; }
+.preset-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.quick-key-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.quick-key-row input {
+  flex: 1;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+}
+.quick-key-row input:focus { border-color: var(--accent); }
+.quick-result { font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }

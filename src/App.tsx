@@ -249,6 +249,10 @@ function App() {
   const [hookForm, setHookForm] = useState({ event: "PostToolUse", command: "" });
   const [modelList, setModelList] = useState<any[]>([]);
   const [modelForm, setModelForm] = useState({ key: "", name: "", model: "", base_url: "", api_key: "" });
+  const [quickPreset, setQuickPreset] = useState("");
+  const [quickKey, setQuickKey] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
+  const [quickResult, setQuickResult] = useState("");
   const [modelTestMsg, setModelTestMsg] = useState("");
 
   const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: string }> = {
@@ -1149,14 +1153,25 @@ function App() {
     setItems([]);
     setSessionId("");
     sessionIdRef.current = "";
+    // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
+    setGitInfo(null);
     try {
-      const r = await invoke<{ session_id: string; models: string[] }>("agent_start", {
-        workspace: wsPath,
-        model,
-        resume: resume ?? null,
-      });
+      const r = await invoke<{ session_id: string; models: string[]; cwd: string }>(
+        "agent_start",
+        {
+          workspace: wsPath,
+          model,
+          resume: resume ?? null,
+        },
+      );
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
+      // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
+      // 显示的是另一个仓库的改动，stash/丢弃会打错目标）。
+      if (r.cwd) {
+        setWorkspace(r.cwd);
+        localStorage.setItem("wancode-workspace", r.cwd);
+      }
       if (r.models?.length) setModels(r.models);
       refreshSessions(wsPath);
       invoke<string[]>("list_workspace_files", { workspace: wsPath })
@@ -1787,6 +1802,63 @@ function App() {
             )}
             {settingsTab === "models" && (
             <div className="modal-section">
+              {/* 一键配置：小白路径。选卡片 → 贴 Key → 完事。
+                  Coding Plan 与开放平台是不同端点、Key 不通用——这是最常见
+                  的配错点，所以拆成两张卡而不是一个开关。 */}
+              <div className="modal-label">{t.quickSetupTitle}</div>
+              <div className="preset-cards">
+                {([
+                  ["glm-coding", "GLM Coding Plan", t.presetGlmCoding],
+                  ["glm-open", "智谱开放平台", t.presetGlmOpen],
+                  ["deepseek", "DeepSeek", t.presetDeepseek],
+                ] as const).map(([id, label, hint]) => (
+                  <button
+                    key={id}
+                    className={`preset-card ${quickPreset === id ? "active" : ""}`}
+                    onClick={() => setQuickPreset(quickPreset === id ? "" : id)}
+                  >
+                    <b>{label}</b>
+                    <span>{hint}</span>
+                  </button>
+                ))}
+              </div>
+              {quickPreset && (
+                <div className="quick-key-row">
+                  <input
+                    type="password"
+                    placeholder={t.quickKeyPlaceholder}
+                    value={quickKey}
+                    onChange={(e) => setQuickKey(e.target.value)}
+                  />
+                  <button
+                    disabled={!quickKey.trim() || quickBusy}
+                    onClick={async () => {
+                      setQuickBusy(true);
+                      setQuickResult("");
+                      try {
+                        const r = await invoke<any>("provider_quick_setup", {
+                          preset: quickPreset,
+                          apiKey: quickKey,
+                        });
+                        const names = (r.models ?? []).map((m: any) => m.name).join("、");
+                        setQuickResult(
+                          `✅ ${t.quickDone}${names}${r.mcpSeeded ? ` · ${t.quickMcpSeeded}` : ""}`,
+                        );
+                        setQuickKey("");
+                        refreshModels();
+                      } catch (e) {
+                        setQuickResult(`❌ ${String(e)}`);
+                      } finally {
+                        setQuickBusy(false);
+                      }
+                    }}
+                  >
+                    {quickBusy ? t.quickTesting : t.quickGo}
+                  </button>
+                </div>
+              )}
+              {quickResult && <div className="quick-result">{quickResult}</div>}
+
               <div className="modal-label">{t.modelsSection}</div>
               <div className="mcp-list">
                 {modelList.length === 0 && <div className="sidebar-empty">{t.modelsEmpty}</div>}
