@@ -17,4 +17,4 @@
 # VERSION 只作为不透明字符串使用（x-grok-client-version 头），
 # 不做 semver 解析，因此 wancode- 前缀是安全且诚实的。
 [env]
-GROK_VERSION = "wancode-0.12.1"
+GROK_VERSION = "wancode-0.12.2"
