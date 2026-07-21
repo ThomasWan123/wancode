@@ -1,0 +1,79 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 8184403..3a74ebc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -3,6 +3,7 @@
+ [workspace]
+ resolver = "2"
+ members = [
++    "../wancode/src-tauri",
+     "crates/build/xai-proto-build",
+     "crates/codegen/ptyctl",
+     "crates/codegen/ptyctl-cli",
+diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
+index 417c4b2..dbd6d3a 100644
+--- a/crates/build/xai-proto-build/src/lib.rs
++++ b/crates/build/xai-proto-build/src/lib.rs
+@@ -114,10 +114,17 @@ impl XaiProtoBuilder {
+ 
+         // Can only process one input file when using --dependency_out=FILE.
+         for proto in protos {
++            // Use temp files rather than /dev/stdout and /dev/null so this
++            // also works on Windows, where those device paths don't exist.
++            let dep_tmp = tempfile::TempDir::new().context("create temp dir for protoc deps")?;
++            let dep_file = dep_tmp.path().join("deps.d");
++            let desc_file = dep_tmp.path().join("desc.pb");
++            let dep_file_str = dep_file.to_str().context("dep path not UTF-8")?.to_owned();
++            let desc_file_str = desc_file.to_str().context("desc path not UTF-8")?.to_owned();
+             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
+             command
+-                .arg("--dependency_out=/dev/stdout")
+-                .arg("--descriptor_set_out=/dev/null");
++                .arg(format!("--dependency_out={dep_file_str}"))
++                .arg(format!("--descriptor_set_out={desc_file_str}"));
+ 
+             // Add protoc's well-known types include directory first (if found).
+             // This is needed for Bazel sandboxed builds where protoc and its
+@@ -143,22 +150,35 @@ impl XaiProtoBuilder {
+                 return Err(anyhow::anyhow!("protoc command failed"));
+             }
+ 
+-            let output =
+-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
++            drop(output.stdout);
++            let output = fs::read_to_string(&dep_file)
++                .context("failed to read protoc --dependency_out file")?;
+ 
+             let mut lines = output.lines();
+             let first_line = lines.next().context("protoc command output is empty")?;
+-            let prefix = "/dev/null:";
+-            let rem = first_line.strip_prefix(prefix).with_context(|| {
+-                format!("protoc command output must start with /dev/null: {output:?}")
+-            })?;
++            // The first line starts with the --descriptor_set_out path followed
++            // by a colon. protoc may escape characters (e.g. spaces, or drive
++            // colons on Windows), so instead of matching the exact path we cut
++            // at the last ':' on that line that is followed by a space,
++            // backslash-continuation, or end of line.
++            let rem = match first_line.find(": ") {
++                Some(idx) => &first_line[idx + 1..],
++                None => first_line
++                    .strip_suffix(':')
++                    .or_else(|| first_line.strip_suffix(":\\"))
++                    .with_context(|| {
++                        format!("protoc dependency output has unexpected first line: {output:?}")
++                    })?,
++            };
+             for line in iter::once(rem).chain(lines) {
+                 let line = line.trim();
+                 let line = line.strip_suffix("\\").unwrap_or(line);
+                 // Depending on absolute paths like
+                 // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
+                 // is valid, but we want to have output more deterministic.
+-                if line.contains("/include/google/protobuf/") {
++                if line.contains("/include/google/protobuf/")
++                    || line.contains("\\include\\google\\protobuf\\")
++                {
+                     continue;
+                 }
+ 

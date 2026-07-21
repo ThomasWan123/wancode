@@ -24,7 +24,8 @@ if (-not $SkipBuild) {
   if ($LASTEXITCODE -ne 0) { throw "build 失败" }
 }
 
-$exe = "D:\WANCode\grok-build\target\debug\wancode.exe"  # TODO(v0.13-3): 仓库根动态计算
+# 引擎在仓库兄弟目录（见 vendor/grok-build.lock），产物落引擎 workspace 的 target
+$exe = Join-Path (Split-Path $root -Parent) "grok-build\target\debug\wancode.exe"
 if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
 # 一次性 fixture 工作区

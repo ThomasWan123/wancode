@@ -71,15 +71,17 @@ context_window = 65536
 
 ## 从源码构建 / Build from source
 
-需要：Rust (MSVC toolchain)、Node.js、[protoc](https://github.com/protocolbuffers/protobuf/releases)，以及本仓库相邻目录下的 `grok-build`。
+需要：Rust (MSVC toolchain)、Node.js、[protoc](https://github.com/protocolbuffers/protobuf/releases)。引擎 `grok-build` 由 bootstrap 脚本自动克隆到本仓库的**兄弟目录**并固定到 `vendor/grok-build.lock` 指定的 commit（含 Windows protoc 补丁）：
 
 ```powershell
+powershell -File scripts/bootstrap.ps1    # 检查工具链 + 克隆/固定引擎 + npm install
+
 # Windows：用 lld-link（VS2022 LLVM 组件）绕过 MSVC PDB 上限，并扩大栈
 $env:RUSTFLAGS="-C link-arg=/STACK:16777216"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="lld-link"
-npm install
 npm run tauri build      # 出 MSI + NSIS 安装包
 # 开发调试：npm run tauri dev
+# 引擎冒烟：powershell -File scripts/smoke.ps1
 ```
 
 ## 技术栈 / Tech Stack

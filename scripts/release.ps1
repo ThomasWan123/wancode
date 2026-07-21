@@ -19,7 +19,8 @@ param(
 $ErrorActionPreference = "Stop"
 $key = "$env:USERPROFILE\.tauri\wancode_updater.key"
 $root = Split-Path $PSScriptRoot -Parent
-$bundle = "D:\WANCode\grok-build\target\release\bundle"
+# 引擎在仓库兄弟目录（见 vendor/grok-build.lock），产物落引擎 workspace 的 target
+$bundle = Join-Path (Split-Path $root -Parent) "grok-build\target\release\bundle"
 
 # 工具链环境（Windows 专用坑：lld-link 绕 PDB 上限 + 扩栈）
 $env:Path = "$env:Path;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.protoc\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin"

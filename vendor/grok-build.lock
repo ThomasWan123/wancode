@@ -1,0 +1,17 @@
+# grok-build 引擎固定版本（v0.13-3 工程化）
+#
+# wancode 不把引擎做成 git submodule —— 引擎必须放在仓库的【兄弟目录】
+# ../grok-build：src-tauri/Cargo.toml 通过 workspace = "../../grok-build"
+# 挂进引擎的 workspace（这样才能吃 `workspace = true` 依赖继承），
+# submodule 嵌进来会让两个 .git 互相打架。
+#
+# scripts/bootstrap.ps1 按本文件 clone 固定 commit 并打 vendor/grok-build-local.patch。
+# 升级引擎版本 = 改这里的 commit + 重跑 bootstrap + 全量 smoke。
+repo=https://github.com/ThomasWan123/grok-build.git
+commit=b189869b7755d2b482969acf6c92da3ecfeffd36
+# 本地补丁（vendor/grok-build-local.patch）：
+#   1. Cargo.toml：workspace members 加 "../wancode/src-tauri"
+#   2. xai-proto-build/src/lib.rs：protoc 依赖输出改临时文件（/dev/stdout 在
+#      Windows 不存在），首行解析兼容盘符冒号转义
+# 另附 vendor/grok-build-Cargo.lock：wancode 挂入后扩展过的完整依赖解析，
+# bootstrap 直接覆盖引擎的 Cargo.lock，保证跨机器构建一致。
