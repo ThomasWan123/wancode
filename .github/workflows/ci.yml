@@ -1,0 +1,73 @@
+# 降级 CI（v0.13-4，docs/improvement-plan.md 差异一）：
+# 每次 push/PR 只跑轻量三件套——前端 tsc+build、三处版本号一致性、
+# Rust clippy + lib 单测 + 引擎金丝雀。全量 tauri build（装包/签名）
+# 不进 CI：需要 updater 私钥且耗时，发布仍走本机 scripts/release.ps1。
+#
+# Rust job 的引擎来源 = vendor/grok-build.lock 固定 commit + 本地补丁，
+# 与 scripts/bootstrap.ps1 同一套流程（这里内联精简版，跳过 npm/工具检查）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 三处版本号（package.json / tauri.conf.json / Cargo.toml）必须一致，
+      # 否则 updater 的 latest.json 与安装包版本对不上。
+      - run: |
+          set -e
+          a=$(node -p "require('./package.json').version")
+          b=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          c=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "package.json=$a tauri.conf.json=$b Cargo.toml=$c"
+          [ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::版本号不一致"; exit 1; }
+
+  rust:
+    runs-on: windows-latest
+    env:
+      # 与本机构建一致：lld-link 绕 MSVC PDB 上限 + 扩栈（见 release.ps1 头注）
+      RUSTFLAGS: "-C link-arg=/STACK:16777216"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+    steps:
+      - uses: actions/checkout@v4
+      - name: 按 lock 克隆引擎到兄弟目录并打补丁
+        shell: pwsh
+        run: |
+          $lock = Get-Content vendor/grok-build.lock | Where-Object { $_ -match '^(repo|commit)=' }
+          $repo = ($lock | Where-Object { $_ -like 'repo=*' }) -replace '^repo=', ''
+          $commit = ($lock | Where-Object { $_ -like 'commit=*' }) -replace '^commit=', ''
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          git clone -c core.longpaths=true $repo $engine
+          git -C $engine checkout $commit
+          git -C $engine apply (Join-Path $PWD "vendor/grok-build-local.patch")
+          Copy-Item vendor/grok-build-Cargo.lock (Join-Path $engine "Cargo.lock") -Force
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "../grok-build -> target"
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy -p wancode --lib -- -D warnings
+      - name: lib 单测 + 引擎金丝雀
+        working-directory: src-tauri
+        run: cargo test -p wancode --lib --test engine_canary

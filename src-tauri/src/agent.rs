@@ -6,7 +6,7 @@
 //!
 //! - `agent://update`      — session updates (message/thought/tool chunks)
 //! - `agent://permission`  — tool-call approval requests (answered via
-//!                           the `agent_permission_respond` command)
+//!   the `agent_permission_respond` command)
 //! - `agent://turn-end`    — a prompt turn finished (with stop reason or error)
 
 use std::collections::HashMap;
@@ -25,11 +25,15 @@ use xai_grok_pager::acp::spawn::spawn_grok_shell;
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
 
+/// 计划审批回包：(outcome, feedback)。
+type PlanReply = (String, Option<String>);
+/// 提问回包：问题文本 → 选中项列表；None = 用户取消。
+type QuestionReply = Option<HashMap<String, Vec<String>>>;
+
 pub struct AgentHandle {
     acp_tx: AcpAgentTx,
     session_id: acp::SessionId,
     cancel: CancellationToken,
-    pub model_ids: Vec<String>,
     /// 会话工作区。git 命令用它本地解析 gitRoot（见 session_git_root）。
     pub cwd: PathBuf,
 }
@@ -40,10 +44,9 @@ pub struct AgentState {
     pending_permissions: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
     next_permission_id: AtomicU64,
     /// Pending `x.ai/exit_plan_mode` approvals → (outcome, feedback).
-    pending_plans: Mutex<HashMap<u64, oneshot::Sender<(String, Option<String>)>>>,
+    pending_plans: Mutex<HashMap<u64, oneshot::Sender<PlanReply>>>,
     /// Pending `x.ai/ask_user_question` requests: answers keyed by question text.
-    pending_questions:
-        Mutex<HashMap<u64, oneshot::Sender<Option<HashMap<String, Vec<String>>>>>>,
+    pending_questions: Mutex<HashMap<u64, oneshot::Sender<QuestionReply>>>,
     /// Pending `x.ai/folder_trust/request` prompts → true = trust.
     pending_trust: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
 }
@@ -321,7 +324,6 @@ async fn start_inner(
         acp_tx: acp_tx.clone(),
         session_id: session_id.clone(),
         cancel,
-        model_ids: model_ids.clone(),
         cwd: cwd.clone(),
     });
 
@@ -1566,13 +1568,6 @@ fn inject_managed_keys() {
 }
 
 // ── Skills (~/.grok/skills/<name>/SKILL.md) ─────────────────────────
-
-#[derive(Serialize, Clone)]
-pub struct SkillEntry {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-}
 
 fn skills_dir() -> PathBuf {
     xai_grok_shell::util::grok_home::grok_home().join("skills")
