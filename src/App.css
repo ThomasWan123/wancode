@@ -2773,3 +2773,22 @@ button.ghost.small {
   padding: 1px 6px;
   font-family: var(--font-mono);
 }
+
+/* 工作台：标签与文件查看 */
+.wb-tab {
+  background: none; border: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--fg-dim);
+  padding: 2px 4px; border-radius: 6px;
+}
+.wb-tab.active { color: var(--fg); background: var(--bg2); }
+.wb-file-filter { margin: 8px 12px 2px; width: calc(100% - 24px); }
+.wb-file-row {
+  padding: 5px 14px; font-size: 12px; font-family: var(--font-mono);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wb-file-row:hover { background: var(--bg2); }
+.wb-file-back { color: var(--accent, #58a6ff); position: sticky; top: 0; background: var(--bg); }
+.wb-lineno {
+  display: inline-block; width: 42px; text-align: right; margin-right: 12px;
+  color: var(--fg-dim); opacity: 0.55; user-select: none;
+}

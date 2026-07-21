@@ -329,6 +329,21 @@ function App() {
   const [wbFiles, setWbFiles] = useState<any[] | null>(null);
   const [wbLoading, setWbLoading] = useState(false);
   const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
+  const [wbTab, setWbTab] = useState<"diff" | "file">("diff");
+  const [wbFilePath, setWbFilePath] = useState<string | null>(null);
+  const [wbFileText, setWbFileText] = useState<string | null>(null);
+  const [wbFileLoading, setWbFileLoading] = useState(false);
+  const [wbFileFilter, setWbFileFilter] = useState("");
+  // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
+  const [transcriptMode, setTranscriptMode] = useState<string>(
+    () => localStorage.getItem("wancode-transcript") ?? "default",
+  );
+  function cycleTranscript() {
+    const order = ["default", "compact", "verbose"];
+    const next = order[(order.indexOf(transcriptMode) + 1) % order.length];
+    setTranscriptMode(next);
+    localStorage.setItem("wancode-transcript", next);
+  }
   // v0.14 命令面板（Ctrl+K）。动作每次渲染重组进 ref，全局键监听只挂一次。
   const [showPalette, setShowPalette] = useState(false);
   const paletteRef = useRef<{ toggleWorkbench: () => void } | null>(null);
@@ -715,6 +730,24 @@ function App() {
       });
     } catch {
       setGitInfo(null);
+    }
+  }
+
+  /// 文件查看：引擎 x.ai/fs/read_file（工作区相对路径，引擎侧 confine 越界）。
+  async function openWbFile(path: string | null) {
+    setWbFilePath(path);
+    setWbFileText(null);
+    if (!path) return;
+    setWbFileLoading(true);
+    try {
+      const r = await invoke<any>("fs_read", { path });
+      const env = r?.result ?? r;
+      const d = env?.data ?? env;
+      setWbFileText(typeof d?.content === "string" ? d.content : null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setWbFileLoading(false);
     }
   }
 
@@ -1781,6 +1814,7 @@ function App() {
       },
     },
     { id: "theme", label: t.paletteTheme, run: () => setTheme((th) => (th === "dark" ? "light" : "dark")) },
+    { id: "transcript", label: t.paletteTranscript(transcriptMode), run: cycleTranscript },
   ];
 
   return (
@@ -1946,14 +1980,14 @@ function App() {
         <div className="main-col">
       <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t }} />
 
-      <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, workspace, t }} />
+      <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t }} />
 
       <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
 
       <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
-        <Workbench {...{ showWorkbench, setShowWorkbench, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, t }} />
+        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, t }} />
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

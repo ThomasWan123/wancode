@@ -36,10 +36,74 @@ function PatchView({ patch }: { patch: string }) {
   );
 }
 
+/** 文件查看标签：过滤输入 + 文件列表 + 只读内容（行号）。 */
+function FileTab(props: Record<string, any>) {
+  const { fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, t } = props;
+  const hits: string[] = wbFileFilter
+    ? (fileList as string[]).filter((p) => {
+        // 子序列匹配，与 @ 联想同语义
+        const q = wbFileFilter.toLowerCase();
+        const s = p.toLowerCase();
+        let i = 0;
+        for (const ch of s) {
+          if (ch === q[i]) i++;
+          if (i === q.length) return true;
+        }
+        return false;
+      })
+    : fileList;
+  const lines = (wbFileText ?? "").split("\n");
+  const MAX = 3000;
+  const shown = lines.length > MAX ? lines.slice(0, MAX) : lines;
+  return (
+    <>
+      <input
+        className="session-search wb-file-filter"
+        value={wbFileFilter}
+        placeholder={t.wbFileFilter}
+        onChange={(e) => setWbFileFilter(e.currentTarget.value)}
+      />
+      {!wbFilePath ? (
+        <div className="wb-body">
+          {hits.slice(0, 400).map((p) => (
+            <div key={p} className="wb-file-row" title={p} onClick={() => openWbFile(p)}>
+              {p}
+            </div>
+          ))}
+          {hits.length === 0 && <div className="sidebar-empty">{t.grepNoHits}</div>}
+        </div>
+      ) : (
+        <div className="wb-body">
+          <div className="wb-file-row wb-file-back" onClick={() => openWbFile(null)}>
+            ← {wbFilePath}
+          </div>
+          {wbFileLoading && <div className="sidebar-empty">{t.loading}</div>}
+          {!wbFileLoading && wbFileText === null && <div className="sidebar-empty">{t.wbNoPatch}</div>}
+          {!wbFileLoading && wbFileText !== null && (
+            <pre className="wb-patch wb-file-view">
+              {shown.map((l: string, i: number) => (
+                <div key={i} className="wb-line">
+                  <span className="wb-lineno">{i + 1}</span>
+                  {l || " "}
+                </div>
+              ))}
+              {lines.length > MAX && (
+                <div className="wb-line hunk">… {lines.length - MAX} more lines (truncated)</div>
+              )}
+            </pre>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function Workbench(props: Record<string, any>) {
   const {
     showWorkbench,
     setShowWorkbench,
+    wbTab,
+    setWbTab,
     wbFiles, // GitFileChange[] | null（null=未加载/非仓库）
     wbLoading,
     wbOpenPaths, // Set<string> 展开中的文件
@@ -65,20 +129,35 @@ export function Workbench(props: Record<string, any>) {
     <aside className="workbench">
       <div className="wb-head">
         <span className="wb-title">
-          {t.wbDiffTitle}
-          {files.length > 0 && (
+          <button
+            className={`wb-tab ${wbTab === "diff" ? "active" : ""}`}
+            onClick={() => setWbTab("diff")}
+          >
+            {t.wbDiffTitle}
+          </button>
+          <button
+            className={`wb-tab ${wbTab === "file" ? "active" : ""}`}
+            onClick={() => setWbTab("file")}
+          >
+            {t.wbFileTitle}
+          </button>
+          {wbTab === "diff" && files.length > 0 && (
             <span className="wb-stats">
               {files.length} · <em className="add">+{totalAdd}</em> <em className="del">−{totalDel}</em>
             </span>
           )}
         </span>
-        <button className="icon-btn" title={t.refresh} onClick={refreshWorkbench}>
-          ⟳
-        </button>
+        {wbTab === "diff" && (
+          <button className="icon-btn" title={t.refresh} onClick={refreshWorkbench}>
+            ⟳
+          </button>
+        )}
         <button className="icon-btn" title={t.close} onClick={() => setShowWorkbench(false)}>
           <IconX size={15} />
         </button>
       </div>
+      {wbTab === "file" && <FileTab {...props} />}
+      {wbTab === "diff" && (
       <div className="wb-body">
         {wbLoading && <div className="sidebar-empty">{t.loading}</div>}
         {!wbLoading && wbFiles === null && <div className="sidebar-empty">{t.gitNotRepo}</div>}
@@ -131,6 +210,7 @@ export function Workbench(props: Record<string, any>) {
           );
         })}
       </div>
+      )}
     </aside>
   );
 }

@@ -8,7 +8,9 @@ import remarkGfm from "remark-gfm";
 import { IconCheck, IconCopy, IconGitBranch } from "../../icons";
 
 export function Messages(props: Record<string, any>) {
-  const { DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, workspace, t } = props;
+  const { DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t } = props;
+  const compact = transcriptMode === "compact";
+  const verbose = transcriptMode === "verbose";
   return (
     <>
       <section className="messages" style={items.length === 0 && !busy ? { display: "none" } : undefined}>
@@ -53,12 +55,13 @@ export function Messages(props: Record<string, any>) {
                 </div>
               </div>
             );
-          if (it.kind === "thought")
+          if (it.kind === "thought") {
+            if (compact) return null; // 紧凑档隐藏思考过程
             return (
               <details
                 key={i}
                 className="msg thought"
-                open={openThoughts.has(i)}
+                open={verbose || openThoughts.has(i)}
                 onToggle={(e) => {
                   const isOpen = (e.currentTarget as HTMLDetailsElement).open;
                   setOpenThoughts((prev: any) => {
@@ -73,6 +76,7 @@ export function Messages(props: Record<string, any>) {
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
               </details>
             );
+          }
           if (it.kind === "note")
             return (
               <div key={i} className="msg note">
@@ -89,11 +93,11 @@ export function Messages(props: Record<string, any>) {
                 <span className="tool-dot" aria-hidden />
                 <span className="tool-title">{it.call.title ?? it.call.kind ?? t.toolCall}</span>
               </div>
-              {it.call.diffs.map((d: any, j: any) => (
+              {!compact && it.call.diffs.map((d: any, j: any) => (
                 <DiffView key={j} diff={d} />
               ))}
-              {it.call.output && (
-                <details className="tool-result">
+              {!compact && it.call.output && (
+                <details className="tool-result" open={verbose}>
                   <summary>
                     <span className="elbow" aria-hidden>⎿</span>
                     {t.output}
