@@ -33,6 +33,17 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 引擎的 worktree DB（xai-fast-worktree::resolve_grok_home）只认
+    // $GROK_HOME / $HOME，而 Windows 默认没有 HOME（只有 USERPROFILE）——
+    // 从 Git Bash 启动恰好带 HOME 所以"偶尔正常"，从资源管理器/PowerShell
+    // 启动 worktree 列表必报 "hub error: neither $GROK_HOME nor $HOME is
+    // set"。启动最早处兜底：把 GROK_HOME 指向引擎其余部分实际在用的
+    // grok_home()（~/.grok，经 USERPROFILE 解析），保证两套 home 解析一致。
+    if std::env::var("GROK_HOME").is_err() {
+        let home = xai_grok_shell::util::grok_home::grok_home();
+        // SAFETY: 单线程启动早期，engine 线程尚未 spawn
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
