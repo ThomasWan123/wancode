@@ -736,6 +736,21 @@ function App() {
     }
   }
 
+  /// 审查发现 → 修复 prompt 发给主会话。发现原文如实带上（含行号），
+  /// 让模型自己核实——审查与工作区可能已漂移，prompt 里明说"先核实再改"。
+  function fixFindings(list: any[]) {
+    if (!list?.length) return;
+    const lines = list
+      .map((f) => `- ${f.file}${f.line != null ? `:${f.line}` : ""} [${f.severity ?? "info"}] ${f.comment}`)
+      .join("\n");
+    setShowWorkbench(false);
+    sendText(
+      `下面是代码审查发现的问题清单。请逐条处理：先读相关代码核实（审查距今代码可能已变化，行号仅供参考），确认属实的修复它，不属实的说明原因跳过。全部处理完后汇总哪些修了、哪些跳过。
+
+${lines}`,
+    );
+  }
+
   /// 创建 PR：推送当前分支 + gh pr create（标题默认取分支名，可改）。
   async function createPr() {
     const title = window.prompt(t.gitPrTitlePrompt, gitInfo?.branch ?? "");
@@ -2052,7 +2067,7 @@ function App() {
       <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
-        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, t }} />
+        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, t }} />
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

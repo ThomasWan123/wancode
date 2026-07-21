@@ -100,7 +100,7 @@ function FileTab(props: Record<string, any>) {
 
 /** Review 标签：一键只读审查未提交改动，findings 按文件分组渲染。 */
 function ReviewTab(props: Record<string, any>) {
-  const { reviewResult, reviewLoading, runReview, t } = props;
+  const { reviewResult, reviewLoading, runReview, fixFindings, t } = props;
   const findings: any[] = Array.isArray(reviewResult?.findings) ? reviewResult.findings : [];
   const byFile = new Map<string, any[]>();
   for (const f of findings) {
@@ -114,6 +114,11 @@ function ReviewTab(props: Record<string, any>) {
         <button disabled={reviewLoading} onClick={runReview}>
           {reviewLoading ? t.reviewRunning : t.reviewRun}
         </button>
+        {findings.length > 0 && !reviewLoading && (
+          <button className="ghost" onClick={() => fixFindings(findings)}>
+            {t.reviewFixAll(findings.length)}
+          </button>
+        )}
         {reviewResult && !reviewLoading && (
           <span className="wb-stats">
             {t.reviewSummary(reviewResult.reviewedFiles ?? 0, findings.length)}
@@ -145,6 +150,13 @@ function ReviewTab(props: Record<string, any>) {
                 {f.line != null && <span className="wb-lineno">L{f.line}</span>}
                 {f.comment}
               </span>
+              <button
+                className="wb-fix-btn"
+                title={t.reviewFixOne}
+                onClick={() => fixFindings([f])}
+              >
+                🔧
+              </button>
             </div>
           ))}
         </div>
