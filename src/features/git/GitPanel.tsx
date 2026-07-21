@@ -6,7 +6,7 @@ import { IconGitBranch } from "../../icons";
 const baseName = (p: string) => p.split(/[\/]/).filter(Boolean).pop() ?? p;
 
 export function GitPanel(props: Record<string, any>) {
-  const { applyWorktree, changeLetter, commitMsg, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t } = props;
+  const { applyWorktree, changeLetter, commitMsg, createPr, prBusy, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t } = props;
   return (
     <>
       {showGit && (
@@ -195,6 +195,14 @@ export function GitPanel(props: Record<string, any>) {
                     }}
                   >
                     {t.gitStash}
+                  </button>
+                  <button
+                    className="ghost"
+                    disabled={prBusy || !gitInfo.branch || gitInfo.branch === "main" || gitInfo.branch === "master"}
+                    title={t.gitPrHint}
+                    onClick={() => createPr()}
+                  >
+                    {prBusy ? t.gitPrBusy : t.gitPr}
                   </button>
                   <button
                     className="ghost"

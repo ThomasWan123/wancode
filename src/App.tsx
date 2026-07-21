@@ -336,6 +336,7 @@ function App() {
   const [wbFileFilter, setWbFileFilter] = useState("");
   const [reviewResult, setReviewResult] = useState<any>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
+  const [prBusy, setPrBusy] = useState(false);
   // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
   const [transcriptMode, setTranscriptMode] = useState<string>(
     () => localStorage.getItem("wancode-transcript") ?? "default",
@@ -732,6 +733,22 @@ function App() {
       });
     } catch {
       setGitInfo(null);
+    }
+  }
+
+  /// 创建 PR：推送当前分支 + gh pr create（标题默认取分支名，可改）。
+  async function createPr() {
+    const title = window.prompt(t.gitPrTitlePrompt, gitInfo?.branch ?? "");
+    if (!title?.trim()) return;
+    setPrBusy(true);
+    try {
+      const r = await invoke<any>("git_create_pr", { title: title.trim(), body: null });
+      setItems((prev) => [...prev, { kind: "note", text: t.gitPrDone(r.url) }]);
+      setShowGit(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPrBusy(false);
     }
   }
 
@@ -1982,7 +1999,7 @@ function App() {
 
       <SettingsModal {...{ showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, testModel, theme, updateMsg, version, workspace, hooks, t }} />
 
-      <GitPanel {...{ applyWorktree, changeLetter, commitMsg, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
+      <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
 
 
       <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, t }} />

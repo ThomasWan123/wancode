@@ -149,6 +149,7 @@ pub fn run() {
             agent::agent_session_info,
             agent::agent_rewind_points,
             agent::review_run,
+            agent::git_create_pr,
             agent::agent_rewind,
             agent::agent_session_rename,
             agent::agent_session_delete,

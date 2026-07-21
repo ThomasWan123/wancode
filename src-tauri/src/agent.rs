@@ -3292,19 +3292,41 @@ pub async fn review_run(state: State<'_, AgentState>) -> Result<serde_json::Valu
     };
     let turn = tokio::time::timeout(std::time::Duration::from_secs(300), send_fut).await;
 
-    // 4. 从磁盘读最后一条 assistant 消息（与 autotest 同一取证路径）
+    // 4. 从磁盘读最后一条 assistant 消息（ACP PromptResponse 只有 stop_reason，
+    //    没有文本，磁盘是唯一取证路径）。turn 结束后引擎的最后一笔写可能
+    //    尚未落盘——空结果重试 3 次，每次 500ms。同步 IO 丢 spawn_blocking，
+    //    不占 tokio worker（自审 finding L3296/L3300）。
     let sessions_base = xai_grok_shell::util::grok_home::grok_home().join("sessions");
-    let text = walkdir_find(&sessions_base, rid.0.as_ref())
-        .map(|d| d.join("chat_history.jsonl"))
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|s| {
-            s.lines()
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("assistant"))
-                .filter_map(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
-                .last()
+    let rid_str = rid.0.to_string();
+    let mut text = String::new();
+    for attempt in 0..3u8 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let base = sessions_base.clone();
+        let sid = rid_str.clone();
+        let got = tokio::task::spawn_blocking(move || {
+            walkdir_find(&base, &sid)
+                .map(|d| d.join("chat_history.jsonl"))
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .and_then(|s| {
+                    s.lines()
+                        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+                        .filter_map(|v| {
+                            v.get("content").and_then(|c| c.as_str()).map(String::from)
+                        })
+                        .last()
+                })
+                .unwrap_or_default()
         })
+        .await
         .unwrap_or_default();
+        if !got.is_empty() {
+            text = got;
+            break;
+        }
+    }
 
     // 5. 清理：先删会话，删完（或删失败）再移出屏蔽集——顺序反过来会有
     //    竞态窗口：会话还在引擎里活着却已不被屏蔽，通知会泄进主聊天流。
@@ -3343,6 +3365,83 @@ pub async fn review_run(state: State<'_, AgentState>) -> Result<serde_json::Valu
         "reviewedFiles": files.len() - skipped.len(),
         "skippedFiles": skipped,
     }))
+}
+
+/// v0.15 PR 闭环：推送当前分支 + 本地 gh 创建 PR。
+///
+/// 引擎 git/* 没有 push，PR 能力走本地 git/gh CLI。Windows 下必须
+/// CREATE_NO_WINDOW，否则每条命令闪一个控制台（老坑）。
+#[tauri::command]
+pub async fn git_create_pr(
+    state: State<'_, AgentState>,
+    title: String,
+    body: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let cwd = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+    };
+    let run = move |program: &'static str, args: Vec<String>| {
+        let cwd = cwd.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut cmd = std::process::Command::new(program);
+                cmd.args(&args).current_dir(&cwd);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                }
+                let out = cmd
+                    .output()
+                    .map_err(|e| format!("{program} 启动失败: {e}"))?;
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if out.status.success() {
+                    Ok(stdout)
+                } else {
+                    Err(format!(
+                        "{program} {} 失败: {}",
+                        args.first().map(String::as_str).unwrap_or(""),
+                        if stderr.is_empty() { stdout } else { stderr }
+                    ))
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+    };
+
+    // gh 可用性（未安装/未登录都在这一步报清楚）
+    run("gh", vec!["auth".into(), "status".into()])
+        .await
+        .map_err(|e| format!("GitHub CLI 不可用（需安装 gh 并 gh auth login）: {e}"))?;
+
+    let branch = run("git", vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()]).await?;
+    if branch == "main" || branch == "master" {
+        return Err(format!(
+            "当前在 {branch} 分支。先让 AI 建一个特性分支并提交，再创建 PR。"
+        ));
+    }
+
+    run(
+        "git",
+        vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()],
+    )
+    .await?;
+
+    let mut args = vec![
+        "pr".into(),
+        "create".into(),
+        "--title".into(),
+        title,
+        "--body".into(),
+        body.unwrap_or_else(|| "由 WanCode 创建。".into()),
+    ];
+    args.push("--head".into());
+    args.push(branch.clone());
+    let url = run("gh", args).await?;
+    Ok(serde_json::json!({ "url": url, "branch": branch }))
 }
 
 /// List engine rewind points (`x.ai/rewind/points`).
