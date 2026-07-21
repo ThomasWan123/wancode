@@ -59,6 +59,11 @@ jobs:
           git -C $engine checkout $commit
           git -C $engine apply (Join-Path $PWD "vendor/grok-build-local.patch")
           Copy-Item vendor/grok-build-Cargo.lock (Join-Path $engine "Cargo.lock") -Force
+      - name: 占位 dist（tauri generate_context! 编译期要求 frontendDist 存在）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Set-Content dist/index.html "<!doctype html><title>ci stub</title>"
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
