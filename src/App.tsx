@@ -1471,6 +1471,19 @@ function App() {
     setWtBusy(true);
     setWtMsg(null);
     try {
+      // v0.16 冲突预检：两边都改了同一文件 → 动手前先亮牌让用户决策。
+      // 预检失败（如 worktree 目录已失效）不拦——引擎 merge 仍会兜底报冲突。
+      try {
+        const pre = await invoke<any>("worktree_precheck", { worktreePath: path });
+        const overlap: string[] = pre?.overlap ?? [];
+        if (overlap.length > 0) {
+          const list = overlap.slice(0, 8).join("\n");
+          if (!window.confirm(t.wtPrecheckWarn(overlap.length, list))) {
+            setWtBusy(false);
+            return;
+          }
+        }
+      } catch {}
       const r = await invoke<any>("worktree_apply", { worktreePath: path });
       if (r?.status === "conflicts") {
         const files = (r.conflicts ?? []).map((c: any) => c.path ?? "?").join(", ");
@@ -1493,6 +1506,25 @@ function App() {
   async function removeWorktree(path: string) {
     setWtBusy(true);
     try {
+      // v0.16 删除前快照：有未提交改动就先导出 patch，force 删除才可反悔。
+      // 快照失败（worktree 已损坏等）退回普通确认，绝不静默 force。
+      let snapPath: string | null = null;
+      let snapFailed = false;
+      try {
+        const snap = await invoke<any>("worktree_snapshot", { worktreePath: path });
+        snapPath = snap?.path ?? null;
+      } catch {
+        snapFailed = true;
+      }
+      const msg = snapPath
+        ? t.wtRemoveWithSnapshot(snapPath)
+        : snapFailed
+          ? t.wtRemoveNoSnapshot
+          : t.wtRemoveClean;
+      if (!window.confirm(msg)) {
+        setWtBusy(false);
+        return;
+      }
       await invoke("worktree_remove", { idOrPath: path, force: true });
       await refreshWorktrees();
     } catch (e) {

@@ -118,6 +118,19 @@ const zh = {
   gitPrHint: "推送当前分支并用 GitHub CLI 创建 PR（main/master 上不可用）",
   gitPrTitlePrompt: "PR 标题：",
   gitPrDone: (url: string) => `PR 已创建：${url}`,
+  wtPrecheckWarn: (n: number, list: string) =>
+    `⚠ 主目录与 worktree 都改动了 ${n} 个相同文件（合回会按 merge 处理，可能报冲突）：
+${list}
+
+仍要合回吗？`,
+  wtRemoveWithSnapshot: (p: string) =>
+    `该 worktree 有未提交改动，已快照到：
+${p}
+（可用 git apply 恢复）
+
+确认删除 worktree？`,
+  wtRemoveNoSnapshot: "⚠ 无法为该 worktree 创建改动快照（可能已损坏）。仍要强制删除吗？",
+  wtRemoveClean: "该 worktree 无未提交改动。确认删除？",
   gitStagedBadge: "已暂存",
   refresh: "刷新",
   loading: "加载中…",
@@ -423,6 +436,19 @@ const en: typeof zh = {
   gitPrHint: "Push current branch and create a PR via GitHub CLI (disabled on main/master)",
   gitPrTitlePrompt: "PR title:",
   gitPrDone: (url: string) => `PR created: ${url}`,
+  wtPrecheckWarn: (n: number, list: string) =>
+    `⚠ Both the main dir and the worktree modified ${n} same file(s) (merge may conflict):
+${list}
+
+Apply anyway?`,
+  wtRemoveWithSnapshot: (p: string) =>
+    `This worktree has uncommitted changes, snapshotted to:
+${p}
+(restore with git apply)
+
+Remove the worktree?`,
+  wtRemoveNoSnapshot: "⚠ Could not snapshot this worktree's changes (corrupted?). Force-remove anyway?",
+  wtRemoveClean: "This worktree has no uncommitted changes. Remove it?",
   gitStagedBadge: "staged",
   refresh: "Refresh",
   loading: "Loading…",

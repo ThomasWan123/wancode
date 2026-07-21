@@ -1447,6 +1447,51 @@ pub fn validate_startup_models_at(path: &std::path::Path) -> StartupModels {
 }
 
 #[cfg(test)]
+mod worktree_safety_tests {
+    /// v0.16 删除前快照：临时仓库 + 未提交改动 → 生成含 diff 的 patch 文件；
+    /// 干净树 → 返回 null 不落文件。
+    #[tokio::test]
+    async fn snapshot_writes_patch_for_dirty_tree() {
+        let dir = std::env::temp_dir().join(format!(
+            "wancode-wtsnap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("a.txt")).unwrap();
+        idx.write().unwrap();
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // 干净树 → null
+        let clean = super::worktree_snapshot(dir.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert!(clean.is_null(), "干净树不应产生快照: {clean:?}");
+
+        // 改跟踪文件 + 加未跟踪文件 → 快照含两者
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
+        let snap = super::worktree_snapshot(dir.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        let path = snap.get("path").and_then(|p| p.as_str()).expect("应返回 path");
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("changed"), "patch 缺跟踪文件改动");
+        assert!(content.contains("brand new"), "patch 缺未跟踪文件内容");
+        assert!(content.contains("git apply"), "缺恢复说明头");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod config_txn_tests {
     use super::*;
 
@@ -2688,6 +2733,106 @@ pub async fn worktree_apply(
         return Err(e.to_string());
     }
     Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+/// v0.16：apply 冲突预检。引擎 merge 模式虽然会报冲突，但那是在改动已经
+/// 部分落盘之后；预检在动手前就把"两边都改了同一文件"亮出来让用户决策。
+/// 双侧都用客户端 git2 直查（#83 同款思路：不信引擎的 cwd 回退）。
+#[tauri::command]
+pub async fn worktree_precheck(
+    state: State<'_, AgentState>,
+    worktree_path: String,
+) -> Result<serde_json::Value, String> {
+    let cwd = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+    };
+    tokio::task::spawn_blocking(move || {
+        fn changed_paths(repo_path: &std::path::Path) -> Result<Vec<String>, String> {
+            let repo = git2::Repository::discover(repo_path)
+                .map_err(|e| format!("打不开仓库 {}: {e}", repo_path.display()))?;
+            let mut opts = git2::StatusOptions::new();
+            opts.include_untracked(true).recurse_untracked_dirs(true);
+            let st = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+            Ok(st
+                .iter()
+                .filter(|e| e.status() != git2::Status::CURRENT)
+                .filter_map(|e| e.path().map(String::from))
+                .collect())
+        }
+        let main_changed = changed_paths(&cwd)?;
+        let wt_changed = changed_paths(std::path::Path::new(&worktree_path))?;
+        let main_set: std::collections::HashSet<&str> =
+            main_changed.iter().map(String::as_str).collect();
+        let overlap: Vec<String> = wt_changed
+            .iter()
+            .filter(|p| main_set.contains(p.as_str()))
+            .cloned()
+            .collect();
+        Ok(serde_json::json!({
+            "mainChanged": main_changed.len(),
+            "wtChanged": wt_changed.len(),
+            "overlap": overlap,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// v0.16：删除前快照。把 worktree 的全部未提交改动（含未跟踪文件）导出为
+/// unified patch 存 ~/.grok/wancode-wt-snapshots/，返回路径；树干净返回 null。
+/// 有了它，force 删除才谈得上"可反悔"。
+#[tauri::command]
+pub async fn worktree_snapshot(worktree_path: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let repo = git2::Repository::open(&worktree_path)
+            .map_err(|e| format!("打不开 worktree: {e}"))?;
+        let head_tree = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_tree().ok());
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        let diff = repo
+            .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+            .map_err(|e| e.to_string())?;
+        let mut patch = String::new();
+        diff.print(git2::DiffFormat::Patch, |_, _, line| {
+            let prefix = match line.origin() {
+                '+' | '-' | ' ' => Some(line.origin()),
+                _ => None,
+            };
+            if let Some(p) = prefix {
+                patch.push(p);
+            }
+            patch.push_str(&String::from_utf8_lossy(line.content()));
+            true
+        })
+        .map_err(|e| e.to_string())?;
+        if patch.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        let dir = xai_grok_shell::util::grok_home::grok_home().join("wancode-wt-snapshots");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let base = std::path::Path::new(&worktree_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "worktree".into());
+        let file = dir.join(format!("{base}-{ts}.patch"));
+        let header = format!(
+            "# WanCode worktree snapshot\n# source: {worktree_path}\n# 恢复：git apply <本文件>\n\n"
+        );
+        std::fs::write(&file, header + &patch).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "path": file.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Remove a worktree. `idOrPath` and the legacy `worktreePath` are mutually
