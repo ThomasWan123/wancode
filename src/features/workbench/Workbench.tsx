@@ -9,23 +9,49 @@ import { IconX } from "../../icons";
 const PATCH_RENDER_LIMIT = 4000; // 行数上限：再大就只显示头部 + 提示
 
 /** unified diff 文本 → 着色行。不做语法高亮，只分 +/-/@@/其它。 */
-function PatchView({ patch }: { patch: string }) {
+function PatchView({ patch, annotations }: { patch: string; annotations?: Map<number, any[]> }) {
   const lines = patch.split("\n");
   const truncated = lines.length > PATCH_RENDER_LIMIT;
   const shown = truncated ? lines.slice(0, PATCH_RENDER_LIMIT) : lines;
+  // v0.15-4 行级评论：按 @@ 头跟踪新文件行号，命中 annotations 的行下方
+  // 内联渲染 findings（行号对不上时评论仍在 Review 标签，不会丢）。
+  let newLine = 0;
+  let inHunk = false; // 哨兵：hunk 起始行可为 +1（newLine=0），不能拿 newLine>0 当"在 hunk 内"用
   return (
     <pre className="wb-patch">
       {shown.map((l, i) => {
-        const cls = l.startsWith("+") && !l.startsWith("+++")
-          ? "add"
-          : l.startsWith("-") && !l.startsWith("---")
-            ? "del"
-            : l.startsWith("@@")
-              ? "hunk"
-              : "";
+        let cls = "";
+        let lineNo: number | null = null;
+        if (l.startsWith("@@")) {
+          cls = "hunk";
+          const m = /[+](\d+)/.exec(l);
+          if (m) newLine = parseInt(m[1], 10) - 1;
+          inHunk = true;
+        } else if (l.startsWith("+") && !l.startsWith("+++")) {
+          cls = "add";
+          newLine += 1;
+          lineNo = newLine;
+        } else if (l.startsWith("-") && !l.startsWith("---")) {
+          cls = "del";
+        } else if (inHunk && !l.startsWith("\\")) {
+          // 上下文行推进新文件行号；diff 头部行（inHunk 前）不计。
+          // 守卫必须用 inHunk 而非 newLine>0：hunk 起始 +1 时 newLine=0，
+          // 顶部上下文行会漏计导致整段错位（二轮自审抓到的 off-by-N）。
+          newLine += 1;
+          lineNo = newLine;
+        }
+        const notes = lineNo != null ? annotations?.get(lineNo) : undefined;
         return (
-          <div key={i} className={`wb-line ${cls}`}>
-            {l || " "}
+          <div key={i}>
+            <div className={`wb-line ${cls}`}>{l || " "}</div>
+            {notes?.map((f: any, j: number) => (
+              <div key={j} className={`wb-inline-note ${f.severity ?? "info"}`}>
+                <span className={`wb-sev ${f.severity ?? "info"}`}>
+                  {f.severity === "error" ? "✕" : f.severity === "warn" ? "!" : "i"}
+                </span>
+                {f.comment}
+              </div>
+            ))}
           </div>
         );
       })}
@@ -183,6 +209,22 @@ export function Workbench(props: Record<string, any>) {
   if (!showWorkbench) return null;
 
   const files: any[] = wbFiles ?? [];
+  // 审查 findings 按 文件→行号 索引，Diff 视图内联行级评论用
+  const reviewFindings: any[] = Array.isArray(props.reviewResult?.findings)
+    ? props.reviewResult.findings
+    : [];
+  const annotationsFor = (path: string): Map<number, any[]> | undefined => {
+    const norm = (p: string) => (p ?? "").split("\\").join("/").toLowerCase();
+    const hits = reviewFindings.filter((f) => f.line != null && norm(f.file) === norm(path));
+    if (!hits.length) return undefined;
+    const m = new Map<number, any[]>();
+    for (const f of hits) {
+      const arr = m.get(f.line) ?? [];
+      arr.push(f);
+      m.set(f.line, arr);
+    }
+    return m;
+  };
   const totalAdd = files.reduce((s, f) => s + (f.additions ?? 0), 0);
   const totalDel = files.reduce((s, f) => s + (f.deletions ?? 0), 0);
   const toggle = (p: string) =>
@@ -275,7 +317,7 @@ export function Workbench(props: Record<string, any>) {
                     </button>
                   </div>
                   {f.patch ? (
-                    <PatchView patch={f.patch} />
+                    <PatchView patch={f.patch} annotations={annotationsFor(f.path)} />
                   ) : (
                     <div className="sidebar-empty">{t.wbNoPatch}</div>
                   )}
