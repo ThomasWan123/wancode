@@ -79,3 +79,6 @@ export const IconShield = ({ size = 16, ...r }: P) => (
 export const IconChevron = ({ size = 16, ...r }: P) => (
   <svg {...base(size)} {...r}><path d="m6 9 6 6 6-6" /></svg>
 );
+export const IconColumns = ({ size = 16, ...r }: P) => (
+  <svg {...base(size)} {...r}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /></svg>
+);

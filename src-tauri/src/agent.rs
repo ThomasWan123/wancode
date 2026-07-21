@@ -3020,12 +3020,25 @@ pub async fn git_status_ext(state: State<'_, AgentState>) -> Result<serde_json::
 }
 
 /// Unified diffs for the given paths (empty = every change).
+/// `include_patch` 打开时返回每个文件的 unified diff 文本（工作台 Diff 视图用）。
 #[tauri::command]
 pub async fn git_diffs(
     state: State<'_, AgentState>,
     paths: Option<Vec<String>>,
+    include_patch: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    ext_call(&state, "x.ai/git/diffs", serde_json::json!({ "paths": paths })).await
+    ext_call(
+        &state,
+        "x.ai/git/diffs",
+        // 注意：不传 maxPatchBytes/maxPatchLines——引擎的语义是"任一文件
+        // 超限则整个请求失败"（check_diff_size_limits），一把 lock 文件就能
+        // 把整个 Diff 面板打死。超大 patch 由前端截断显示。
+        serde_json::json!({
+            "paths": paths,
+            "includePatch": include_patch.unwrap_or(false),
+        }),
+    )
+    .await
 }
 
 /// Stage / unstage / discard the given paths (`None` = all).

@@ -7,6 +7,7 @@ import { Composer } from "./features/composer/Composer";
 import { Messages } from "./features/messages/Messages";
 import { Dialogs } from "./features/dialogs/Dialogs";
 import { Home } from "./features/home/Home";
+import { Workbench } from "./features/workbench/Workbench";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
 import { Sidebar } from "./features/sidebar/Sidebar";
@@ -18,7 +19,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
-  IconTerminal, IconFile, IconFolderClosed,
+  IconTerminal, IconFile, IconFolderClosed, IconColumns,
 } from "./icons";
 import "./App.css";
 
@@ -322,6 +323,11 @@ function App() {
   const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
+  // v0.14 工作台（右侧第二栏）：Diff 一级视图
+  const [showWorkbench, setShowWorkbench] = useState(false);
+  const [wbFiles, setWbFiles] = useState<any[] | null>(null);
+  const [wbLoading, setWbLoading] = useState(false);
+  const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
   const [termTab, setTermTab] = useState<"output" | "shell">("output");
   const [ptyOpened, setPtyOpened] = useState(false);
   const [worktrees, setWorktrees] = useState<{ path: string; branch: string }[]>([]);
@@ -705,6 +711,32 @@ function App() {
       });
     } catch {
       setGitInfo(null);
+    }
+  }
+
+  /// 工作台 Diff 数据：引擎 x.ai/git/diffs（includePatch）。
+  /// 信封语义同 refreshGit：先判 error，result 为 null 视为非仓库。
+  async function refreshWorkbench() {
+    if (!sessionIdRef.current) {
+      setWbFiles(null);
+      return;
+    }
+    setWbLoading(true);
+    try {
+      const r = await invoke<any>("git_diffs", { paths: null, includePatch: true });
+      if (r?.error) {
+        setWbFiles(null);
+        setError(`diff: ${typeof r.error === "string" ? r.error : JSON.stringify(r.error)}`);
+        return;
+      }
+      const env = r?.result ?? r;
+      const d = env?.data ?? env;
+      setWbFiles(Array.isArray(d?.files) ? d.files : null);
+    } catch (e) {
+      setWbFiles(null);
+      setError(String(e));
+    } finally {
+      setWbLoading(false);
     }
   }
 
@@ -1700,6 +1732,19 @@ function App() {
         )}
         {sessionId && (
           <button
+            className={`icon-btn ${showWorkbench ? "active" : ""}`}
+            title={t.wbTooltip}
+            onClick={() => {
+              const next = !showWorkbench;
+              setShowWorkbench(next);
+              if (next) refreshWorkbench();
+            }}
+          >
+            <IconColumns size={15} />
+          </button>
+        )}
+        {sessionId && (
+          <button
             className="icon-btn"
             title={t.git}
             onClick={() => {
@@ -1817,6 +1862,8 @@ function App() {
 
       <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
+
+        <Workbench {...{ showWorkbench, setShowWorkbench, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, t }} />
       </div>
     </main>
   );
