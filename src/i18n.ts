@@ -115,6 +115,10 @@ const zh = {
   reviewSkipped: (n: number) => `${n} 个超大文件被跳过`,
   reviewFixAll: (n: number) => `🔧 全部让 AI 修复（${n}）`,
   reviewFixOne: "让 AI 修复这条",
+  reviewFixPrompt: (findings: string) =>
+    `下面是代码审查发现的问题清单。请逐条处理：先读相关代码核实（审查距今代码可能已变化，行号仅供参考），确认属实的修复它，不属实的说明原因跳过。全部处理完后汇总哪些修了、哪些跳过。
+
+${findings}`,
   gitPr: "创建 PR",
   gitPrBusy: "创建中…",
   gitPrHint: "推送当前分支并用 GitHub CLI 创建 PR（main/master 上不可用）",
@@ -435,6 +439,10 @@ const en: typeof zh = {
   reviewSkipped: (n: number) => `${n} oversized files skipped`,
   reviewFixAll: (n: number) => `🔧 Fix all with AI (${n})`,
   reviewFixOne: "Fix this with AI",
+  reviewFixPrompt: (findings: string) =>
+    `Below is a list of issues found during code review. Please handle them one by one: first read the relevant code to verify (the code may have changed since the review — line numbers are approximate), fix the confirmed ones, and skip the invalid ones with an explanation. Once done, summarize what was fixed and what was skipped.
+
+${findings}`,
   gitPr: "Create PR",
   gitPrBusy: "Creating…",
   gitPrHint: "Push current branch and create a PR via GitHub CLI (disabled on main/master)",

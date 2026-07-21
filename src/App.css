@@ -2810,7 +2810,9 @@ button.ghost.small {
 .wb-review-raw { margin: 6px 12px; white-space: pre-wrap; }
 .wb-fix-btn {
   flex: none; background: none; border: none; cursor: pointer;
-  font-size: 13px; opacity: 0; padding: 0 2px;
+  font-size: 13px; opacity: 0; padding: 0 2px; pointer-events: none;
 }
-.wb-finding:hover .wb-fix-btn { opacity: 0.85; }
+.wb-finding:hover .wb-fix-btn,
+.wb-finding:focus-within .wb-fix-btn,
+.wb-fix-btn:focus-visible { opacity: 0.85; pointer-events: auto; }
 .wb-review-bar .ghost { font-size: 12px; }

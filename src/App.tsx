@@ -744,11 +744,7 @@ function App() {
       .map((f) => `- ${f.file}${f.line != null ? `:${f.line}` : ""} [${f.severity ?? "info"}] ${f.comment}`)
       .join("\n");
     setShowWorkbench(false);
-    sendText(
-      `下面是代码审查发现的问题清单。请逐条处理：先读相关代码核实（审查距今代码可能已变化，行号仅供参考），确认属实的修复它，不属实的说明原因跳过。全部处理完后汇总哪些修了、哪些跳过。
-
-${lines}`,
-    );
+    sendText(t.reviewFixPrompt(lines));
   }
 
   /// 创建 PR：推送当前分支 + gh pr create（标题默认取分支名，可改）。

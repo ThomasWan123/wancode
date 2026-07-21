@@ -153,6 +153,7 @@ function ReviewTab(props: Record<string, any>) {
               <button
                 className="wb-fix-btn"
                 title={t.reviewFixOne}
+                aria-label={t.reviewFixOne}
                 onClick={() => fixFindings([f])}
               >
                 🔧
