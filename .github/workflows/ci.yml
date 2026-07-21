@@ -67,7 +67,9 @@ jobs:
           workspaces: "../grok-build -> target"
       - name: clippy
         working-directory: src-tauri
-        run: cargo clippy -p wancode --lib -- -D warnings
+        # --no-deps：-D warnings 只对 wancode 自身生效。引擎是固定 commit 的
+        # 上游代码，自带若干 clippy 警告，不该由我们的 CI 拦截。
+        run: cargo clippy -p wancode --lib --no-deps -- -D warnings
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
         run: cargo test -p wancode --lib --test engine_canary
