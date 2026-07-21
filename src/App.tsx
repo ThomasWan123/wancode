@@ -8,6 +8,7 @@ import { Messages } from "./features/messages/Messages";
 import { Dialogs } from "./features/dialogs/Dialogs";
 import { Home } from "./features/home/Home";
 import { Workbench } from "./features/workbench/Workbench";
+import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
 import { Sidebar } from "./features/sidebar/Sidebar";
@@ -328,6 +329,9 @@ function App() {
   const [wbFiles, setWbFiles] = useState<any[] | null>(null);
   const [wbLoading, setWbLoading] = useState(false);
   const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
+  // v0.14 命令面板（Ctrl+K）。动作每次渲染重组进 ref，全局键监听只挂一次。
+  const [showPalette, setShowPalette] = useState(false);
+  const paletteRef = useRef<{ toggleWorkbench: () => void } | null>(null);
   const [termTab, setTermTab] = useState<"output" | "shell">("output");
   const [ptyOpened, setPtyOpened] = useState(false);
   const [worktrees, setWorktrees] = useState<{ path: string; branch: string }[]>([]);
@@ -1693,6 +1697,92 @@ function App() {
     bypass: { label: t.modeBypass, desc: t.modeBypassDesc },
   };
 
+  const toggleWorkbench = () => {
+    const next = !showWorkbench;
+    setShowWorkbench(next);
+    if (next) refreshWorkbench();
+  };
+  paletteRef.current = { toggleWorkbench };
+  // 全局快捷键：Ctrl+K 面板、Ctrl+Shift+D 工作台、Ctrl+` 终端。
+  // 只挂一次监听，经 ref 取当前闭包，避免每渲染重挂。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowPalette((v) => !v);
+      } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        paletteRef.current?.toggleWorkbench();
+      } else if (e.ctrlKey && e.key === "`") {
+        e.preventDefault();
+        setShowTerminal((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const paletteActions = [
+    {
+      id: "new-session",
+      label: t.sidebarNewSession,
+      run: () => {
+        setSessionId("");
+        sessionIdRef.current = "";
+        setItems([]);
+        setSidebarTab("sessions");
+      },
+    },
+    { id: "open-folder", label: t.sugOpenFolder, run: pickFolderAndConnect },
+    { id: "workbench", label: t.wbTooltip, hint: "Ctrl+Shift+D", disabled: !sessionId, run: toggleWorkbench },
+    {
+      id: "terminal",
+      label: t.paletteTerminal,
+      hint: "Ctrl+`",
+      disabled: !sessionId,
+      run: () => setShowTerminal((v) => !v),
+    },
+    {
+      id: "git",
+      label: t.git,
+      disabled: !sessionId,
+      run: () => {
+        refreshGit();
+        setShowGit(true);
+      },
+    },
+    { id: "rewind", label: t.rewindTooltip, disabled: !sessionId, run: openRewind },
+    {
+      id: "tasks",
+      label: t.tasksTitle,
+      disabled: !sessionId,
+      run: () => {
+        refreshTasks();
+        setShowTasks(true);
+      },
+    },
+    { id: "compact", label: t.compactTitle, disabled: !sessionId || busy, run: runCompact },
+    { id: "settings", label: t.settings, run: () => setShowSettings(true) },
+    {
+      id: "settings-models",
+      label: t.paletteModels,
+      run: () => {
+        setSettingsTab("models");
+        setShowSettings(true);
+      },
+    },
+    {
+      id: "settings-mcp",
+      label: t.paletteMcp,
+      run: () => {
+        refreshMcpConfig();
+        setSettingsTab("mcp");
+        setShowSettings(true);
+      },
+    },
+    { id: "theme", label: t.paletteTheme, run: () => setTheme((th) => (th === "dark" ? "light" : "dark")) },
+  ];
+
   return (
     <main className="chat-app">
       <header className="topbar">
@@ -1865,6 +1955,7 @@ function App() {
 
         <Workbench {...{ showWorkbench, setShowWorkbench, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, t }} />
       </div>
+      {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>
   );
 }
