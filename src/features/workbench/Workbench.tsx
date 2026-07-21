@@ -98,6 +98,61 @@ function FileTab(props: Record<string, any>) {
   );
 }
 
+/** Review 标签：一键只读审查未提交改动，findings 按文件分组渲染。 */
+function ReviewTab(props: Record<string, any>) {
+  const { reviewResult, reviewLoading, runReview, t } = props;
+  const findings: any[] = Array.isArray(reviewResult?.findings) ? reviewResult.findings : [];
+  const byFile = new Map<string, any[]>();
+  for (const f of findings) {
+    const k = f?.file ?? "?";
+    if (!byFile.has(k)) byFile.set(k, []);
+    byFile.get(k)!.push(f);
+  }
+  return (
+    <div className="wb-body">
+      <div className="wb-review-bar">
+        <button disabled={reviewLoading} onClick={runReview}>
+          {reviewLoading ? t.reviewRunning : t.reviewRun}
+        </button>
+        {reviewResult && !reviewLoading && (
+          <span className="wb-stats">
+            {t.reviewSummary(reviewResult.reviewedFiles ?? 0, findings.length)}
+            {(reviewResult.skippedFiles?.length ?? 0) > 0 &&
+              ` · ${t.reviewSkipped(reviewResult.skippedFiles.length)}`}
+          </span>
+        )}
+      </div>
+      {reviewLoading && <div className="sidebar-empty">{t.reviewHint}</div>}
+      {!reviewLoading && reviewResult && findings.length === 0 && reviewResult.findings !== null && (
+        <div className="sidebar-empty">✅ {t.reviewClean}</div>
+      )}
+      {!reviewLoading && reviewResult?.findings === null && (
+        // 解析失败：退回显示原文，绝不假装"没有问题"
+        <pre className="wb-patch wb-review-raw">{reviewResult.raw}</pre>
+      )}
+      {[...byFile.entries()].map(([file, list]) => (
+        <div key={file} className="wb-file">
+          <div className="wb-file-head wb-review-file" title={file}>
+            <span className="wb-file-path">{file}</span>
+            <span className="wb-stats">{list.length}</span>
+          </div>
+          {list.map((f, i) => (
+            <div key={i} className={`wb-finding ${f.severity ?? "info"}`}>
+              <span className={`wb-sev ${f.severity ?? "info"}`}>
+                {f.severity === "error" ? "✕" : f.severity === "warn" ? "!" : "i"}
+              </span>
+              <span className="wb-finding-text">
+                {f.line != null && <span className="wb-lineno">L{f.line}</span>}
+                {f.comment}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Workbench(props: Record<string, any>) {
   const {
     showWorkbench,
@@ -141,6 +196,12 @@ export function Workbench(props: Record<string, any>) {
           >
             {t.wbFileTitle}
           </button>
+          <button
+            className={`wb-tab ${wbTab === "review" ? "active" : ""}`}
+            onClick={() => setWbTab("review")}
+          >
+            {t.wbReviewTitle}
+          </button>
           {wbTab === "diff" && files.length > 0 && (
             <span className="wb-stats">
               {files.length} · <em className="add">+{totalAdd}</em> <em className="del">−{totalDel}</em>
@@ -157,6 +218,7 @@ export function Workbench(props: Record<string, any>) {
         </button>
       </div>
       {wbTab === "file" && <FileTab {...props} />}
+      {wbTab === "review" && <ReviewTab {...props} />}
       {wbTab === "diff" && (
       <div className="wb-body">
         {wbLoading && <div className="sidebar-empty">{t.loading}</div>}

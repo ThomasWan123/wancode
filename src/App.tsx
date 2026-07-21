@@ -329,11 +329,13 @@ function App() {
   const [wbFiles, setWbFiles] = useState<any[] | null>(null);
   const [wbLoading, setWbLoading] = useState(false);
   const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
-  const [wbTab, setWbTab] = useState<"diff" | "file">("diff");
+  const [wbTab, setWbTab] = useState<"diff" | "file" | "review">("diff");
   const [wbFilePath, setWbFilePath] = useState<string | null>(null);
   const [wbFileText, setWbFileText] = useState<string | null>(null);
   const [wbFileLoading, setWbFileLoading] = useState(false);
   const [wbFileFilter, setWbFileFilter] = useState("");
+  const [reviewResult, setReviewResult] = useState<any>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
   // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
   const [transcriptMode, setTranscriptMode] = useState<string>(
     () => localStorage.getItem("wancode-transcript") ?? "default",
@@ -730,6 +732,20 @@ function App() {
       });
     } catch {
       setGitInfo(null);
+    }
+  }
+
+  /// Review：只读子会话审查未提交改动（review_run，最长 5 分钟）。
+  async function runReview() {
+    setReviewLoading(true);
+    setReviewResult(null);
+    try {
+      const r = await invoke<any>("review_run");
+      setReviewResult(r);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReviewLoading(false);
     }
   }
 
@@ -1987,7 +2003,7 @@ function App() {
       <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
-        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, t }} />
+        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, t }} />
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

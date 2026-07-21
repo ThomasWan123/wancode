@@ -148,6 +148,7 @@ pub fn run() {
             agent::agent_list_mcp,
             agent::agent_session_info,
             agent::agent_rewind_points,
+            agent::review_run,
             agent::agent_rewind,
             agent::agent_session_rename,
             agent::agent_session_delete,
