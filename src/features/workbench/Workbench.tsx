@@ -124,6 +124,45 @@ function FileTab(props: Record<string, any>) {
   );
 }
 
+/** 预览标签：iframe 嵌本地 dev server（CSP frame-src 已放行 localhost）。
+    只认 http://localhost / http://127.0.0.1——预览面板不是通用浏览器。 */
+function PreviewTab(props: Record<string, any>) {
+  const { previewUrl, setPreviewUrl, previewLive, setPreviewLive, t } = props;
+  const isLocal = (u: string) => /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(u);
+  const go = () => {
+    const u = previewUrl.trim();
+    if (!isLocal(u)) return;
+    localStorage.setItem("wancode-preview-url", u);
+    // 相同 URL 重按 = 强制重载：先卸载 iframe 再挂
+    setPreviewLive(null);
+    setTimeout(() => setPreviewLive(u), 30);
+  };
+  return (
+    <div className="wb-body wb-preview">
+      <div className="wb-review-bar">
+        <input
+          className="session-search wb-preview-url"
+          value={previewUrl}
+          placeholder="http://localhost:5173"
+          onChange={(e) => setPreviewUrl(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === "Enter" && go()}
+        />
+        <button onClick={go} disabled={!isLocal(previewUrl.trim())}>
+          {previewLive ? t.previewReload : t.previewOpen}
+        </button>
+      </div>
+      {!isLocal(previewUrl.trim()) && previewUrl.trim() !== "" && (
+        <div className="sidebar-empty">{t.previewLocalOnly}</div>
+      )}
+      {previewLive ? (
+        <iframe className="wb-preview-frame" src={previewLive} title="preview" />
+      ) : (
+        <div className="sidebar-empty">{t.previewHint}</div>
+      )}
+    </div>
+  );
+}
+
 /** Review 标签：一键只读审查未提交改动，findings 按文件分组渲染。 */
 function ReviewTab(props: Record<string, any>) {
   const { reviewResult, reviewLoading, runReview, fixFindings, t } = props;
@@ -257,6 +296,12 @@ export function Workbench(props: Record<string, any>) {
           >
             {t.wbReviewTitle}
           </button>
+          <button
+            className={`wb-tab ${wbTab === "preview" ? "active" : ""}`}
+            onClick={() => setWbTab("preview")}
+          >
+            {t.wbPreviewTitle}
+          </button>
           {wbTab === "diff" && files.length > 0 && (
             <span className="wb-stats">
               {files.length} · <em className="add">+{totalAdd}</em> <em className="del">−{totalDel}</em>
@@ -274,6 +319,7 @@ export function Workbench(props: Record<string, any>) {
       </div>
       {wbTab === "file" && <FileTab {...props} />}
       {wbTab === "review" && <ReviewTab {...props} />}
+      {wbTab === "preview" && <PreviewTab {...props} />}
       {wbTab === "diff" && (
       <div className="wb-body">
         {wbLoading && <div className="sidebar-empty">{t.loading}</div>}

@@ -329,13 +329,18 @@ function App() {
   const [wbFiles, setWbFiles] = useState<any[] | null>(null);
   const [wbLoading, setWbLoading] = useState(false);
   const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
-  const [wbTab, setWbTab] = useState<"diff" | "file" | "review">("diff");
+  const [wbTab, setWbTab] = useState<"diff" | "file" | "review" | "preview">("diff");
   const [wbFilePath, setWbFilePath] = useState<string | null>(null);
   const [wbFileText, setWbFileText] = useState<string | null>(null);
   const [wbFileLoading, setWbFileLoading] = useState(false);
   const [wbFileFilter, setWbFileFilter] = useState("");
   const [reviewResult, setReviewResult] = useState<any>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
+  // v0.17 预览标签：URL 记忆到 localStorage（按工作区无区分，够用）
+  const [previewUrl, setPreviewUrl] = useState<string>(
+    () => localStorage.getItem("wancode-preview-url") ?? "http://localhost:5173",
+  );
+  const [previewLive, setPreviewLive] = useState<string | null>(null);
   const [prBusy, setPrBusy] = useState(false);
   // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
   const [transcriptMode, setTranscriptMode] = useState<string>(
@@ -680,6 +685,7 @@ function App() {
       setSubagents([]);
       return;
     }
+    refreshWorktrees(); // 任务中心的 worktree 区与后台任务同步刷新
     try {
       const t = await invoke<any>("tasks_list");
       setBgTasks((t?.result ?? t)?.tasks ?? []);
@@ -734,6 +740,14 @@ function App() {
     } catch {
       setGitInfo(null);
     }
+  }
+
+  /// 任务中心：打开 worktree（有会话则续接，否则在该目录开新会话）。
+  function openWorktree(w: any) {
+    setShowTasks(false);
+    setWorkspace(w.path);
+    localStorage.setItem("wancode-workspace", w.path);
+    startSession(w.sessionId || undefined, w.path);
   }
 
   /// 审查发现 → 修复 prompt 发给主会话。发现原文如实带上（含行号），
@@ -1447,6 +1461,7 @@ function App() {
           .map((w: any) => ({
             path: w.path ?? w.worktree_path ?? w.worktreePath ?? "",
             branch: w.branch ?? w.head_branch ?? "",
+            sessionId: w.session_id ?? w.sessionId ?? null,
           }))
           .filter((w: any) => w.path),
       );
@@ -1910,7 +1925,7 @@ function App() {
         {/* 只在真有后台活动时出现 —— 平时不占位置。
             定时任务也要算进来：否则只有定时任务时按钮不出现，面板打不开，
             等于这个功能不存在。 */}
-        {sessionId && bgTasks.length + subagents.length + Object.keys(schedTasks).length > 0 && (
+        {sessionId && bgTasks.length + subagents.length + worktrees.length + Object.keys(schedTasks).length > 0 && (
           <button
             className="icon-btn tasks-btn"
             title={t.tasksTitle}
@@ -1921,7 +1936,7 @@ function App() {
           >
             <IconTerminal size={15} />
             <span className="tasks-count">
-              {bgTasks.length + subagents.length + Object.keys(schedTasks).length}
+              {bgTasks.length + subagents.length + worktrees.length + Object.keys(schedTasks).length}
             </span>
           </button>
         )}
@@ -2045,7 +2060,7 @@ function App() {
       <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
 
 
-      <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, t }} />
+      <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t }} />
 
 
 
@@ -2063,7 +2078,7 @@ function App() {
       <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
-        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, t }} />
+        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

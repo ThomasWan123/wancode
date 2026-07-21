@@ -2832,3 +2832,8 @@ button.ghost.small {
   background: color-mix(in srgb, #d29922 10%, transparent);
   border-left-color: var(--warn, #d29922);
 }
+
+/* 工作台：预览标签 */
+.wb-preview { display: flex; flex-direction: column; }
+.wb-preview-url { flex: 1; margin: 0; }
+.wb-preview-frame { flex: 1; border: none; background: #fff; min-height: 300px; }

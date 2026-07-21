@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { IconTerminal } from "../../icons";
 
 export function TasksPanel(props: Record<string, any>) {
-  const { bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, t } = props;
+  const { bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t } = props;
   return (
     <>
       {showTasks && (
@@ -16,9 +16,29 @@ export function TasksPanel(props: Record<string, any>) {
 
             {bgTasks.length === 0 &&
               subagents.length === 0 &&
+              (worktrees?.length ?? 0) === 0 &&
               Object.keys(schedTasks).length === 0 && (
                 <div className="sidebar-empty">{t.tasksEmpty}</div>
               )}
+
+            {(worktrees?.length ?? 0) > 0 && (
+              <div className="git-group">
+                <div className="git-group-head">
+                  <span>{t.tasksWorktrees(worktrees.length)}</span>
+                </div>
+                {worktrees.map((w: any) => (
+                  <div key={w.path} className="git-row">
+                    <span className="git-path" title={w.path}>
+                      {(w.path.split(/[\/]/).filter(Boolean).pop() ?? w.path)}
+                    </span>
+                    {w.branch && <span className="git-track">{w.branch}</span>}
+                    <button className="git-mini" onClick={() => openWorktree(w)}>
+                      {w.sessionId ? t.wtOpenResume : t.wtOpenNew}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {bgTasks.length > 0 && (
               <div className="git-group">
