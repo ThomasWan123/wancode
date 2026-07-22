@@ -1,5 +1,7 @@
 mod agent;
 mod config_core;
+mod crash_recovery;
+mod provider_ops;
 
 use xai_grok_paths::AbsPathBuf;
 
@@ -226,24 +228,24 @@ pub fn run() {
             agent::skills_config,
             agent::skills_create,
             agent::skills_open,
-            agent::model_list,
-            agent::model_upsert,
-            agent::model_remove,
-            agent::provider_quick_setup,
-            agent::model_test,
-            agent::migrate_env_keys,
+            provider_ops::model_list,
+            provider_ops::model_upsert,
+            provider_ops::model_remove,
+            provider_ops::provider_quick_setup,
+            provider_ops::model_test,
+            provider_ops::migrate_env_keys,
             agent::skill_read,
             agent::skill_write,
-            agent::mcp_config_list,
-            agent::mcp_config_upsert,
-            agent::mcp_config_remove,
-            agent::crash_recovery_info,
-            agent::crash_recovery_ack,
+            provider_ops::mcp_config_list,
+            provider_ops::mcp_config_upsert,
+            provider_ops::mcp_config_remove,
+            crash_recovery::crash_recovery_info,
+            crash_recovery::crash_recovery_ack,
         ])
         .on_window_event(|_w, e| {
             // 优雅关闭 → 标记 clean，崩溃则标记保持 dirty（下次启动出恢复横幅）
             if matches!(e, tauri::WindowEvent::CloseRequested { .. }) {
-                agent::mark_clean_exit();
+                crash_recovery::mark_clean_exit();
             }
         })
         .run(tauri::generate_context!())
