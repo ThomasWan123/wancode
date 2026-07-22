@@ -342,6 +342,7 @@ function App() {
   );
   const [previewLive, setPreviewLive] = useState<string | null>(null);
   const [prBusy, setPrBusy] = useState(false);
+  const [prStatus, setPrStatus] = useState<any>(null);
   // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
   const [transcriptMode, setTranscriptMode] = useState<string>(
     () => localStorage.getItem("wancode-transcript") ?? "default",
@@ -727,6 +728,10 @@ function App() {
         setGitInfo({ isRepo: false });
         return;
       }
+      // PR 状态锦上添花：静默拉取，失败即 null（无 gh/无 PR 都正常）
+      invoke<any>("git_pr_status")
+        .then((p) => setPrStatus(p ?? null))
+        .catch(() => setPrStatus(null));
       setGitInfo({
         isRepo: true,
         branch: d.branch ?? "",
@@ -2057,7 +2062,7 @@ function App() {
 
       <SettingsModal {...{ showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, testModel, theme, updateMsg, version, workspace, hooks, t }} />
 
-      <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
+      <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, prStatus, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
 
 
       <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t }} />

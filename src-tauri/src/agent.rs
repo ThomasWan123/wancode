@@ -3589,6 +3589,76 @@ pub async fn git_create_pr(
     Ok(serde_json::json!({ "url": url, "branch": branch }))
 }
 
+/// v0.15-5：当前分支的 PR 状态（gh pr view）。没有 PR / 没装 gh / 未登录
+/// 都返回 null——这是"锦上添花"信息，任何失败都不该打扰用户。
+#[tauri::command]
+pub async fn git_pr_status(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    let cwd = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("gh");
+        cmd.args([
+            "pr",
+            "view",
+            "--json",
+            "number,state,url,title,statusCheckRollup",
+        ])
+        .current_dir(&cwd);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        cmd.output()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(serde_json::Value::Null),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => return Ok(serde_json::Value::Null),
+    };
+    // CI 汇总：statusCheckRollup 是 checks 数组，归并成 pass/fail/pending 计数
+    let checks = v
+        .get("statusCheckRollup")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut pass = 0;
+    let mut fail = 0;
+    let mut pending = 0;
+    for c in &checks {
+        let concl = c
+            .get("conclusion")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let status = c
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        match concl.as_str() {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => pass += 1,
+            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => fail += 1,
+            _ if status == "COMPLETED" => pass += 1,
+            _ => pending += 1,
+        }
+    }
+    Ok(serde_json::json!({
+        "number": v.get("number"),
+        "state": v.get("state"),
+        "url": v.get("url"),
+        "title": v.get("title"),
+        "ci": { "pass": pass, "fail": fail, "pending": pending, "total": checks.len() },
+    }))
+}
+
 /// List engine rewind points (`x.ai/rewind/points`).
 #[tauri::command]
 pub async fn agent_rewind_points(

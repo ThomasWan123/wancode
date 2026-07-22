@@ -1,12 +1,13 @@
 /* v0.13 拆分：Git 面板（步 A：纯 JSX 搬移，依赖 props 透传）。
    红线提醒：worktree apply 一律 merge 模式；所有 git 操作走显式 gitRoot 通道（#83）。 */
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { IconGitBranch } from "../../icons";
 
 const baseName = (p: string) => p.split(/[\/]/).filter(Boolean).pop() ?? p;
 
 export function GitPanel(props: Record<string, any>) {
-  const { applyWorktree, changeLetter, commitMsg, createPr, prBusy, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t } = props;
+  const { applyWorktree, changeLetter, commitMsg, createPr, prBusy, prStatus, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t } = props;
   return (
     <>
       {showGit && (
@@ -47,6 +48,29 @@ export function GitPanel(props: Record<string, any>) {
                     ))}
                   </select>
                 </div>
+
+                {/* v0.15-5 当前分支 PR 状态（gh 静默拉取，null 即不渲染） */}
+                {prStatus && (
+                  <div
+                    className={`git-pr-row ${String(prStatus.state ?? "").toLowerCase()}`}
+                    title={prStatus.url}
+                    onClick={() => prStatus.url && openUrl(prStatus.url).catch(() => {})}
+                  >
+                    <span className="git-pr-badge">
+                      PR #{prStatus.number} · {prStatus.state}
+                    </span>
+                    <span className="git-pr-title">{prStatus.title}</span>
+                    {(prStatus.ci?.total ?? 0) > 0 && (
+                      <span className="git-pr-ci">
+                        {prStatus.ci.fail > 0
+                          ? `CI ✕ ${prStatus.ci.fail}/${prStatus.ci.total}`
+                          : prStatus.ci.pending > 0
+                            ? `CI … ${prStatus.ci.pass}/${prStatus.ci.total}`
+                            : `CI ✓ ${prStatus.ci.total}`}
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 {(gitInfo.staged?.length ?? 0) === 0 && (gitInfo.unstaged?.length ?? 0) === 0 && (
                   <div className="sidebar-empty">{t.gitClean}</div>

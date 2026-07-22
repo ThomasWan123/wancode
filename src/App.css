@@ -2837,3 +2837,18 @@ button.ghost.small {
 .wb-preview { display: flex; flex-direction: column; }
 .wb-preview-url { flex: 1; margin: 0; }
 .wb-preview-frame { flex: 1; border: none; background: #fff; min-height: 300px; }
+
+/* Git 面板：PR 状态行 */
+.git-pr-row {
+  display: flex; align-items: center; gap: 10px;
+  margin: 4px 0 8px; padding: 7px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12.5px; cursor: pointer;
+}
+.git-pr-row:hover { background: var(--bg2); }
+.git-pr-badge { font-weight: 600; white-space: nowrap; }
+.git-pr-row.open .git-pr-badge { color: var(--ok, #3fb950); }
+.git-pr-row.merged .git-pr-badge { color: #a371f7; }
+.git-pr-row.closed .git-pr-badge { color: var(--danger, #f85149); }
+.git-pr-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); }
+.git-pr-ci { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
