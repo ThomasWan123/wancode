@@ -1,4 +1,5 @@
 mod agent;
+mod config_core;
 
 use xai_grok_paths::AbsPathBuf;
 
