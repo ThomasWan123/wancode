@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 695ef59..2265538 100644
+index 695ef59..3933c1c 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -88,7 +88,7 @@ version = "0.26.0"
@@ -3168,7 +3168,7 @@ index 695ef59..2265538 100644
  
 +[[package]]
 +name = "wancode"
-+version = "0.18.0"
++version = "0.18.1"
 +dependencies = [
 + "agent-client-protocol",
 + "anyhow",
@@ -3992,3 +3992,132 @@ index 662052d..f39e7b4 100644
      pub object: String,
      pub created: u64,
      pub model: String,
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs
+index 91e7f14..d425006 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs
+@@ -125,7 +125,8 @@ impl SessionActor {
+         if images.is_empty() {
+             return images;
+         }
+-        let is_cursor = self.is_cursor_harness();
++        let is_cursor = self.is_cursor_harness()
++            || crate::session::image_describe::transcribe_images_enabled();
+         let images = self
+             .normalize_images_with_notices(wrapped, images, is_cursor)
+             .await;
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
+index 99e3801..b179e2d 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
+@@ -626,9 +626,45 @@ impl SessionActor {
+         self.drain_between_turn_completions().await;
+         let user_message = if user_images.is_empty() {
+             user_message
+-        } else if self.is_cursor_harness() {
+-            self.transcribe_user_images(user_message, &user_images)
+-                .await?
++        } else if self.is_cursor_harness()
++            || crate::session::image_describe::transcribe_images_enabled()
++        {
++            // 垫底逻辑：视觉辅助模型描述失败绝不让整回合报错——降级为
++            // "图片存盘 + 路径引用 + 降级说明"，回合照常继续。用户体验
++            // 优先于描述完整性（产品决策：报错中断不可接受）。
++            match self
++                .transcribe_user_images(user_message.clone(), &user_images)
++                .await
++            {
++                Ok(transcribed) => transcribed,
++                Err(e) => {
++                    tracing::warn!(
++                        error = ?e,
++                        "image transcription failed; falling back to file-path references"
++                    );
++                    let session_dir = crate::session::persistence::session_dir(
++                        &crate::session::info::Info {
++                            id: self.session_info.id.clone(),
++                            cwd: self.session_info.cwd.clone(),
++                        },
++                    );
++                    let base = crate::session::image_describe::persist_and_prepend_image_files(
++                        &session_dir,
++                        &user_images,
++                        &user_message,
++                    )
++                    .unwrap_or_else(|_| user_message.clone());
++                    format!(
++                        "{base}\n\n[Note: automatic image description was unavailable this \
++                         turn (the vision helper model call failed). The image files were \
++                         saved to the paths above; their visual content could not be \
++                         analyzed. Do NOT attempt to open or read these image files with \
++                         any tool in this session — the session's models cannot process \
++                         image content and such attempts will fail. Proceed with the text \
++                         request, and mention this limitation if the images are essential.]"
++                    )
++                }
++            }
+         } else {
+             let session_dir =
+                 crate::session::persistence::session_dir(&crate::session::info::Info {
+@@ -645,7 +681,9 @@ impl SessionActor {
+                     .data(format!("failed to save user images to assets dir: {e}"))
+             })?
+         };
+-        let attached_image_refs = if self.is_cursor_harness() {
++        let attached_image_refs = if self.is_cursor_harness()
++            || crate::session::image_describe::transcribe_images_enabled()
++        {
+             Vec::new()
+         } else {
+             crate::session::placeholder_images::attached_image_references(&user_images)
+@@ -697,7 +735,11 @@ impl SessionActor {
+                 }
+             };
+             user_chat.set_prompt_index(current_prompt_index);
+-            if !self.is_cursor_harness() {
++            // 转述模式下图片已转成文字描述进 user_message——不再把原图挂进
++            // 对话项，否则主请求仍内联图片（纯文本模型 400，转述白做）。
++            if !self.is_cursor_harness()
++                && !crate::session::image_describe::transcribe_images_enabled()
++            {
+                 for image in &user_images {
+                     user_chat.add_image(pick_user_image_url(image));
+                 }
+diff --git a/crates/codegen/xai-grok-shell/src/session/image_describe.rs b/crates/codegen/xai-grok-shell/src/session/image_describe.rs
+index 26d5958..222fa4c 100644
+--- a/crates/codegen/xai-grok-shell/src/session/image_describe.rs
++++ b/crates/codegen/xai-grok-shell/src/session/image_describe.rs
+@@ -47,6 +47,15 @@ pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
+ pub const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
+ /// Empty twin: no optional template is compiled in, nothing extra to strip.
+ const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
++/// Opt-in switch for the image-transcription pipeline outside the Cursor
++/// harness: set `GROK_IMAGE_TRANSCRIBE=1` to route user images through the
++/// `image_description` vision model instead of inlining them into the main
++/// model request. Lets text-only main models (e.g. GLM-5.2 coding endpoint,
++/// which rejects image content blocks) accept pasted images.
++pub fn transcribe_images_enabled() -> bool {
++    std::env::var("GROK_IMAGE_TRANSCRIBE")
++        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
++}
+ /// Strip template-specific context tags from text before it reaches the
+ /// image-description prompt. Uses attribute-aware matching so tags like
+ /// `<always_applied_workspace_rules type="...">` are caught.
+@@ -457,10 +466,16 @@ pub async fn describe_user_images(
+             });
+         }
+     }
++    // 部分第三方视觉模型（如智谱 glm-4v-flash）对 max_tokens 有硬上限
++    // （[1,1024]），默认 4096 会被 400 拒绝——允许经 env 下调。
++    let max_output_tokens: u32 = std::env::var("GROK_IMAGE_DESCRIBE_MAX_TOKENS")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(4_096);
+     let request = ConversationRequest::from_items(vec![user_item])
+         .with_model(model)
+         .with_temperature(0.2)
+-        .with_max_output_tokens(4_096);
++        .with_max_output_tokens(max_output_tokens);
+     const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+     let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
+         .await

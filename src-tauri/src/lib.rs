@@ -98,6 +98,19 @@ pub fn run() {
         // SAFETY: 单线程启动早期，engine 线程尚未 spawn
         unsafe { std::env::set_var("GROK_HOME", &home) };
     }
+    // 多模型产品决策：图片永远走 image_description 视觉辅助模型转述
+    // （引擎本地补丁开关），纯文本主模型（GLM-5.2 coding 端点等）也能粘图。
+    // 用户可在启动前显式设 GROK_IMAGE_TRANSCRIBE=0 关闭（则回退内联，仅视觉主模型可用）。
+    if std::env::var("GROK_IMAGE_TRANSCRIBE").is_err() {
+        // SAFETY: 同上，启动早期单线程
+        unsafe { std::env::set_var("GROK_IMAGE_TRANSCRIBE", "1") };
+    }
+    // 智谱 glm-4v-flash（默认视觉辅助模型）max_tokens 上限 1024，
+    // 引擎 describe 默认 4096 会被 400 拒绝。单图文字描述 1024 足够。
+    if std::env::var("GROK_IMAGE_DESCRIBE_MAX_TOKENS").is_err() {
+        // SAFETY: 同上
+        unsafe { std::env::set_var("GROK_IMAGE_DESCRIBE_MAX_TOKENS", "1024") };
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

@@ -1,10 +1,10 @@
 //! v0.18-4 步 B：Skills（SKILL.md 读写 + 引擎 skills/*）与 Hooks 配置。
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 
-use crate::agent::{ext_call, ext_ok, AgentState};
+use crate::agent::{ext_call, AgentState};
 
 /// Read a skill's SKILL.md for in-app editing.
 ///
