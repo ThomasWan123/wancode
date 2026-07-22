@@ -46,3 +46,10 @@ xai-grok-pager = { path = "../../grok-build/crates/codegen/xai-grok-pager" }
 xai-grok-shell = { path = "../../grok-build/crates/codegen/xai-grok-shell" }
 xai-grok-tools = { path = "../../grok-build/crates/codegen/xai-grok-tools" }
 
+[target.'cfg(windows)'.dependencies]
+# v0.17-3 Job Object：进程树治理（kill-on-close），版本对齐依赖树已有的 0.59
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

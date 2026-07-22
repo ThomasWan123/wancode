@@ -31,8 +31,54 @@ mod tests {
     }
 }
 
+/// v0.17-3 Job Object 一期：把 wancode 自身放进一个 kill-on-close 的
+/// Job，PTY shell / MCP 服务器 / 引擎 bash 工具起的所有子孙进程自动
+/// 继承——应用退出（含崩溃）时进程树必死，根治孤儿 node/ping 进程
+/// （smoke 期间多次观察到残留）。附带每进程内存上限兜底失控分配。
+///
+/// 失败容忍：老系统/已在禁止嵌套的 Job 里（少见，Win10+ 支持嵌套）
+/// 就打日志继续跑——这是治理增强，不是启动前置条件。
+/// Job 句柄有意泄漏：它必须活到进程终结，OS 届时自动关闭并触发清杀。
+#[cfg(windows)]
+fn setup_job_object() {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            eprintln!("[job] CreateJobObject 失败，进程树治理未启用");
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        // 8GB/进程：主进程与 webview 也在 Job 里，上限要给它们留足余量
+        info.ProcessMemoryLimit = 8 * 1024 * 1024 * 1024;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+        {
+            eprintln!("[job] SetInformationJobObject 失败，进程树治理未启用");
+            return;
+        }
+        if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
+            eprintln!("[job] AssignProcessToJobObject 失败（可能已在禁嵌套 Job 内），进程树治理未启用");
+        }
+        // 句柄故意不关：进程退出时 OS 关闭句柄 → kill-on-close 生效
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    setup_job_object();
     // 引擎的 worktree DB（xai-fast-worktree::resolve_grok_home）只认
     // $GROK_HOME / $HOME，而 Windows 默认没有 HOME（只有 USERPROFILE）——
     // 从 Git Bash 启动恰好带 HOME 所以"偶尔正常"，从资源管理器/PowerShell
