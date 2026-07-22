@@ -4,8 +4,6 @@
 //! - 所有 x.ai/git/*（worktree 除外）经 ext_call 注入显式 gitRoot（#83）；
 //! - worktree apply 一律 merge 模式；
 //! - session_git_root 客户端 git2 解析，绝不触发引擎回退。
-use std::path::PathBuf;
-
 use tauri::State;
 
 use crate::agent::{ext_call, ext_ok, AgentState};
