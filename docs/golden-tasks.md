@@ -11,7 +11,7 @@
 | # | 任务 | 通过标准 | 方式 |
 |---|---|---|---|
 | G1 | 真零配置首启 | 挪走 config.toml 启动：向导弹出，60 秒不崩 | SEMI（发版检查单①） |
-| G2 | 向导贴 Key 一键配置 | 假 Key 拒绝且零落盘；真 Key 通过并播种 MCP | MANUAL |
+| G2 | 向导贴 Key 一键配置 | 连接测试失败路径 fail-closed 零落盘（AUTO）；真实 401/真 Key 通过为人工实证 | AUTO+MANUAL |
 | G3 | 老配置升级启动 | 已有配置直接可用：Connected、会话/MCP 在 | SEMI（发版检查单②） |
 | G4 | 损坏配置不被吞 | config.toml 语法坏 → 报 Invalid，不误开向导 | AUTO（startup_gate_tests） |
 | G5 | 配置事务性 | 中途失败零残留（钥匙串回滚、原子替换） | AUTO（config_txn_tests） |
