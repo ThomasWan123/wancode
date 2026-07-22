@@ -13,6 +13,7 @@
 | 07-23 | 粘图问文（glm-4v-flash，引擎 object 补丁后） | 成 | 引擎补丁+加模型（开发者级操作，小白无法自助） | 无 | ①智谱 4V 响应缺 OpenAI `object` 字段，引擎 serde 必填炸 `missing field`——已打 `#[serde(default)]` 宽容补丁（vendor patch 更新）；②引擎原生 image_describe 管线确认：图片永不内联发主模型，由 image_description 辅助模型转述——正确形态是任意主模型+4v 辅助 | glm-4v-flash / ~15s / 0 重试；回复精确 "WANCODE IMG TEST 777" | 中 | 截图 v6.png；types.rs 补丁 |
 | 07-23 | 粘图问文（GLM-5.2 主 + image_description=glm-4v-flash） | 败 | 切主模型绕过 | 无需 | `[models].image_description` 指向 glm-4v-flash 后 describe 仍打主模型 coding 端点（resolve_aux 疑似凭证解析回退，与 disable_api_key_auth/BYOK env-key 交互待查）——辅助模型路由对 BYOK 模型不生效是"多模型分工"卖点的直接障碍 | glm-5.2 / 秒回 400 | 高 | 截图 v5.png；resolve_aux_model_sampling_config 代码路径 |
 | 07-23 | 【复盘修正+修复】上一条误诊：真因是引擎 image_describe 转述管线被 `is_cursor_harness()`（硬编码 false）关死，图片一直走内联。v0.18.1 四连修：①转述管线经 `GROK_IMAGE_TRANSCRIBE=1` 启用（WanCode 默认开）②describe max_tokens 4096→env 可调（4v-flash 上限 1024）③转述后不再把原图挂进对话项④describe 失败垫底降级（图片存盘+路径引用+降级说明，绝不报错中断——产品决策）。E2E 双路径实证：glm-5.2 主模型粘图，思考块自述"I'm given a description of the image"并答对（e2e2.png）；垫底路径降级说明注入、回合继续（fb1.png） | 成 | —— | —— | 遗留观察：垫底后模型可能主动 read_file 读图再撞 400（文案已加禁止指示，工具层能力门控留 v0.19）；旧会话历史内联图片在切纯文本模型后仍可能毒害后续回合 | glm-5.2+glm-4v-flash / 转述约 8s | 低（已修复） | e2e2.png/fb1.png；vendor patch 四处 |
+| 07-23 | 【用户实报+当日修复】开发网站点 demo 地址：WebView 整页导航，对话界面被目标网页覆盖（无服务端口则似无反应）。根因：ReactMarkdown 链接无拦截，Tauri WebView `<a href>` 默认当前页导航。v0.18.2 修复：App 级全局捕获 http(s) 链接点击→openUrl 系统浏览器。E2E：点链接后 App 界面完好，Chrome 正常接管 | 成（当日闭环） | —— | —— | 排障插曲：打开的 Chrome 错误页窗口盖住 WanCode，SetForegroundWindow 被拒，连续误判截图内容——按 pid+rect 枚举窗口才定位；发版教训：taskkill /IM 会误杀用户安装版实例（应只杀 dev exe）；git add -A 混入用户 demo 产物 blog-demo（已移出+gitignore） | —— | 高（已修复） | link2.png；v0.18.2；commit 693b670 |
 
 ## 已知摩擦（建设期自举中预先记录，dogfooding 中验证频率）
 
@@ -21,4 +22,3 @@
 - 预览 iframe 聚焦后全局快捷键失效（需点外部恢复）
 - Review 偶发空产出一例（未复现，留意）
 - RECENTS 临时会话快照残影（已加 refreshSessions，观察是否根除）
-| 07-23 | 【用户实报+当日修复】开发网站点 demo 地址：WebView 整页导航,对话界面被目标网页覆盖（无服务端口则似无反应）。根因:ReactMarkdown 链接无拦截,Tauri WebView `<a href>` 默认当前页导航。v0.18.2 修复:App 级全局捕获 http(s) 链接点击→openUrl 系统浏览器。E2E:点链接后 App 界面完好,Chrome 正常接管 | 成（当日闭环） | —— | —— | 排障插曲:打开的 Chrome 错误页窗口盖住 WanCode,SetForegroundWindow 被拒,连续误判截图内容——按 pid+rect 枚举窗口才定位;发版教训:taskkill /IM 会误杀用户安装版实例（应只杀 dev exe）;git add -A 混入用户 demo 产物 blog-demo（已移出+gitignore） | —— | 高（已修复） | link2.png;v0.18.2;commit 693b670 |
