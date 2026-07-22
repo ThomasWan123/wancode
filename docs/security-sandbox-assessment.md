@@ -96,6 +96,27 @@ WanCode 在"进程生命周期治理"上即不落后于同类；文件/网络边
 
 ## 5. 结论
 
-- 立即做：一期 Job Object（收益/成本比最高，且修真实痛点——孤儿进程）。
-- 观察做：二期方向 B（ETW 审计）PoC。
+- ✅ 一期 Job Object 已落地（v0.17-3）：kill-on-close + 8GB/进程，强杀
+  实测子进程 4 秒全灭。
+- 观察做：二期方向 B（ETW 审计）——最小可行性已验证，见 §6。
 - 不做：AppContainer、Windows Sandbox、全局防火墙规则。
+
+## 6. ETW 审计 PoC（最小可行性验证，2026-07-22）
+
+**验证内容与结果**（诚实边界：只验证了地基可用性，未做订阅原型）：
+- `Microsoft-Windows-Kernel-File`（EDD08927-…）与
+  `Microsoft-Windows-Kernel-Process`（22FB2CD6-…）两个 provider 在
+  目标环境（Win11 Home）均注册可用——文件写事件 + 进程创建事件齐。
+- 过滤策略成立：一期 Job Object 已把 AI 进程树圈定；Kernel-Process
+  的 ProcessStart 事件可维护 Job 内 PID 集合，Kernel-File 的
+  Write/Create 事件按该集合过滤即得"AI 进程树的全部文件写"。
+- Rust 侧路线：`ferrisetw` crate（ETW 消费者绑定）订阅两 provider；
+  或起独立 ETW 会话由 wancode 以 admin-free 的 user-mode 会话消费
+  （Kernel-File 需要的权限级别在实现期确认，可能要求管理员——若是，
+  降级为"可选的增强审计模式"而非默认开）。
+- 产品化形态（三期再议）：工作区外写入 → 任务面板告警条 + 一键查看
+  该文件 + 关联 rewind/快照恢复。
+
+**下一步门槛**：写 200 行 ferrisetw 原型验证权限要求与事件量级
+（高 IO 场景每秒事件数决定是否需要内核侧过滤）——排入需要时再做，
+不占当前周期。

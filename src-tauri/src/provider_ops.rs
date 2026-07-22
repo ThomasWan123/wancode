@@ -127,6 +127,17 @@ pub async fn provider_quick_setup(
     preset: String,
     api_key: String,
 ) -> Result<serde_json::Value, String> {
+    provider_quick_setup_impl(preset, api_key, None, user_config_path()).await
+}
+
+/// 可注入版本（G2 单测用）：base_url_override 换掉预设端点、config_path
+/// 换掉真实配置文件。生产路径两者都走默认。
+pub(crate) async fn provider_quick_setup_impl(
+    preset: String,
+    api_key: String,
+    base_url_override: Option<String>,
+    config_path: std::path::PathBuf,
+) -> Result<serde_json::Value, String> {
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
         return Err("请输入 API Key".into());
@@ -156,10 +167,11 @@ pub async fn provider_quick_setup(
         other => return Err(format!("未知预设: {other}")),
     };
 
+    let base_url: String = base_url_override.unwrap_or_else(|| base_url.to_string());
     // 先测连接（用第一个模型），失败就不落任何配置——半配置状态最坑小白。
     let first_model = models[0].2;
     let test = model_test(
-        base_url.to_string(),
+        base_url.clone(),
         first_model.to_string(),
         Some(api_key.clone()),
         None,
@@ -173,11 +185,11 @@ pub async fn provider_quick_setup(
     // 顺序：内存组装完整 TOML（模型 + MCP 播种同一事务）→ 临时文件 →
     // 原子替换 → 钥匙串。钥匙串任一项失败 → 回滚本次新写入的钥匙串项 +
     // 原子写回原配置文本。任何路径下都不存在"半配置"。
-    let path = user_config_path();
+    let path = config_path;
     let original = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut =
         original.parse().map_err(|e| format!("配置解析失败（原文件未动）: {e}"))?;
-    apply_provider_preset(&mut doc, &models, base_url);
+    apply_provider_preset(&mut doc, &models, &base_url);
     let mut seeded = false;
     if preset.starts_with("glm") {
         seeded = seed_default_mcp_into(&mut doc);
@@ -485,5 +497,50 @@ pub(crate) fn inject_managed_keys() {
                 unsafe { std::env::set_var("ZHIPU_API_KEY", &pw) };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_setup_gate_tests {
+    /// G2（AUTO 化）：连接测试失败 → 报错且**零落盘**。
+    /// 端点用 127.0.0.1:9（保留端口，连接必拒），config 指向临时路径。
+    /// 钥匙串零写入由失败点位置保证：连接测试在任何写入之前。
+    #[tokio::test]
+    async fn quick_setup_fails_closed_on_unreachable_endpoint() {
+        let dir = std::env::temp_dir().join("wancode-g2-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join(format!(
+            "config-{}.toml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let r = super::provider_quick_setup_impl(
+            "glm-coding".into(),
+            "sk-fake-key-for-test".into(),
+            Some("http://127.0.0.1:9".into()),
+            cfg.clone(),
+        )
+        .await;
+        let err = r.expect_err("不可达端点必须失败");
+        assert!(err.contains("未保存任何配置"), "错误应声明零落盘: {err}");
+        assert!(!cfg.exists(), "config 不得被创建（fail-closed 破防）");
+    }
+
+    /// 未知预设直接拒绝，同样零落盘。
+    #[tokio::test]
+    async fn quick_setup_rejects_unknown_preset() {
+        let cfg = std::env::temp_dir().join("wancode-g2-nopreset.toml");
+        let _ = std::fs::remove_file(&cfg);
+        let r = super::provider_quick_setup_impl(
+            "not-a-preset".into(),
+            "sk-x".into(),
+            None,
+            cfg.clone(),
+        )
+        .await;
+        assert!(r.is_err());
+        assert!(!cfg.exists());
     }
 }
