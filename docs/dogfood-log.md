@@ -21,3 +21,4 @@
 - 预览 iframe 聚焦后全局快捷键失效（需点外部恢复）
 - Review 偶发空产出一例（未复现，留意）
 - RECENTS 临时会话快照残影（已加 refreshSessions，观察是否根除）
+| 07-23 | 【用户实报+当日修复】开发网站点 demo 地址：WebView 整页导航,对话界面被目标网页覆盖（无服务端口则似无反应）。根因:ReactMarkdown 链接无拦截,Tauri WebView `<a href>` 默认当前页导航。v0.18.2 修复:App 级全局捕获 http(s) 链接点击→openUrl 系统浏览器。E2E:点链接后 App 界面完好,Chrome 正常接管 | 成（当日闭环） | —— | —— | 排障插曲:打开的 Chrome 错误页窗口盖住 WanCode,SetForegroundWindow 被拒,连续误判截图内容——按 pid+rect 枚举窗口才定位;发版教训:taskkill /IM 会误杀用户安装版实例（应只杀 dev exe）;git add -A 混入用户 demo 产物 blog-demo（已移出+gitignore） | —— | 高（已修复） | link2.png;v0.18.2;commit 693b670 |
