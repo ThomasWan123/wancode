@@ -317,6 +317,22 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("wancode-theme", theme);
   }, [theme]);
+  // 全局链接拦截：聊天/弹窗里 markdown 渲染的 <a href> 在 Tauri WebView 的
+  // 默认行为是整页导航——目标网页会把 App 界面覆盖掉（dogfood 实测：点
+  // AI 给的 demo 地址后对话窗口消失）。捕获阶段统一拦下，改用系统浏览器。
+  useEffect(() => {
+    const onLinkClick = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!a) return;
+      const href = a.getAttribute("href") || "";
+      if (!/^https?:\/\//i.test(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href)).catch(() => {});
+    };
+    document.addEventListener("click", onLinkClick, true);
+    return () => document.removeEventListener("click", onLinkClick, true);
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SessionEntry[] | null>(null);
   const [updateMsg, setUpdateMsg] = useState("");
