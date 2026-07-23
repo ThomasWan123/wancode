@@ -1,6 +1,6 @@
 [package]
 name = "wancode"
-version = "0.18.2"
+version = "0.18.3"
 description = "WanCode - multi-model desktop AI coding agent"
 authors = ["WanCode"]
 edition = "2021"
@@ -45,6 +45,7 @@ xai-grok-paths = { path = "../../grok-build/crates/codegen/xai-grok-paths" }
 xai-grok-pager = { path = "../../grok-build/crates/codegen/xai-grok-pager" }
 xai-grok-shell = { path = "../../grok-build/crates/codegen/xai-grok-shell" }
 xai-grok-tools = { path = "../../grok-build/crates/codegen/xai-grok-tools" }
+xai-grok-sampling-types = { path = "../../grok-build/crates/codegen/xai-grok-sampling-types" }
 
 [target.'cfg(windows)'.dependencies]
 # v0.17-3 Job Object：进程树治理（kill-on-close），版本对齐依赖树已有的 0.59

@@ -144,3 +144,45 @@ fn engine_commit_matches_lock() {
         "../grok-build HEAD 与 vendor/grok-build.lock 不一致——升级引擎请同步 lock 并重跑全部金丝雀"
     );
 }
+
+/// v0.18.3 历史图片消毒：转述模式下主对话请求发送前，历史 User 消息与
+/// ToolResult（read_file 读图/PDF）里的内联图片必须被替换/清空为文字占位，
+/// 否则纯文本端点（智谱 coding）对旧会话续聊必 400（用户实报 bug）。
+#[test]
+fn history_inline_images_are_sanitized_for_transcribe() {
+    use xai_grok_shell::session::image_describe::{
+        sanitize_inline_images_for_transcribe, HISTORY_IMAGE_OMITTED,
+    };
+    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
+    let user_with_image = ConversationItem::user_with_parts(vec![
+        ContentPart::Text { text: std::sync::Arc::<str>::from("look at this") },
+        ContentPart::Image { url: std::sync::Arc::<str>::from("data:image/png;base64,AAAA") },
+    ]);
+    let tool_with_image = ConversationItem::tool_result_with_images(
+        "call-1",
+        "Read image file: a.png",
+        vec![ContentPart::Image { url: std::sync::Arc::<str>::from("data:image/png;base64,BBBB") }],
+    );
+    let mut items = vec![user_with_image, tool_with_image];
+    sanitize_inline_images_for_transcribe(&mut items);
+    match &items[0] {
+        ConversationItem::User(u) => {
+            assert!(
+                u.content.iter().all(|p| !matches!(p, ContentPart::Image { .. })),
+                "User 消息里的图片块未被清除"
+            );
+            assert!(
+                u.content.iter().any(|p| matches!(p, ContentPart::Text { text } if text.contains(HISTORY_IMAGE_OMITTED))),
+                "User 图片未被替换为占位文本"
+            );
+        }
+        _ => panic!("items[0] 应为 User"),
+    }
+    match &items[1] {
+        ConversationItem::ToolResult(t) => {
+            assert!(t.images.is_empty(), "ToolResult.images 未清空——read_file 读图的旧会话仍会 400");
+            assert!(t.content.contains(HISTORY_IMAGE_OMITTED), "ToolResult 缺占位说明");
+        }
+        _ => panic!("items[1] 应为 ToolResult"),
+    }
+}

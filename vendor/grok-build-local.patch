@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 695ef59..3933c1c 100644
+index 695ef59..479e2ec 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -88,7 +88,7 @@ version = "0.26.0"
@@ -3162,13 +3162,13 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "vte"
  version = "0.14.1"
-@@ -11526,6 +13413,35 @@ dependencies = [
+@@ -11526,6 +13413,36 @@ dependencies = [
   "winapi-util",
  ]
  
 +[[package]]
 +name = "wancode"
-+version = "0.18.1"
++version = "0.18.3"
 +dependencies = [
 + "agent-client-protocol",
 + "anyhow",
@@ -3191,6 +3191,7 @@ index 695ef59..3933c1c 100644
 + "xai-acp-lib",
 + "xai-grok-pager",
 + "xai-grok-paths",
++ "xai-grok-sampling-types",
 + "xai-grok-shell",
 + "xai-grok-tools",
 +]
@@ -3198,7 +3199,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "want"
  version = "0.3.1"
-@@ -11535,6 +13451,12 @@ dependencies = [
+@@ -11535,6 +13452,12 @@ dependencies = [
   "try-lock",
  ]
  
@@ -3211,7 +3212,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "wasi"
  version = "0.11.1+wasi-snapshot-preview1"
-@@ -11641,7 +13563,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11641,7 +13564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
  dependencies = [
   "anyhow",
@@ -3220,7 +3221,7 @@ index 695ef59..3933c1c 100644
   "wasm-encoder",
   "wasmparser",
  ]
-@@ -11680,7 +13602,7 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
+@@ -11680,7 +13603,7 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
  dependencies = [
   "bitflags 2.13.0",
   "hashbrown 0.15.5",
@@ -3229,7 +3230,7 @@ index 695ef59..3933c1c 100644
   "semver",
  ]
  
-@@ -11802,6 +13724,50 @@ dependencies = [
+@@ -11802,6 +13725,50 @@ dependencies = [
   "web-sys",
  ]
  
@@ -3280,7 +3281,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "webpki-root-certs"
  version = "1.0.3"
-@@ -11829,6 +13795,42 @@ dependencies = [
+@@ -11829,6 +13796,42 @@ dependencies = [
   "rustls-pki-types",
  ]
  
@@ -3323,7 +3324,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "weezl"
  version = "0.1.10"
-@@ -11960,6 +13962,21 @@ version = "0.4.0"
+@@ -11960,6 +13963,21 @@ version = "0.4.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
  
@@ -3345,7 +3346,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "windows"
  version = "0.54.0"
-@@ -12305,6 +14322,15 @@ dependencies = [
+@@ -12305,6 +14323,15 @@ dependencies = [
   "windows-link 0.2.1",
  ]
  
@@ -3361,7 +3362,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "windows_aarch64_gnullvm"
  version = "0.42.2"
-@@ -12485,6 +14511,15 @@ version = "0.53.1"
+@@ -12485,6 +14512,15 @@ version = "0.53.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
  
@@ -3377,7 +3378,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "winnow"
  version = "0.7.14"
-@@ -12513,6 +14548,16 @@ dependencies = [
+@@ -12513,6 +14549,16 @@ dependencies = [
   "windows-sys 0.48.0",
  ]
  
@@ -3394,7 +3395,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "winsafe"
  version = "0.0.19"
-@@ -12526,7 +14571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12526,7 +14572,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "08db1edfb05d9b3c1542e521aea074442088292f00b5f28e435c714a98f85031"
  dependencies = [
   "assert-json-diff",
@@ -3403,7 +3404,7 @@ index 695ef59..3933c1c 100644
   "deadpool",
   "futures",
   "http 1.4.0",
-@@ -12564,7 +14609,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12564,7 +14610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
  dependencies = [
   "anyhow",
@@ -3412,7 +3413,7 @@ index 695ef59..3933c1c 100644
   "wit-parser",
  ]
  
-@@ -12575,8 +14620,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12575,8 +14621,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
  dependencies = [
   "anyhow",
@@ -3423,7 +3424,7 @@ index 695ef59..3933c1c 100644
   "prettyplease",
   "syn 2.0.117",
   "wasm-metadata",
-@@ -12607,7 +14652,7 @@ checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
+@@ -12607,7 +14653,7 @@ checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
  dependencies = [
   "anyhow",
   "bitflags 2.13.0",
@@ -3432,7 +3433,7 @@ index 695ef59..3933c1c 100644
   "log",
   "serde",
   "serde_derive",
-@@ -12626,7 +14671,7 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
+@@ -12626,7 +14672,7 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
  dependencies = [
   "anyhow",
   "id-arena",
@@ -3441,7 +3442,7 @@ index 695ef59..3933c1c 100644
   "log",
   "semver",
   "serde",
-@@ -12661,7 +14706,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12661,7 +14707,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "886614b5ce857341226aa091f3c285e450683894acaaa7887f366c361efef79d"
  dependencies = [
   "font-types",
@@ -3450,7 +3451,7 @@ index 695ef59..3933c1c 100644
   "kurbo 0.12.0",
   "log",
   "read-fonts",
-@@ -12673,6 +14718,72 @@ version = "0.6.1"
+@@ -12673,6 +14719,72 @@ version = "0.6.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ea2f10b9bb0928dfb1b42b65e1f9e36f7f54dbdf08457afefb38afcdec4fa2bb"
  
@@ -3523,7 +3524,7 @@ index 695ef59..3933c1c 100644
  [[package]]
  name = "x11rb"
  version = "0.13.2"
-@@ -12742,7 +14853,7 @@ dependencies = [
+@@ -12742,7 +14854,7 @@ dependencies = [
  name = "xai-chat-state"
  version = "0.1.0"
  dependencies = [
@@ -3532,7 +3533,7 @@ index 695ef59..3933c1c 100644
   "regex",
   "serde",
   "serde_json",
-@@ -12840,14 +14951,14 @@ dependencies = [
+@@ -12840,14 +14952,14 @@ dependencies = [
   "arc-swap",
   "async-trait",
   "axum",
@@ -3549,7 +3550,7 @@ index 695ef59..3933c1c 100644
   "opentelemetry",
   "opentelemetry-proto",
   "opentelemetry_sdk",
-@@ -12925,14 +15036,14 @@ dependencies = [
+@@ -12925,14 +15037,14 @@ dependencies = [
   "aws-sdk-s3",
   "aws-smithy-http-client",
   "axum",
@@ -3566,7 +3567,7 @@ index 695ef59..3933c1c 100644
   "opentelemetry",
   "opentelemetry_sdk",
   "prod-mc-cli-chat-proxy-types",
-@@ -13062,7 +15173,7 @@ dependencies = [
+@@ -13062,7 +15174,7 @@ dependencies = [
  name = "xai-grok-config"
  version = "0.1.0"
  dependencies = [
@@ -3575,7 +3576,7 @@ index 695ef59..3933c1c 100644
   "blake3",
   "core-foundation",
   "dunce",
-@@ -13074,7 +15185,7 @@ dependencies = [
+@@ -13074,7 +15186,7 @@ dependencies = [
   "shellexpand",
   "tempfile",
   "thiserror 2.0.18",
@@ -3584,7 +3585,7 @@ index 695ef59..3933c1c 100644
   "tracing",
   "urlencoding",
   "which",
-@@ -13087,7 +15198,7 @@ name = "xai-grok-config-types"
+@@ -13087,7 +15199,7 @@ name = "xai-grok-config-types"
  version = "0.1.0"
  dependencies = [
   "agent-client-protocol",
@@ -3593,7 +3594,7 @@ index 695ef59..3933c1c 100644
   "serde",
   "serde_json",
   "strum 0.27.2",
-@@ -13276,7 +15387,7 @@ dependencies = [
+@@ -13276,7 +15388,7 @@ dependencies = [
   "ansi-to-tui",
   "anyhow",
   "backon",
@@ -3602,7 +3603,7 @@ index 695ef59..3933c1c 100644
   "blake3",
   "chrono",
   "clap",
-@@ -13291,7 +15402,7 @@ dependencies = [
+@@ -13291,7 +15403,7 @@ dependencies = [
   "flate2",
   "git2",
   "image",
@@ -3611,7 +3612,7 @@ index 695ef59..3933c1c 100644
   "insta",
   "libc",
   "nix 0.30.1",
-@@ -13317,7 +15428,7 @@ dependencies = [
+@@ -13317,7 +15429,7 @@ dependencies = [
   "textwrap",
   "tokio",
   "tokio-util",
@@ -3620,7 +3621,7 @@ index 695ef59..3933c1c 100644
   "toml_edit 0.22.27",
   "tracing",
   "tracing-subscriber",
-@@ -13415,7 +15526,7 @@ version = "0.1.0"
+@@ -13415,7 +15527,7 @@ version = "0.1.0"
  dependencies = [
   "alacritty_terminal",
   "anyhow",
@@ -3629,7 +3630,7 @@ index 695ef59..3933c1c 100644
   "clap",
   "dunce",
   "image",
-@@ -13441,7 +15552,7 @@ dependencies = [
+@@ -13441,7 +15553,7 @@ dependencies = [
   "agent-client-protocol",
   "anstyle",
   "anyhow",
@@ -3638,7 +3639,7 @@ index 695ef59..3933c1c 100644
   "crossterm",
   "dark-light",
   "dirs 5.0.1",
-@@ -13464,7 +15575,7 @@ dependencies = [
+@@ -13464,7 +15576,7 @@ dependencies = [
   "tempfile",
   "textwrap",
   "tokio",
@@ -3647,7 +3648,7 @@ index 695ef59..3933c1c 100644
   "toml_edit 0.22.27",
   "tracing",
   "tui-scrollbar",
-@@ -13509,7 +15620,7 @@ dependencies = [
+@@ -13509,7 +15621,7 @@ dependencies = [
   "serde_json",
   "tempfile",
   "thiserror 2.0.18",
@@ -3656,7 +3657,7 @@ index 695ef59..3933c1c 100644
   "tracing",
   "xai-grok-agent",
   "xai-grok-config",
-@@ -13527,7 +15638,7 @@ dependencies = [
+@@ -13527,7 +15639,7 @@ dependencies = [
   "chrono",
   "eventsource-stream",
   "futures-util",
@@ -3665,7 +3666,7 @@ index 695ef59..3933c1c 100644
   "reqwest 0.12.24",
   "serde",
   "serde_json",
-@@ -13546,7 +15657,7 @@ version = "0.1.0"
+@@ -13546,7 +15658,7 @@ version = "0.1.0"
  dependencies = [
   "assert_matches",
   "async-openai",
@@ -3674,7 +3675,7 @@ index 695ef59..3933c1c 100644
   "reqwest 0.12.24",
   "serde",
   "serde_json",
-@@ -13572,7 +15683,7 @@ dependencies = [
+@@ -13572,7 +15684,7 @@ dependencies = [
   "serde",
   "serde_json",
   "serial_test",
@@ -3683,7 +3684,7 @@ index 695ef59..3933c1c 100644
   "tracing",
   "xai-grok-config",
  ]
-@@ -13593,7 +15704,7 @@ dependencies = [
+@@ -13593,7 +15705,7 @@ dependencies = [
   "agent-client-protocol",
   "anyhow",
   "arboard",
@@ -3692,7 +3693,7 @@ index 695ef59..3933c1c 100644
   "dirs 6.0.0",
   "dunce",
   "image",
-@@ -13627,7 +15738,7 @@ dependencies = [
+@@ -13627,7 +15739,7 @@ dependencies = [
   "async-trait",
   "axum",
   "backon",
@@ -3701,7 +3702,7 @@ index 695ef59..3933c1c 100644
   "blake3",
   "bm25",
   "bytes",
-@@ -13649,7 +15760,7 @@ dependencies = [
+@@ -13649,7 +15761,7 @@ dependencies = [
   "globset",
   "ignore",
   "image",
@@ -3710,7 +3711,7 @@ index 695ef59..3933c1c 100644
   "infer 0.15.0",
   "jsonschema",
   "jsonwebtoken",
-@@ -13683,7 +15794,7 @@ dependencies = [
+@@ -13683,7 +15795,7 @@ dependencies = [
   "sha2 0.10.9",
   "shlex",
   "similar",
@@ -3719,7 +3720,7 @@ index 695ef59..3933c1c 100644
   "strum 0.27.2",
   "tar",
   "tdigests",
-@@ -13695,7 +15806,7 @@ dependencies = [
+@@ -13695,7 +15807,7 @@ dependencies = [
   "tokio-stream",
   "tokio-tungstenite 0.27.0",
   "tokio-util",
@@ -3728,7 +3729,7 @@ index 695ef59..3933c1c 100644
   "toml_edit 0.22.27",
   "tonic",
   "tonic-prost",
-@@ -13811,7 +15922,7 @@ dependencies = [
+@@ -13811,7 +15923,7 @@ dependencies = [
   "serde_json",
   "tempfile",
   "thiserror 2.0.18",
@@ -3737,7 +3738,7 @@ index 695ef59..3933c1c 100644
   "tracing",
   "xai-grok-sampling-types",
   "xai-grok-tools",
-@@ -13901,7 +16012,7 @@ dependencies = [
+@@ -13901,7 +16013,7 @@ dependencies = [
   "async-openai",
   "async-stream",
   "async-trait",
@@ -3746,7 +3747,7 @@ index 695ef59..3933c1c 100644
   "chrono",
   "command-fds",
   "crc32fast",
-@@ -13917,7 +16028,7 @@ dependencies = [
+@@ -13917,7 +16029,7 @@ dependencies = [
   "htmd",
   "ignore",
   "image",
@@ -3755,7 +3756,7 @@ index 695ef59..3933c1c 100644
   "infer 0.19.0",
   "libc",
   "minijinja",
-@@ -13967,7 +16078,7 @@ dependencies = [
+@@ -13967,7 +16079,7 @@ dependencies = [
   "xai-tool-runtime",
   "xai-tool-types",
   "xai-tty-utils",
@@ -3764,7 +3765,7 @@ index 695ef59..3933c1c 100644
  ]
  
  [[package]]
-@@ -14027,7 +16138,7 @@ dependencies = [
+@@ -14027,7 +16139,7 @@ dependencies = [
   "thiserror 2.0.18",
   "tokio",
   "tokio-tungstenite 0.27.0",
@@ -3773,7 +3774,7 @@ index 695ef59..3933c1c 100644
   "tracing",
   "tracing-subscriber",
   "url",
-@@ -14043,7 +16154,7 @@ dependencies = [
+@@ -14043,7 +16155,7 @@ dependencies = [
   "async-stream",
   "async-trait",
   "axum",
@@ -3782,7 +3783,7 @@ index 695ef59..3933c1c 100644
   "bstr",
   "chrono",
   "clap",
-@@ -14060,7 +16171,7 @@ dependencies = [
+@@ -14060,7 +16172,7 @@ dependencies = [
   "hashbrown 0.16.1",
   "humantime-serde",
   "ignore",
@@ -3791,7 +3792,7 @@ index 695ef59..3933c1c 100644
   "infer 0.19.0",
   "libc",
   "md5",
-@@ -14083,7 +16194,7 @@ dependencies = [
+@@ -14083,7 +16195,7 @@ dependencies = [
   "tokio",
   "tokio-tungstenite 0.27.0",
   "tokio-util",
@@ -3800,7 +3801,7 @@ index 695ef59..3933c1c 100644
   "tonic",
   "tracing",
   "tracing-subscriber",
-@@ -14147,7 +16258,7 @@ dependencies = [
+@@ -14147,7 +16259,7 @@ dependencies = [
  name = "xai-grok-workspace-types"
  version = "0.1.0"
  dependencies = [
@@ -3809,7 +3810,7 @@ index 695ef59..3933c1c 100644
   "chrono",
   "serde",
   "serde_json",
-@@ -14194,7 +16305,7 @@ dependencies = [
+@@ -14194,7 +16306,7 @@ dependencies = [
  name = "xai-mixpanel"
  version = "0.1.0"
  dependencies = [
@@ -3818,7 +3819,7 @@ index 695ef59..3933c1c 100644
   "reqwest 0.12.24",
   "serde_json",
   "thiserror 2.0.18",
-@@ -14472,7 +16583,7 @@ dependencies = [
+@@ -14472,7 +16584,7 @@ dependencies = [
   "uds_windows",
   "uuid",
   "windows-sys 0.61.2",
@@ -3827,7 +3828,7 @@ index 695ef59..3933c1c 100644
   "zbus_macros",
   "zbus_names",
   "zvariant",
-@@ -14484,7 +16595,7 @@ version = "5.14.0"
+@@ -14484,7 +16596,7 @@ version = "5.14.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "897e79616e84aac4b2c46e9132a4f63b93105d54fe8c0e8f6bffc21fa8d49222"
  dependencies = [
@@ -3836,7 +3837,7 @@ index 695ef59..3933c1c 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -14500,7 +16611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -14500,7 +16612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ffd8af6d5b78619bab301ff3c560a5bd22426150253db278f164d6cf3b72c50f"
  dependencies = [
   "serde",
@@ -3845,7 +3846,7 @@ index 695ef59..3933c1c 100644
   "zvariant",
  ]
  
-@@ -14607,7 +16718,19 @@ dependencies = [
+@@ -14607,7 +16719,19 @@ dependencies = [
   "arbitrary",
   "crc32fast",
   "flate2",
@@ -3866,7 +3867,7 @@ index 695ef59..3933c1c 100644
   "memchr",
  ]
  
-@@ -14697,7 +16820,7 @@ dependencies = [
+@@ -14697,7 +16821,7 @@ dependencies = [
   "enumflags2",
   "serde",
   "url",
@@ -3875,7 +3876,7 @@ index 695ef59..3933c1c 100644
   "zvariant_derive",
   "zvariant_utils",
  ]
-@@ -14708,7 +16831,7 @@ version = "5.10.0"
+@@ -14708,7 +16832,7 @@ version = "5.10.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "5b59b012ebe9c46656f9cc08d8da8b4c726510aef12559da3e5f1bf72780752c"
  dependencies = [
@@ -3884,7 +3885,7 @@ index 695ef59..3933c1c 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -14725,5 +16848,5 @@ dependencies = [
+@@ -14725,5 +16849,5 @@ dependencies = [
   "quote",
   "serde",
   "syn 2.0.117",
@@ -4007,7 +4008,7 @@ index 91e7f14..d425006 100644
              .normalize_images_with_notices(wrapped, images, is_cursor)
              .await;
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
-index 99e3801..b179e2d 100644
+index 99e3801..0990fd2 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/turn.rs
 @@ -626,9 +626,45 @@ impl SessionActor {
@@ -4083,11 +4084,27 @@ index 99e3801..b179e2d 100644
                  for image in &user_images {
                      user_chat.add_image(pick_user_image_url(image));
                  }
+@@ -1878,6 +1920,15 @@ impl SessionActor {
+                 )),
+             );
+             let mut request = request;
++            // 转述模式下主对话请求不应携带任何内联图片：新图已由 describe
++            // 管线转文字，但旧会话历史（转述启用前产生）仍可能嵌着 Image
++            // 块，会被纯文本端点（如智谱 coding）400 拒绝。发送前统一替换
++            // 为文字占位（仅主对话路径；describe 请求不经此处，不受影响）。
++            if crate::session::image_describe::transcribe_images_enabled() {
++                crate::session::image_describe::sanitize_inline_images_for_transcribe(
++                    &mut request.items,
++                );
++            }
+             request.x_grok_session_id = Some(self.session_info.id.to_string());
+             request.x_grok_turn_idx =
+                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
 diff --git a/crates/codegen/xai-grok-shell/src/session/image_describe.rs b/crates/codegen/xai-grok-shell/src/session/image_describe.rs
-index 26d5958..222fa4c 100644
+index 26d5958..a4b630f 100644
 --- a/crates/codegen/xai-grok-shell/src/session/image_describe.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/image_describe.rs
-@@ -47,6 +47,15 @@ pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
+@@ -47,6 +47,53 @@ pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
  pub const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
  /// Empty twin: no optional template is compiled in, nothing extra to strip.
  const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
@@ -4100,10 +4117,48 @@ index 26d5958..222fa4c 100644
 +    std::env::var("GROK_IMAGE_TRANSCRIBE")
 +        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 +}
++/// Placeholder stamped over historical inline images when the transcribe
++/// pipeline is active (see [`sanitize_inline_images_for_transcribe`]).
++pub const HISTORY_IMAGE_OMITTED: &str =
++    "[image from an earlier turn omitted: this model receives text only]";
++/// Strip every inline image from a request's conversation items, replacing
++/// them with [`HISTORY_IMAGE_OMITTED`] text. Used on the main-turn request
++/// path when transcription is enabled: new images are already transcribed
++/// to text, but sessions created before the pipeline existed still carry
++/// `Image` parts in user messages and `ToolResult.images` (read_file on an
++/// image/PDF), which text-only endpoints reject with 400.
++pub fn sanitize_inline_images_for_transcribe(
++    items: &mut [xai_grok_sampling_types::conversation::ConversationItem],
++) {
++    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
++    for item in items.iter_mut() {
++        match item {
++            ConversationItem::User(u) => {
++                for part in u.content.iter_mut() {
++                    if matches!(part, ContentPart::Image { .. }) {
++                        *part = ContentPart::Text {
++                            text: std::sync::Arc::<str>::from(HISTORY_IMAGE_OMITTED),
++                        };
++                    }
++                }
++            }
++            ConversationItem::ToolResult(t) => {
++                if !t.images.is_empty() {
++                    t.images.clear();
++                    let mut content = t.content.as_ref().to_owned();
++                    content.push('\n');
++                    content.push_str(HISTORY_IMAGE_OMITTED);
++                    t.content = std::sync::Arc::<str>::from(content);
++                }
++            }
++            _ => {}
++        }
++    }
++}
  /// Strip template-specific context tags from text before it reaches the
  /// image-description prompt. Uses attribute-aware matching so tags like
  /// `<always_applied_workspace_rules type="...">` are caught.
-@@ -457,10 +466,16 @@ pub async fn describe_user_images(
+@@ -457,10 +504,16 @@ pub async fn describe_user_images(
              });
          }
      }
@@ -4121,3 +4176,59 @@ index 26d5958..222fa4c 100644
      const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
      let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
          .await
+@@ -803,3 +856,42 @@ mod tests {
+         assert_eq!(strip_template_context_tags(input), input);
+     }
+ }
++
++#[cfg(test)]
++mod sanitize_tests {
++    use super::*;
++    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
++
++    #[test]
++    fn sanitize_strips_user_and_tool_result_images() {
++        let user = ConversationItem::user_with_parts(vec![
++            ContentPart::Text { text: std::sync::Arc::<str>::from("look") },
++            ContentPart::Image { url: std::sync::Arc::<str>::from("data:image/png;base64,AAAA") },
++        ]);
++        let tool = ConversationItem::tool_result_with_images(
++            "call-1",
++            "Read image file: a.png",
++            vec![ContentPart::Image {
++                url: std::sync::Arc::<str>::from("data:image/png;base64,BBBB"),
++            }],
++        );
++        let mut items = vec![user, tool];
++        sanitize_inline_images_for_transcribe(&mut items);
++        match &items[0] {
++            ConversationItem::User(u) => {
++                assert!(u.content.iter().all(|p| !matches!(p, ContentPart::Image { .. })));
++                assert!(u.content.iter().any(
++                    |p| matches!(p, ContentPart::Text { text } if text.contains(HISTORY_IMAGE_OMITTED))
++                ));
++            }
++            _ => panic!("expected User"),
++        }
++        match &items[1] {
++            ConversationItem::ToolResult(t) => {
++                assert!(t.images.is_empty());
++                assert!(t.content.contains(HISTORY_IMAGE_OMITTED));
++            }
++            _ => panic!("expected ToolResult"),
++        }
++    }
++}
+diff --git a/crates/codegen/xai-grok-shell/src/session/mod.rs b/crates/codegen/xai-grok-shell/src/session/mod.rs
+index cc61f43..80b105a 100644
+--- a/crates/codegen/xai-grok-shell/src/session/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/session/mod.rs
+@@ -314,7 +314,7 @@ pub(crate) mod goal_strategist;
+ pub(crate) mod goal_summarizer;
+ pub mod goal_tracker;
+ pub mod helpers;
+-pub(crate) mod image_describe;
++pub mod image_describe;
+ pub(crate) mod image_normalize;
+ pub mod inference_metrics;
+ pub use xai_grok_shared::session::info;
