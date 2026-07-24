@@ -13,6 +13,14 @@ use crate::agent::{ext_call, ext_notify, ext_ok, AgentState};
 // upsert/delete 的字段是 snake_case（server_name）；config 由引擎侧
 // McpServerConfig flatten，直接把表单对象平铺进 params。
 
+/// 模型目录热重载（`x.ai/internal/reload_models`）：设置页保存新模型后调用，
+/// 引擎从 config.toml 重读 [model.*]——新模型无需重启 App 即可在下拉出现/可选。
+/// 无活跃会话时引擎侧无处接收，调用方容错忽略即可（下次启动自然读到新配置）。
+#[tauri::command]
+pub async fn models_reload_live(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    ext_ok(&state, "x.ai/internal/reload_models", serde_json::json!({})).await
+}
+
 #[tauri::command]
 pub async fn mcp_upsert(
     state: State<'_, AgentState>,

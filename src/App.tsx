@@ -303,6 +303,11 @@ function App() {
       setModelForm({ key: "", name: "", model: "", base_url: "", api_key: "" });
       setModelTestMsg("");
       refreshModels();
+      // 引擎目录热重载 + 立即并入会话模型下拉——不再要求重启 App。
+      // 无活跃会话时 reload 无处接收，容错忽略（下次启动自然读新配置）。
+      invoke("models_reload_live").catch(() => {});
+      const newKey = modelForm.key.trim();
+      if (newKey) setModels((prev) => (prev.includes(newKey) ? prev : [...prev, newKey]));
     } catch (e) {
       setError(String(e));
     }

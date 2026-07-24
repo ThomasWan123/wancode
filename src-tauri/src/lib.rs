@@ -153,6 +153,7 @@ pub fn run() {
             agent::agent_toggle_plan_mode,
             agent::permissions_reset,
             agent::agent_sync_permission_mode,
+            engine_ops::models_reload_live,
             engine_ops::mcp_upsert,
             engine_ops::mcp_delete,
             engine_ops::mcp_read_resource,
