@@ -24,3 +24,5 @@
 - 预览 iframe 聚焦后全局快捷键失效（需点外部恢复）
 - Review 偶发空产出一例（未复现，留意）
 - RECENTS 临时会话快照残影（已加 refreshSessions，观察是否根除）
+- 切换/新建会话后上一会话的 Plan 面板与 Terminal 面板残留不清理（Home 页被 Plan 挤占,composer 需滚动;07-24 v0.18.4 测试中实见）
+- v0.18.4 实测记录:忙时 Enter 注入当前回合（模型精确回复 INTERJECT-OK-777）与 Alt+Enter 排队（回合结束后作为新回合执行）双路径 E2E 通过（t11.png）
