@@ -1634,7 +1634,8 @@ function App() {
     sentInterjectionsRef.current.add(id);
     setInput("");
     onComposerChange("");
-    setItems((prev) => [...prev, { kind: "user", text: `⚡ ${text}` }]);
+    // 对齐 Claude Code：插话就是普通用户消息气泡，无特殊标记
+    setItems((prev) => [...prev, { kind: "user", text }]);
     try {
       await invoke("agent_interject", { text, interjectionId: id });
     } catch (e) {

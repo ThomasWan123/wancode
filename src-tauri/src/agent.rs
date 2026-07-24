@@ -733,9 +733,11 @@ pub(crate) async fn ext_notify(
     if let Some(obj) = params.as_object_mut() {
         obj.entry("sessionId")
             .or_insert(serde_json::Value::String(session_id.0.to_string()));
-        // Scopes remove/clear to our own items and records the editor.
-        obj.entry("owner")
-            .or_insert(serde_json::Value::String("wancode".into()));
+        // 不注入 owner：排队条目经标准 ACP prompt 入队，owner=None（我们从未
+        // 声明 origin client），而 remove/interject/clear 的守卫要求请求 owner
+        // 与条目 owner 精确匹配——注入 "wancode" 会永远匹配不上，整族操作
+        // 静默 no-op（用户实报"按钮没反应"）。与 yolo_mode_changed 同一教训：
+        // 单客户端应用不传标识（None=匹配全部）才是正确姿势。
     }
     let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
     let _: () = acp_send(

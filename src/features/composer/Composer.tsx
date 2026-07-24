@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
-  IconGitBranch, IconPencil, IconPlus, IconShield, IconStop, IconTerminal, IconX,
+  IconGitBranch, IconPlus, IconShield, IconStop, IconTerminal, IconX,
 } from "../../icons";
 
 export function Composer(props: Record<string, any>) {
@@ -33,9 +33,11 @@ export function Composer(props: Record<string, any>) {
                 {t.queueClear}
               </button>
             </div>
-            {queue.map((q: any, n: any) => (
+            {/* Claude Code 式排队行：整行即文本（点击进入行内编辑），
+                动作只保留两个且 hover 才现身——⏎ 立即插话、✕ 删除。
+                排序按钮移除（低频操作不值得常驻按钮位）。 */}
+            {queue.map((q: any) => (
               <div key={q.id} className="queue-row">
-                <span className="queue-idx">{n + 1}</span>
                 {editingQueueId === q.id ? (
                   <input
                     className="queue-edit-input"
@@ -55,69 +57,41 @@ export function Composer(props: Record<string, any>) {
                     onBlur={() => setEditingQueueId(null)}
                   />
                 ) : (
-                  <span className="queue-text" title={q.text}>
+                  <span
+                    className="queue-text"
+                    title={t.queueEdit}
+                    onClick={() => setEditingQueueId(q.id)}
+                  >
                     {q.text}
                   </span>
                 )}
-                <button
-                  className="icon-btn queue-x"
-                  title={t.queueMoveUp}
-                  disabled={n === 0}
-                  onClick={() => {
-                    const ids = queue.map((x: any) => x.id);
-                    [ids[n - 1], ids[n]] = [ids[n], ids[n - 1]];
-                    invoke("agent_queue_reorder", { orderedIds: ids }).catch((e) =>
-                      setError(String(e)),
-                    );
-                  }}
-                >
-                  ↑
-                </button>
-                <button
-                  className="icon-btn queue-x"
-                  title={t.queueMoveDown}
-                  disabled={n === queue.length - 1}
-                  onClick={() => {
-                    const ids = queue.map((x: any) => x.id);
-                    [ids[n], ids[n + 1]] = [ids[n + 1], ids[n]];
-                    invoke("agent_queue_reorder", { orderedIds: ids }).catch((e) =>
-                      setError(String(e)),
-                    );
-                  }}
-                >
-                  ↓
-                </button>
-                <button
-                  className="icon-btn queue-x"
-                  title={t.queueEdit}
-                  onClick={() => setEditingQueueId(q.id)}
-                >
-                  <IconPencil size={12} />
-                </button>
-                <button
-                  className="icon-btn queue-x"
-                  title={t.queueInterjectNow}
-                  onClick={() =>
-                    // 立即插话：这条排队消息不等回合结束，当前回合内注入执行。
-                    // 版本守卫同 remove——过期就是良性 no-op + 引擎重播队列。
-                    invoke("agent_queue_interject", { id: q.id, expectedVersion: q.version }).catch(
-                      (e) => setError(String(e)),
-                    )
-                  }
-                >
-                  ⚡
-                </button>
-                <button
-                  className="icon-btn queue-x"
-                  title={t.queueRemove}
-                  onClick={() =>
-                    invoke("agent_queue_remove", { id: q.id, expectedVersion: q.version }).catch(
-                      (e) => setError(String(e)),
-                    )
-                  }
-                >
-                  <IconX size={13} />
-                </button>
+                <span className="queue-actions">
+                  <button
+                    className="icon-btn queue-x"
+                    title={t.queueInterjectNow}
+                    onClick={() =>
+                      // 立即插话：不等回合结束，当前回合内注入执行。
+                      // 版本守卫：过期就是良性 no-op + 引擎重播队列。
+                      invoke("agent_queue_interject", {
+                        id: q.id,
+                        expectedVersion: q.version,
+                      }).catch((e) => setError(String(e)))
+                    }
+                  >
+                    ⏎
+                  </button>
+                  <button
+                    className="icon-btn queue-x"
+                    title={t.queueRemove}
+                    onClick={() =>
+                      invoke("agent_queue_remove", { id: q.id, expectedVersion: q.version }).catch(
+                        (e) => setError(String(e)),
+                      )
+                    }
+                  >
+                    <IconX size={13} />
+                  </button>
+                </span>
               </div>
             ))}
           </div>
@@ -202,10 +176,13 @@ export function Composer(props: Record<string, any>) {
                 onComposerChange(next < 0 ? draftRef.current : historyRef.current[next]);
                 return;
               }
-              // Alt+Enter：忙时插话（不打断当前回合）
+              // 忙时默认对齐 Claude Code：普通 Enter = 注入当前回合
+              //（不等回合结束，下一个安全点送达模型）；Alt+Enter = 排队到
+              // 回合结束后作为新回合。带图片时 interject 不支持图片，退回排队。
               if (e.key === "Enter" && e.altKey && busy) {
                 e.preventDefault();
-                sendInterject();
+                histIdxRef.current = -1;
+                send(); // 显式排队（引擎 FIFO，回合结束后按序执行）
                 return;
               }
               // Shift+Tab：切换计划模式（对标 Claude Code 的模式循环键）。
@@ -218,7 +195,11 @@ export function Composer(props: Record<string, any>) {
               if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
                 e.preventDefault();
                 histIdxRef.current = -1;
-                send();
+                if (busy && pastedImages.length === 0 && input.trim()) {
+                  sendInterject(); // 对齐 Claude Code：忙时消息注入当前回合
+                } else {
+                  send();
+                }
               }
             }}
             placeholder={

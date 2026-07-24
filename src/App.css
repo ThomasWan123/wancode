@@ -868,10 +868,24 @@ button.ghost.small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text; /* 整行即编辑入口（Claude Code 式） */
 }
 .queue-x {
   padding: 3px;
   flex-shrink: 0;
+}
+/* 动作按钮 hover 才现身，行保持一行干净文本 */
+.queue-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.queue-row:hover .queue-actions,
+.queue-actions:focus-within {
+  opacity: 1;
 }
 
 /* 助手消息 + 悬停显示的操作行（复制…）—— 对标 Claude Code 消息下方小按钮 */
