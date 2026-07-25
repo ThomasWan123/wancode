@@ -1626,7 +1626,10 @@ mod endpoint_and_key_isolation_tests {
             let (o_base, o_key, _) = route(order, "glm-open");
             assert_eq!(c_base, ZHIPU_CODING);
             assert_eq!(o_base, ZHIPU_OPEN);
-            assert_ne!(c_key, o_key);
+            // 断言等于"各自正确的那把"，不是只断言两把不相等：端点没换、
+            // 凭据互换的顺序 bug 也满足 !=，却照样是 401。
+            assert_eq!(c_key.as_deref(), Some("key-for-coding-plan"));
+            assert_eq!(o_key.as_deref(), Some("key-for-open-platform"));
         }
     }
 }

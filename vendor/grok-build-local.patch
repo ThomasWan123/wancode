@@ -5648,10 +5648,10 @@ index 31fc0d5..93f46ae 100644
              }
 diff --git a/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs b/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs
 new file mode 100644
-index 0000000..a39b2d6
+index 0000000..a149a0b
 --- /dev/null
 +++ b/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,303 @@
 +//! Gate 1: does choosing a model actually send the request to *that model's*
 +//! endpoint, with *that model's* key?
 +//!
@@ -5945,6 +5945,12 @@ index 0000000..a39b2d6
 +
 +    assert_eq!(coding.probe.hits(), 1);
 +    assert_eq!(open.probe.hits(), 0);
++    // Key too, not just the host: an order-dependent bug that swaps
++    // credentials while keeping endpoints straight would pass a hit-count
++    // check. The pair travels together or the test fails.
++    let auth = coding.probe.seen_auth();
++    assert!(auth.iter().any(|h| h.contains(CODING_KEY)), "{auth:?}");
++    assert!(!auth.iter().any(|h| h.contains(OPEN_KEY)), "{auth:?}");
 +
 +    open.shutdown();
 +    coding.shutdown();
