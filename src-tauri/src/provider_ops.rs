@@ -738,3 +738,126 @@ mod endpoint_label_redaction_tests {
         assert_eq!(endpoint_authority_label("http://localhost:9999/v1"), "localhost:9999");
     }
 }
+
+/// v0.18.6 步1b（RED）：Codex 第三轮复核指出的两处语义风险。
+///
+/// 风险一：交互切换用 `resolve_catalog_key`（`.rev()` last-wins）解析请求 id。
+/// 客户端发 slug 且重复时，它静默猜一个，而我们随后把这个猜测**永久写入**
+/// `catalog_model_id`——等于把一次错误猜测洗成权威身份，比修复前更糟。
+/// 用户选择路径必须严格：精确 key / slug 唯一 / 重复报错 / 不存在报错。
+///
+/// 风险二：`catalog_model_id: None` 当前语义是"保留旧 key"。对 CurrentModel
+/// 这种"模型已变更"的消息，保留陈旧身份意味着 slug 换了而 key 没换，恢复时
+/// key 优先 → 回到错误模型。必须三态显式化。
+#[cfg(test)]
+mod model_selection_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{
+        next_catalog_model_id, resolve_requested_model, CatalogModelPatch, ModelSelectionError,
+    };
+
+    fn entry(slug: &str, base_url: &str, name: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        info.name = Some(name.to_owned());
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn dup_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        models.insert(
+            "zhipu-glm".to_owned(),
+            entry("glm-4.6", "https://open.bigmodel.cn/api/paas/v4", "GLM 智谱官方"),
+        );
+        models.insert(
+            "my-test-model".to_owned(),
+            entry("glm-4.6", "https://api.company.com/v1", "GLM 公司代理"),
+        );
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// RED：精确 key 必须原样成立，且带回它自己的条目（一次解析出 key+entry，
+    /// 避免"先 resolve_model_id 找 entry、再另一个函数找 key"两次解析将来又分歧）。
+    #[test]
+    fn exact_key_resolves_with_its_own_entry() {
+        let (models, available) = dup_catalog();
+        let sel = resolve_requested_model(&models, &available, "my-test-model")
+            .expect("精确 key 必须解析成功");
+        assert_eq!(sel.catalog_key, acp::ModelId::new("my-test-model"));
+        assert_eq!(sel.entry.info.base_url, "https://api.company.com/v1");
+    }
+
+    /// RED：slug 唯一时兼容成功并归一到 key。
+    #[test]
+    fn unique_slug_resolves_to_its_key() {
+        let mut models = IndexMap::new();
+        models.insert("only".to_owned(), entry("glm-4.6", "https://api.company.com/v1", "唯一"));
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        let sel = resolve_requested_model(&models, &available, "glm-4.6").expect("唯一 slug 应成功");
+        assert_eq!(sel.catalog_key, acp::ModelId::new("only"));
+    }
+
+    /// RED（本轮核心）：重复 slug 必须报歧义，**绝不 last-wins 猜测**。
+    /// 猜出来的 key 会被持久化，把错误固化成身份。
+    #[test]
+    fn duplicate_slug_is_rejected_not_guessed() {
+        let (models, available) = dup_catalog();
+        match resolve_requested_model(&models, &available, "glm-4.6") {
+            Err(ModelSelectionError::Ambiguous { requested, candidates }) => {
+                assert_eq!(requested, "glm-4.6");
+                let ids: Vec<_> = candidates.iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, vec!["zhipu-glm", "my-test-model"]);
+            }
+            other => panic!("重复 slug 必须报歧义而非猜测，实际: {other:?}"),
+        }
+    }
+
+    /// RED：不存在的 id 报 Unknown，不得回退到任意条目。
+    #[test]
+    fn unknown_id_is_rejected() {
+        let (models, available) = dup_catalog();
+        assert!(matches!(
+            resolve_requested_model(&models, &available, "nope"),
+            Err(ModelSelectionError::Unknown(_))
+        ));
+    }
+
+    /// RED：三态补丁语义——Clear 必须真的清除陈旧身份。
+    /// 场景：已有 catalog=proxy-a，某内部路径把模型换成别的 slug 却不知道 key。
+    /// 若保留 proxy-a，恢复时 key 优先 → 回到错误模型。
+    #[test]
+    fn clear_wipes_stale_identity() {
+        let existing = acp::ModelId::new("proxy-a");
+        assert_eq!(next_catalog_model_id(Some(&existing), &CatalogModelPatch::Clear), None);
+    }
+
+    /// RED：Set 覆盖；Preserve 才保留（保留必须显式，不能是 None 的默认行为）。
+    #[test]
+    fn set_overwrites_and_preserve_is_explicit() {
+        let existing = acp::ModelId::new("proxy-a");
+        let next = acp::ModelId::new("proxy-b");
+        assert_eq!(
+            next_catalog_model_id(Some(&existing), &CatalogModelPatch::Set(next.clone())),
+            Some(next)
+        );
+        assert_eq!(
+            next_catalog_model_id(Some(&existing), &CatalogModelPatch::Preserve),
+            Some(existing)
+        );
+    }
+}

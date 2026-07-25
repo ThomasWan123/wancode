@@ -4023,10 +4023,10 @@ index 2d4043a..edcb1fb 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..74ce273 100644
+index a1c9b68..47fc562 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,123 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,229 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4144,6 +4144,112 @@ index a1c9b68..74ce273 100644
 +                })
 +                .collect(),
 +        },
++    }
++}
++
++/// A model the user asked for, resolved once into both halves of its identity.
++/// Returning them together stops the old two-step (`resolve_model_id` for the
++/// entry, then a second lookup for the key) from drifting apart again.
++#[derive(Debug, Clone)]
++pub struct ResolvedModelSelection {
++    /// Catalog key — persist this, show this, switch on this.
++    pub catalog_key: acp::ModelId,
++    /// The entry itself; `entry.info.model` is the upstream slug the request
++    /// carries and `entry.info.base_url` its endpoint.
++    pub entry: ModelEntry,
++}
++
++/// Why a requested model id could not be resolved to exactly one entry.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ModelSelectionError {
++    /// The id is a routing slug shared by several entries. Ask the user.
++    Ambiguous {
++        requested: String,
++        candidates: Vec<ModelCandidate>,
++    },
++    /// Nothing in the catalog matches.
++    Unknown(String),
++}
++
++/// Strict resolution for **user-driven** model selection (ACP `setModel`).
++///
++/// Unlike [`resolve_catalog_key`], which picks the last match when a slug is
++/// duplicated, this refuses to guess. That matters because the resolved key is
++/// now persisted as `catalog_model_id`: a `.rev()` guess here would launder a
++/// coin flip into authoritative identity, which is worse than the ambiguity it
++/// papered over. Legacy clients sending a slug still work — as long as the slug
++/// identifies exactly one entry.
++pub fn resolve_requested_model(
++    models: &IndexMap<String, ModelEntry>,
++    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
++    requested: &str,
++) -> Result<ResolvedModelSelection, ModelSelectionError> {
++    let exact = acp::ModelId::new(requested.to_owned());
++    if available.contains_key(&exact)
++        && let Some(entry) = models.get(requested)
++    {
++        return Ok(ResolvedModelSelection {
++            catalog_key: exact,
++            entry: entry.clone(),
++        });
++    }
++    let matches: Vec<(&String, &ModelEntry)> = models
++        .iter()
++        .filter(|(key, entry)| {
++            entry.info.model == requested
++                && available.contains_key(&acp::ModelId::new((*key).clone()))
++        })
++        .collect();
++    match matches.len() {
++        0 => Err(ModelSelectionError::Unknown(requested.to_owned())),
++        1 => Ok(ResolvedModelSelection {
++            catalog_key: acp::ModelId::new(matches[0].0.clone()),
++            entry: matches[0].1.clone(),
++        }),
++        _ => Err(ModelSelectionError::Ambiguous {
++            requested: requested.to_owned(),
++            candidates: matches
++                .iter()
++                .map(|(key, entry)| ModelCandidate {
++                    id: (*key).clone(),
++                    name: entry
++                        .info
++                        .name
++                        .clone()
++                        .unwrap_or_else(|| entry.info.model.clone()),
++                    endpoint_label: endpoint_authority_label(&entry.info.base_url),
++                })
++                .collect(),
++        }),
++    }
++}
++
++/// How a summary write should treat the persisted catalog key.
++///
++/// Three states, not `Option`: "I don't know the key" and "keep whatever is
++/// there" are different intents, and conflating them lets a model *change*
++/// keep a stale identity — slug moves, key doesn't, and the next restore
++/// prefers the key and lands on the old model.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum CatalogModelPatch {
++    /// Leave the stored key alone (metadata-only writes).
++    Preserve,
++    /// Set it.
++    Set(acp::ModelId),
++    /// The model changed but its key is unknown — drop the stale identity
++    /// rather than let it outlive the model it named.
++    Clear,
++}
++
++/// Apply a [`CatalogModelPatch`] to the currently stored key.
++pub fn next_catalog_model_id(
++    existing: Option<&acp::ModelId>,
++    patch: &CatalogModelPatch,
++) -> Option<acp::ModelId> {
++    match patch {
++        CatalogModelPatch::Preserve => existing.cloned(),
++        CatalogModelPatch::Set(id) => Some(id.clone()),
++        CatalogModelPatch::Clear => None,
 +    }
 +}
 +
