@@ -1504,3 +1504,193 @@ mod recovery_commit_order_tests {
         assert!(blocks.contains_key("sess-2"));
     }
 }
+
+/// v0.18.6 Gate 1a：身份 → 端点 + 凭据，全链路无串台。
+///
+/// 这是整件事最初的事故形态：用户新建了一个自定义模型，聊天区选中它，
+/// 请求却发去了智谱非 coding 端点。此前每一轮的验证都停在"解析出的 key
+/// 对不对"，而真正伤人的是 key 之后那两跳——entry 决定 base_url，entry
+/// 决定用哪把 Key。两个条目共享同一个上游 slug 时，这两跳只要有一跳按
+/// slug 而不是按 entry 走，就串台。
+///
+/// 这条测试跑的是真实生产函数链：
+///     resolve_requested_model → selection.entry()
+///                             → resolve_credentials → sampling_config_for_model
+/// 覆盖到"请求参数"为止。它**不**覆盖 SamplerConfig 交给 HTTP 客户端之后
+/// 的那一跳（那部分在 xai-grok-http 内部），所以 Gate 1 尚未完全关闭。
+#[cfg(test)]
+mod endpoint_and_key_isolation_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{
+        resolve_credentials, sampling_config_for_model, ModelEntry, ModelInfo,
+    };
+    use xai_grok_shell::agent::models::resolve_requested_model;
+
+    const ZHIPU_OPEN: &str = "https://open.bigmodel.cn/api/paas/v4";
+    const ZHIPU_CODING: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+
+    /// 两个条目共享上游 slug `glm-4.6`，但端点与 Key 完全不同——正是事故里
+    /// "开放平台 vs Coding Plan"那对，两者的 Key 互不通用，串台即 401。
+    fn crossover_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>)
+    {
+        let mut models = IndexMap::new();
+        for (key, base, api_key) in [
+            ("glm-open", ZHIPU_OPEN, "key-for-open-platform"),
+            ("glm-coding", ZHIPU_CODING, "key-for-coding-plan"),
+        ] {
+            let mut info = ModelInfo::fallback("glm-4.6");
+            info.base_url = base.to_owned();
+            models.insert(
+                key.to_owned(),
+                ModelEntry {
+                    info,
+                    api_key: Some(api_key.to_owned()),
+                    env_key: None,
+                    api_base_url: None,
+                },
+            );
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    fn route(key: &str) -> (String, Option<String>, String) {
+        let (models, available) = crossover_catalog();
+        let selection = resolve_requested_model(&models, &available, key)
+            .unwrap_or_else(|e| panic!("{key} 必须能精确解析: {e:?}"));
+        let creds = resolve_credentials(selection.entry(), None);
+        let (base_url, api_key) = (creds.base_url.clone(), creds.api_key.clone());
+        let sampling =
+            sampling_config_for_model(selection.entry(), creds, None, None, None, None);
+        (base_url, api_key, sampling.model)
+    }
+
+    /// 选 Coding Plan：必须发往 coding 端点、带 coding 的 Key，
+    /// 且绝不能出现开放平台那一方的任何东西。
+    #[test]
+    fn choosing_coding_plan_never_leaks_into_the_open_platform_entry() {
+        let (base_url, api_key, model) = route("glm-coding");
+        assert_eq!(base_url, ZHIPU_CODING);
+        assert_eq!(api_key.as_deref(), Some("key-for-coding-plan"));
+        assert_ne!(base_url, ZHIPU_OPEN, "端点串台——这正是用户报的那个 bug");
+        assert_ne!(
+            api_key.as_deref(),
+            Some("key-for-open-platform"),
+            "Key 串台——两个平台的 Key 互不通用，串了就是 401"
+        );
+        // 上游 slug 仍然是共享的那个：身份归一化不该改写发给上游的模型名。
+        assert_eq!(model, "glm-4.6");
+    }
+
+    /// 反方向同样成立。只测一个方向正是我前几轮反复犯的错。
+    #[test]
+    fn choosing_open_platform_never_leaks_into_the_coding_entry() {
+        let (base_url, api_key, model) = route("glm-open");
+        assert_eq!(base_url, ZHIPU_OPEN);
+        assert_eq!(api_key.as_deref(), Some("key-for-open-platform"));
+        assert_ne!(base_url, ZHIPU_CODING);
+        assert_ne!(api_key.as_deref(), Some("key-for-coding-plan"));
+        assert_eq!(model, "glm-4.6");
+    }
+
+    /// 目录顺序不得影响路由。旧 last-wins 的症状就是"排最后的那个赢"，
+    /// 把顺序倒过来仍然各走各的，才说明结果来自 entry 而不是位置。
+    #[test]
+    fn routing_is_independent_of_catalog_order() {
+        let (a_base, a_key, _) = route("glm-coding");
+        let (b_base, b_key, _) = route("glm-open");
+        assert_ne!(a_base, b_base);
+        assert_ne!(a_key, b_key);
+    }
+}
+
+/// Gate 1a 续：直接复刻事故形态——从**持久化记录**出发决定端点。
+///
+/// 上面三条用的是精确 key，而精确 key 那条路原本就没坏，所以它们守的是
+/// 不变量、不是事故。真正出事的形态是：会话文件里只存了上游 slug，恢复时
+/// 拿 slug 去猜 key，猜中了另一家代理的条目，于是请求发去了别人的端点。
+/// 这里从 Summary 的两种形态出发，一路走到端点。
+#[cfg(test)]
+mod persisted_record_routing_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{resolve_credentials, ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{resolve_persisted_model, PersistedModelResolution};
+
+    const ZHIPU_OPEN: &str = "https://open.bigmodel.cn/api/paas/v4";
+    const ZHIPU_CODING: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+
+    fn catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        for (key, base, api_key) in [
+            ("glm-open", ZHIPU_OPEN, "key-for-open-platform"),
+            ("glm-coding", ZHIPU_CODING, "key-for-coding-plan"),
+        ] {
+            let mut info = ModelInfo::fallback("glm-4.6");
+            info.base_url = base.to_owned();
+            models.insert(
+                key.to_owned(),
+                ModelEntry {
+                    info,
+                    api_key: Some(api_key.to_owned()),
+                    env_key: None,
+                    api_base_url: None,
+                },
+            );
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// 旧格式记录（只有 slug）：绝不许解析出任何端点。
+    /// 这一条在修复前是会失败的——旧的 .rev() 扫描会挑中目录里最后那条，
+    /// 也就是 glm-coding，于是用户明明配的是开放平台却发去了 coding 端点，
+    /// 反之亦然。现在它必须停在歧义上，一个端点都不选。
+    #[test]
+    fn legacy_slug_only_record_resolves_to_no_endpoint_at_all() {
+        let (models, available) = catalog();
+        match resolve_persisted_model(&models, &available, None, "glm-4.6") {
+            PersistedModelResolution::Ambiguous { candidates, .. } => {
+                let endpoints: Vec<_> =
+                    candidates.iter().map(|c| c.endpoint_label.as_str()).collect();
+                assert_eq!(endpoints.len(), 2, "两家都要列出来给用户选");
+            }
+            other => panic!(
+                "旧格式记录必须停在歧义，不得自行选出一个端点，实际: {other:?}"
+            ),
+        }
+    }
+
+    /// 新格式记录（带 catalog_model_id）：精确恢复到它自己的端点和 Key。
+    #[test]
+    fn new_format_record_restores_its_own_endpoint_and_key() {
+        let (models, available) = catalog();
+        for (key, want_base, want_key) in [
+            ("glm-coding", ZHIPU_CODING, "key-for-coding-plan"),
+            ("glm-open", ZHIPU_OPEN, "key-for-open-platform"),
+        ] {
+            let resolved =
+                match resolve_persisted_model(&models, &available, Some(key), "glm-4.6") {
+                    PersistedModelResolution::Exact(id) => id,
+                    other => panic!("{key} 必须精确恢复，实际: {other:?}"),
+                };
+            let entry = models.get(resolved.0.as_ref()).expect("key 必在目录中");
+            let creds = resolve_credentials(entry, None);
+            assert_eq!(creds.base_url, want_base);
+            assert_eq!(creds.api_key.as_deref(), Some(want_key));
+        }
+    }
+}
