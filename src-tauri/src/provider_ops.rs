@@ -928,7 +928,10 @@ mod switch_identity_patch_tests {
         );
     }
 
-    /// 唯一 slug 走兼容路径：归一化成 key 后写入（广播/持久化都用归一后的 key）。
+    /// 唯一 slug 走兼容路径：归一化成 key 后**持久化**。
+    /// 注意本函数只管持久化——共享 apply 的广播目前仍可能用原始 requested
+    /// slug，广播/handle/持久化三者统一到 canonical key 要等 apply_resolved
+    /// 拆分。文档不提前宣布未实现的行为。
     #[test]
     fn unique_slug_normalizes_to_its_key() {
         let (m, _a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
