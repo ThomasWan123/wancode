@@ -1827,3 +1827,79 @@ mod atomic_dual_identity_write_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// v0.18.6 步6b（RED）：首写双身份的**组装**也要有测试——字段各归其位。
+///
+/// Codex 第十六轮拒收步6的理由：存储层三条测试只证明 init_session 收到
+/// 正确的 (slug, key) 后能一次写入，没证明 new_session 真的传了正确的一对。
+/// 而生产代码恰好把两个字段写成了同一个 catalog key：current_model_id 的
+/// 语义是上游 slug，旧版本/同步端/一切只读该字段的消费者会把配置键当
+/// 上游模型名。组装逻辑抽成纯函数，用真实事故样本测。
+#[cfg(test)]
+mod initial_identity_assembly_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::initial_persisted_identity;
+
+    fn catalog_with(key: &str, slug: &str) -> IndexMap<String, ModelEntry> {
+        let mut models = IndexMap::new();
+        models.insert(
+            key.to_owned(),
+            ModelEntry {
+                info: ModelInfo::fallback(slug),
+                api_key: None,
+                env_key: None,
+                api_base_url: None,
+            },
+        );
+        models
+    }
+
+    /// 事故样本：entry key=glm-coding、slug=glm-4.6。
+    /// 首写必须是 (current=glm-4.6, catalog=Some(glm-coding))——各归其位，
+    /// 不是两个字段都写 key。
+    #[test]
+    fn key_and_slug_land_in_their_own_fields() {
+        let models = catalog_with("glm-coding", "glm-4.6");
+        let (current, catalog) = initial_persisted_identity(
+            &models,
+            &acp::ModelId::new("glm-coding"),
+            "glm-4.6",
+        );
+        assert_eq!(current, acp::ModelId::new("glm-4.6"), "current_model_id 是上游 slug");
+        assert_eq!(
+            catalog,
+            Some(acp::ModelId::new("glm-coding")),
+            "catalog_model_id 是配置键"
+        );
+    }
+
+    /// 运行时 id 不在目录里（目录拉取还没完成等）：key 留空不编造，
+    /// slug 仍取 sampling config 的——那是真正要发给上游的名字。
+    #[test]
+    fn unknown_runtime_id_leaves_the_key_empty() {
+        let models = catalog_with("glm-coding", "glm-4.6");
+        let (current, catalog) = initial_persisted_identity(
+            &models,
+            &acp::ModelId::new("vanished-model"),
+            "some-upstream-slug",
+        );
+        assert_eq!(current, acp::ModelId::new("some-upstream-slug"));
+        assert_eq!(catalog, None);
+    }
+
+    /// key 与 slug 字面相同（key=glm-4.6, slug=glm-4.6）：两个字段值相同是
+    /// 巧合而非混淆，key 照写——这份记录在同名字面值目录下恢复时靠它免于歧义。
+    #[test]
+    fn literal_coincidence_still_writes_the_key() {
+        let models = catalog_with("glm-4.6", "glm-4.6");
+        let (current, catalog) = initial_persisted_identity(
+            &models,
+            &acp::ModelId::new("glm-4.6"),
+            "glm-4.6",
+        );
+        assert_eq!(current, acp::ModelId::new("glm-4.6"));
+        assert_eq!(catalog, Some(acp::ModelId::new("glm-4.6")));
+    }
+}

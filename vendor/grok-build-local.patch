@@ -4112,10 +4112,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..8763689 100644
+index a1c9b68..337085f 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,479 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,501 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4299,6 +4299,28 @@ index a1c9b68..8763689 100644
 +        }
 +    };
 +    available.contains_key(&resolved).then_some(resolved)
++}
++
++/// The identity pair for a brand-new session's **first** Summary write.
++///
++/// Field semantics are the whole point (and were once violated by writing the
++/// catalog key into both): `current_model_id` is the *upstream slug* — the
++/// name actually sent over the wire, read by legacy loaders, sync peers, and
++/// anything else that predates `catalog_model_id` — while the key goes only
++/// into `catalog_model_id`. The slug comes from the sampling config because
++/// that is literally what the session is about to send; the key is written
++/// only when the catalog knows the runtime id exactly (an exact lookup, not a
++/// guess — for a custom model the runtime id *is* the strictly-resolved key).
++pub fn initial_persisted_identity(
++    models: &IndexMap<String, ModelEntry>,
++    runtime_model_id: &acp::ModelId,
++    sampling_model: &str,
++) -> (acp::ModelId, Option<acp::ModelId>) {
++    let current = acp::ModelId::new(sampling_model.to_owned());
++    let catalog = models
++        .contains_key(runtime_model_id.0.as_ref())
++        .then(|| runtime_model_id.clone());
++    (current, catalog)
 +}
 +
 +/// What the prompt handler should do after attempting a recovery.
@@ -4596,7 +4618,7 @@ index a1c9b68..8763689 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 78a8612..be7aef9 100644
+index 78a8612..0fc6b6f 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 @@ -906,34 +906,68 @@ impl acp::Agent for MvpAgent {
@@ -4712,28 +4734,35 @@ index 78a8612..be7aef9 100644
                      .unwrap_or_else(|| self.models_manager.current_model_id())
              }
          };
-@@ -1001,9 +1040,20 @@ impl acp::Agent for MvpAgent {
+@@ -1001,9 +1040,26 @@ impl acp::Agent for MvpAgent {
                          .current_or_expired()
                          .is_some_and(|a| a.is_zdr_team()),
                  });
-+            // The exact catalog key when we have one, in the very first
-+            // Summary write. `contains_key` is an exact check, not a guess:
-+            // for a custom model `model_id` already IS the canonical key
-+            // (resolved strictly above), and for the default model the
-+            // current id is a catalog key whenever the catalog knows it.
-+            let first_write_catalog_key = self
-+                .models_manager
-+                .models()
-+                .contains_key(model_id.0.as_ref())
-+                .then(|| model_id.clone());
++            // Both halves of the identity, each in its own field, in the very
++            // first write. `current_model_id` gets the sampling config's model
++            // — the upstream slug actually about to go over the wire, which is
++            // what every pre-`catalog_model_id` consumer expects there —
++            // NEVER the runtime key: an earlier revision wrote the key into
++            // both fields, which the new loader survives but legacy readers,
++            // sync peers, and anything else that treats `current_model_id` as
++            // an upstream model name does not. The catalog key is written only
++            // when the catalog knows the runtime id exactly (for a custom
++            // model that id IS the strictly-resolved key).
++            let (persisted_upstream_model, first_write_catalog_key) =
++                crate::agent::models::initial_persisted_identity(
++                    &self.models_manager.models(),
++                    &model_id,
++                    &session_sampling.model,
++                );
              crate::session::persistence::new(
                      &session_info,
-                     model_id,
+-                    model_id,
++                    persisted_upstream_model,
 +                    first_write_catalog_key,
                      summary_client,
                      self.storage_mode,
                      Some(self.auth_manager.clone()),
-@@ -1108,16 +1158,16 @@ impl acp::Agent for MvpAgent {
+@@ -1108,16 +1164,16 @@ impl acp::Agent for MvpAgent {
                  xai_grok_telemetry::session_ctx::log_event_dual(internal_gate_open, ev);
              });
          }
@@ -4757,7 +4786,7 @@ index 78a8612..be7aef9 100644
          }
          if let Some(requested) = disallowed_custom {
              let current = self.models_manager.current_model_id();
-@@ -1718,7 +1768,7 @@ impl acp::Agent for MvpAgent {
+@@ -1718,7 +1774,7 @@ impl acp::Agent for MvpAgent {
          let persisted_model = summary.current_model_id.clone();
          let models = self.models_manager.models();
          let available = self.models_manager.available();
@@ -4766,7 +4795,7 @@ index 78a8612..be7aef9 100644
          let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
          tracing::debug!(
              session_id = % session_id.0, persisted = % persisted_model.0,
-@@ -1734,12 +1784,32 @@ impl acp::Agent for MvpAgent {
+@@ -1734,12 +1790,32 @@ impl acp::Agent for MvpAgent {
          } else {
              available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
          };
@@ -4803,7 +4832,7 @@ index 78a8612..be7aef9 100644
              if catalog_key != persisted_model {
                  tracing::info!(
                      session_id = % session_id.0, persisted = % persisted_model.0,
-@@ -1757,7 +1827,50 @@ impl acp::Agent for MvpAgent {
+@@ -1757,7 +1833,50 @@ impl acp::Agent for MvpAgent {
                      ),
                  );
              }
@@ -4855,7 +4884,7 @@ index 78a8612..be7aef9 100644
          } else if available.is_empty() {
              tracing::warn!(
                  session_id = % session_id.0, persisted = % persisted_model.0,
-@@ -1772,7 +1885,7 @@ impl acp::Agent for MvpAgent {
+@@ -1772,7 +1891,7 @@ impl acp::Agent for MvpAgent {
                      ),
                  ),
              );
@@ -4864,7 +4893,7 @@ index 78a8612..be7aef9 100644
          } else if let Some(fallback) = same_family_fallback {
              tracing::warn!(
                  session_id = % session_id.0, previous = % persisted_model.0, new = %
-@@ -1790,7 +1903,7 @@ impl acp::Agent for MvpAgent {
+@@ -1790,7 +1909,7 @@ impl acp::Agent for MvpAgent {
                      &reason,
                  )
                  .await;
@@ -4873,7 +4902,7 @@ index 78a8612..be7aef9 100644
          } else {
              let fallback = available
                  .keys()
-@@ -1826,16 +1939,26 @@ impl acp::Agent for MvpAgent {
+@@ -1826,16 +1945,26 @@ impl acp::Agent for MvpAgent {
                      &reason,
                  )
                  .await;
@@ -4905,7 +4934,7 @@ index 78a8612..be7aef9 100644
              let _timer = crate::instrumentation_timer!("session.restore_model");
              let restore_meta = summary
                  .reasoning_effort
-@@ -1847,12 +1970,26 @@ impl acp::Agent for MvpAgent {
+@@ -1847,12 +1976,26 @@ impl acp::Agent for MvpAgent {
                      );
                      map
                  });
@@ -4938,7 +4967,7 @@ index 78a8612..be7aef9 100644
          }
          let mut response_meta_map = serde_json::Map::new();
          response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-@@ -2009,20 +2146,25 @@ impl acp::Agent for MvpAgent {
+@@ -2009,20 +2152,25 @@ impl acp::Agent for MvpAgent {
              return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
          }
          let latched_model = self
@@ -4973,7 +5002,7 @@ index 78a8612..be7aef9 100644
                  tracing::info!(
                      session_id = % arguments.session_id.0, model_id = % restore_model_id
                      .0,
-@@ -2035,28 +2177,54 @@ impl acp::Agent for MvpAgent {
+@@ -2035,28 +2183,54 @@ impl acp::Agent for MvpAgent {
                          serde_json::json!({ "model_id" : restore_model_id.0.as_ref(), }),
                      ),
                  );
@@ -5046,7 +5075,7 @@ index 78a8612..be7aef9 100644
                      available_keys = ? available.keys().take(10).collect::< Vec < _ >>
                      (),
                      "prompt blocked: session model unavailable since load and still missing from the catalog"
-@@ -2066,8 +2234,8 @@ impl acp::Agent for MvpAgent {
+@@ -2066,8 +2240,8 @@ impl acp::Agent for MvpAgent {
                      Some(arguments.session_id.0.as_ref()),
                      Some(
                          serde_json::json!(
@@ -5057,7 +5086,7 @@ index 78a8612..be7aef9 100644
                          ),
                      ),
                  );
-@@ -3119,25 +3287,50 @@ impl acp::Agent for MvpAgent {
+@@ -3119,25 +3293,50 @@ impl acp::Agent for MvpAgent {
          &self,
          args: acp::SetSessionModelRequest,
      ) -> Result<acp::SetSessionModelResponse, acp::Error> {
@@ -5404,33 +5433,33 @@ index 99e3801..0990fd2 100644
              request.x_grok_turn_idx =
                  Some(self.chat_state_handle.get_prompt_index().await.to_string());
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/cancel_running_task_tests.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/cancel_running_task_tests.rs
-index 79d90c8..cc64ab1 100644
+index 79d90c8..9bfde60 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/cancel_running_task_tests.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/cancel_running_task_tests.rs
-@@ -76,6 +76,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
+@@ -75,6 +75,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
+                 },
                  session_dir.clone(),
                  acp::ModelId::new("test-model"),
-                 sampling_client,
 +                None,
+                 sampling_client,
                  crate::test_support::TEST_MODEL.to_owned(),
              )
-             .await
-@@ -373,6 +374,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
+@@ -372,6 +373,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
+                 },
                  session_dir.path().to_path_buf(),
                  acp::ModelId::new("test-model"),
-                 sampling_client,
 +                None,
+                 sampling_client,
                  crate::test_support::TEST_MODEL.to_owned(),
              )
-             .await
-@@ -507,6 +509,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
+@@ -506,6 +508,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
+                 },
                  session_dir.path().to_path_buf(),
                  acp::ModelId::new("test-model"),
-                 sampling_client,
 +                None,
+                 sampling_client,
                  crate::test_support::TEST_MODEL.to_owned(),
              )
-             .await
 diff --git a/crates/codegen/xai-grok-shell/src/session/commands.rs b/crates/codegen/xai-grok-shell/src/session/commands.rs
 index 5df2285..99ad555 100644
 --- a/crates/codegen/xai-grok-shell/src/session/commands.rs
