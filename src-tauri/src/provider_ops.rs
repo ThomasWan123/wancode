@@ -683,9 +683,12 @@ mod model_identity_tests {
         );
     }
 
-    /// 绿色基线（非 RED，防回归）：按 config key 直取条目，端点始终是它自己的。
-    /// 主切换路径是 entry-carried（`prepare_sampling_config_for_model` 收 ModelEntry），
-    /// 本来就正确——修持久化时不得把它破坏。
+    /// 轻量特征测试（按 Codex gate 1 重新定位）：仅证明目录条目各自携带自己的
+    /// base_url，**不构成主路由保护**——它证明不了
+    /// `setModel → resolve_model_id → prepare_sampling_config_for_model → base_url/credentials`
+    /// 这条真实链路未被破坏（那只是 IndexMap::get 能用）。主路由保护由双 mock
+    /// 端点集成测试承担：正确端点收到 1 次请求且拿到对应 Key，错误端点 0 次
+    /// 请求且绝不收到另一个 Key——列为 v0.18.6 合并硬门槛。
     #[test]
     fn direct_key_lookup_keeps_its_own_endpoint() {
         let (models, _) = dup_slug_catalog();
@@ -697,5 +700,41 @@ mod model_identity_tests {
             models.get("zhipu-glm").unwrap().info.base_url,
             "https://open.bigmodel.cn/api/paas/v4"
         );
+    }
+}
+
+/// Gate 4（Codex 复核）：端点标签脱敏必须被测试钉死——原先的测试数据里
+/// 根本没有 userinfo，等于「实现声称脱敏、测试从未验证」。
+#[cfg(test)]
+mod endpoint_label_redaction_tests {
+    use xai_grok_shell::agent::models::endpoint_authority_label;
+
+    /// URL 里嵌了凭据、路径、查询、片段——标签只能留 authority。
+    /// 同时覆盖 IPv6 + 端口：UI 需要 `localhost:9999` 这类可区分的标签，
+    /// 所以保留端口是有意为之（函数因此叫 authority 而非 host）。
+    #[test]
+    fn userinfo_path_query_fragment_are_all_stripped() {
+        let label = endpoint_authority_label("https://user:pass@[::1]:9999/path?q=secret#frag");
+        assert_eq!(label, "[::1]:9999");
+        for leaked in ["user", "pass", "path", "secret", "frag", "http", "/", "?", "#", "@"] {
+            assert!(
+                !label.contains(leaked),
+                "端点标签泄漏了 {leaked:?}：{label}（凭据/路径绝不能进 UI）"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_https_keeps_host_and_drops_path() {
+        assert_eq!(
+            endpoint_authority_label("https://open.bigmodel.cn/api/paas/v4"),
+            "open.bigmodel.cn"
+        );
+    }
+
+    /// 端口保留（同主机不同代理端口需可区分）。
+    #[test]
+    fn port_is_kept_for_disambiguation() {
+        assert_eq!(endpoint_authority_label("http://localhost:9999/v1"), "localhost:9999");
     }
 }
