@@ -1027,7 +1027,6 @@ mod literal_name_collision_tests {
     use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
     use xai_grok_shell::agent::models::{
         resolve_persisted_model, resolve_requested_model, PersistedModelResolution,
-        ModelSelectionError,
     };
 
     fn entry(slug: &str, base_url: &str, selectable: bool) -> ModelEntry {
@@ -1319,5 +1318,127 @@ mod ambiguity_spans_full_catalog_tests {
             resolve_persisted_model(&models, &available, None, "grok-internal"),
             PersistedModelResolution::Migrated(acp::ModelId::new("hidden-only"))
         );
+    }
+}
+
+/// v0.18.6 步4（RED）：被阻塞的会话如何解锁。
+///
+/// Codex 第十一轮抓到的新 P0：歧义会话虽然在加载时被挂起，但 prompt 路径
+/// 用旧的 last-wins 解析器自动解锁——第一次发消息就重新猜一次，并且这次
+/// 会被 apply_resolved 固化成权威身份。我上一轮"历史可读、暂停发送、等待
+/// 用户选择"的说法因此是假的。
+///
+/// 解锁决策抽成纯函数，两类阻塞共用同一条解析路径，旧 last-wins 彻底出局。
+#[cfg(test)]
+mod blocked_session_recovery_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{
+        recover_blocked_model, ModelCandidate, ModelSessionBlock,
+    };
+
+    fn entry(slug: &str, base: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base.to_owned();
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn catalog(
+        entries: &[(&str, &str, &str)],
+    ) -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        for (key, slug, base) in entries {
+            models.insert((*key).to_owned(), entry(slug, base));
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    fn ambiguous_block() -> ModelSessionBlock {
+        ModelSessionBlock::Ambiguous {
+            requested: "glm-4.6".to_owned(),
+            candidates: vec![
+                ModelCandidate {
+                    id: "zhipu".to_owned(),
+                    name: "zhipu".to_owned(),
+                    endpoint_label: "open.bigmodel.cn".to_owned(),
+                    selectable: true,
+                },
+                ModelCandidate {
+                    id: "proxy".to_owned(),
+                    name: "proxy".to_owned(),
+                    endpoint_label: "llm.corp".to_owned(),
+                    selectable: true,
+                },
+            ],
+        }
+    }
+
+    /// 核心一条：歧义仍然存在时，发消息绝不能把锁解开。
+    #[test]
+    fn ambiguous_block_survives_a_prompt_while_still_ambiguous() {
+        let (m, a) = catalog(&[
+            ("zhipu", "glm-4.6", "https://open.bigmodel.cn/v1"),
+            ("proxy", "glm-4.6", "https://llm.corp/v1"),
+        ]);
+        assert_eq!(
+            recover_blocked_model(&m, &a, &ambiguous_block()),
+            None,
+            "第一次 prompt 不得靠 last-wins 自行解锁——那正是原始事故"
+        );
+    }
+
+    /// 目录变了、slug 在全目录里变成唯一，这时解锁不是猜，可以放行。
+    #[test]
+    fn ambiguous_block_clears_once_the_catalog_makes_it_unique() {
+        let (m, a) = catalog(&[("zhipu", "glm-4.6", "https://open.bigmodel.cn/v1")]);
+        assert_eq!(
+            recover_blocked_model(&m, &a, &ambiguous_block()),
+            Some(acp::ModelId::new("zhipu"))
+        );
+    }
+
+    /// 不可用类阻塞的复查同样必须走新解析器：slug 仍对应多条时不许挑一个。
+    #[test]
+    fn unavailable_block_never_falls_back_to_last_wins() {
+        let (m, a) = catalog(&[
+            ("zhipu", "glm-4.6", "https://open.bigmodel.cn/v1"),
+            ("proxy", "glm-4.6", "https://llm.corp/v1"),
+        ]);
+        let block = ModelSessionBlock::Unavailable {
+            persisted_model: acp::ModelId::new("glm-4.6"),
+        };
+        assert_eq!(recover_blocked_model(&m, &a, &block), None);
+    }
+
+    /// 模型真的回来了、且唯一，才自动恢复。
+    #[test]
+    fn unavailable_block_recovers_when_the_model_is_back_and_unique() {
+        let (m, a) = catalog(&[("zhipu", "glm-4.6", "https://open.bigmodel.cn/v1")]);
+        let block = ModelSessionBlock::Unavailable {
+            persisted_model: acp::ModelId::new("glm-4.6"),
+        };
+        assert_eq!(
+            recover_blocked_model(&m, &a, &block),
+            Some(acp::ModelId::new("zhipu"))
+        );
+    }
+
+    /// 解析得到的 key 当前不可选时不放行——恢复要的是"现在能用"。
+    #[test]
+    fn recovery_requires_the_model_to_be_usable_now() {
+        let (m, _) = catalog(&[("zhipu", "glm-4.6", "https://open.bigmodel.cn/v1")]);
+        let empty: IndexMap<acp::ModelId, acp::ModelInfo> = IndexMap::new();
+        let block = ModelSessionBlock::Unavailable {
+            persisted_model: acp::ModelId::new("glm-4.6"),
+        };
+        assert_eq!(recover_blocked_model(&m, &empty, &block), None);
     }
 }

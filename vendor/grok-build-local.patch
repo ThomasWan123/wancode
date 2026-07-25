@@ -4097,10 +4097,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..2aa8e7d 100644
+index a1c9b68..8430af8 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,401 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,451 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4234,6 +4234,56 @@ index a1c9b68..2aa8e7d 100644
 +                .collect(),
 +        },
 +    }
++}
++
++/// Why a session cannot prompt yet. The two reasons are kept apart because
++/// they were once the same untyped map entry, and sharing it meant an
++/// *ambiguous* session was auto-recovered by the *unavailable* path — with the
++/// old last-wins scan, so the first message re-guessed the model and had that
++/// guess written back as authoritative identity.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ModelSessionBlock {
++    /// The model this session ran on is gone from the catalog.
++    Unavailable { persisted_model: acp::ModelId },
++    /// The persisted id maps to several entries; only the user can say which.
++    Ambiguous {
++        requested: String,
++        candidates: Vec<ModelCandidate>,
++    },
++}
++
++impl ModelSessionBlock {
++    /// The id to re-check the catalog with.
++    pub fn persisted_id(&self) -> &str {
++        match self {
++            Self::Unavailable { persisted_model } => persisted_model.0.as_ref(),
++            Self::Ambiguous { requested, .. } => requested.as_str(),
++        }
++    }
++}
++
++/// Can a blocked session be released without asking the user?
++///
++/// Both block kinds run the same check, which is the point: recovery is
++/// allowed only when the catalog now answers the question *exactly* — a slug
++/// unique across the whole catalog, resolving to a model that is usable right
++/// now. Anything else keeps the block. Notably an ambiguous session is not
++/// special-cased into permanent limbo either: if the duplicate entry is
++/// removed from config, the id becomes unique and the session simply resumes.
++pub fn recover_blocked_model(
++    models: &IndexMap<String, ModelEntry>,
++    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
++    block: &ModelSessionBlock,
++) -> Option<acp::ModelId> {
++    let resolved = match resolve_persisted_model(models, available, None, block.persisted_id()) {
++        PersistedModelResolution::Exact(id) | PersistedModelResolution::Migrated(id) => id,
++        // Still ambiguous, or still gone. Either way there is nothing to
++        // recover to that is not a guess.
++        PersistedModelResolution::Ambiguous { .. } | PersistedModelResolution::NotFound => {
++            return None;
++        }
++    };
++    available.contains_key(&resolved).then_some(resolved)
 +}
 +
 +/// A model the user asked for, resolved once into both halves of its identity.
@@ -4503,7 +4553,7 @@ index a1c9b68..2aa8e7d 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 78a8612..3e512c5 100644
+index 78a8612..c25e7a0 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 @@ -906,34 +906,68 @@ impl acp::Agent for MvpAgent {
@@ -4680,7 +4730,7 @@ index 78a8612..3e512c5 100644
              if catalog_key != persisted_model {
                  tracing::info!(
                      session_id = % session_id.0, persisted = % persisted_model.0,
-@@ -1757,7 +1816,44 @@ impl acp::Agent for MvpAgent {
+@@ -1757,7 +1816,50 @@ impl acp::Agent for MvpAgent {
                      ),
                  );
              }
@@ -4721,12 +4771,18 @@ index 78a8612..3e512c5 100644
 +                .await;
 +            self.model_unavailable_sessions
 +                .borrow_mut()
-+                .insert(session_id.0.to_string(), persisted_model.clone());
++                .insert(
++                    session_id.0.to_string(),
++                    crate::agent::models::ModelSessionBlock::Ambiguous {
++                        requested: persisted_model.0.to_string(),
++                        candidates,
++                    },
++                );
 +            None
          } else if available.is_empty() {
              tracing::warn!(
                  session_id = % session_id.0, persisted = % persisted_model.0,
-@@ -1772,7 +1868,7 @@ impl acp::Agent for MvpAgent {
+@@ -1772,7 +1874,7 @@ impl acp::Agent for MvpAgent {
                      ),
                  ),
              );
@@ -4735,7 +4791,7 @@ index 78a8612..3e512c5 100644
          } else if let Some(fallback) = same_family_fallback {
              tracing::warn!(
                  session_id = % session_id.0, previous = % persisted_model.0, new = %
-@@ -1790,7 +1886,7 @@ impl acp::Agent for MvpAgent {
+@@ -1790,7 +1892,7 @@ impl acp::Agent for MvpAgent {
                      &reason,
                  )
                  .await;
@@ -4744,11 +4800,18 @@ index 78a8612..3e512c5 100644
          } else {
              let fallback = available
                  .keys()
-@@ -1829,13 +1925,18 @@ impl acp::Agent for MvpAgent {
+@@ -1828,14 +1930,24 @@ impl acp::Agent for MvpAgent {
+                 .await;
              self.model_unavailable_sessions
                  .borrow_mut()
-                 .insert(session_id.0.to_string(), persisted_model.clone());
+-                .insert(session_id.0.to_string(), persisted_model.clone());
 -            fallback
++                .insert(
++                    session_id.0.to_string(),
++                    crate::agent::models::ModelSessionBlock::Unavailable {
++                        persisted_model: persisted_model.clone(),
++                    },
++                );
 +            Some(fallback)
          };
          tracing::debug!(
@@ -4766,7 +4829,7 @@ index 78a8612..3e512c5 100644
              let _timer = crate::instrumentation_timer!("session.restore_model");
              let restore_meta = summary
                  .reasoning_effort
-@@ -1847,12 +1948,26 @@ impl acp::Agent for MvpAgent {
+@@ -1847,12 +1959,26 @@ impl acp::Agent for MvpAgent {
                      );
                      map
                  });
@@ -4799,7 +4862,37 @@ index 78a8612..3e512c5 100644
          }
          let mut response_meta_map = serde_json::Map::new();
          response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-@@ -2038,20 +2153,30 @@ impl acp::Agent for MvpAgent {
+@@ -2013,16 +2139,21 @@ impl acp::Agent for MvpAgent {
+             .borrow()
+             .get(arguments.session_id.0.as_ref())
+             .cloned();
+-        if let Some(unavailable_model) = latched_model {
++        if let Some(block) = latched_model {
+             let models = self.models_manager.models();
+             let available = self.models_manager.available();
+-            let restore_model_id = selectable_catalog_key_for_persisted(
+-                    &models,
+-                    &available,
+-                    &unavailable_model,
+-                )
+-                .unwrap_or(unavailable_model.clone());
+-            if available.contains_key(&restore_model_id) {
++            // Recovery is allowed only when the catalog now answers exactly.
++            // This used to be `selectable_catalog_key_for_persisted`, a
++            // last-wins scan, which meant the very first message after loading
++            // an ambiguous session re-guessed the model — and `apply_resolved`
++            // then wrote that guess down as authoritative identity. Holding the
++            // block is the whole point of having set it.
++            let recovered = crate::agent::models::recover_blocked_model(
++                &models,
++                &available,
++                &block,
++            );
++            if let Some(restore_model_id) = recovered {
+                 tracing::info!(
+                     session_id = % arguments.session_id.0, model_id = % restore_model_id
+                     .0,
+@@ -2038,25 +2169,35 @@ impl acp::Agent for MvpAgent {
                  self.model_unavailable_sessions
                      .borrow_mut()
                      .remove(arguments.session_id.0.as_ref());
@@ -4844,7 +4937,25 @@ index 78a8612..3e512c5 100644
                  }
              } else {
                  tracing::warn!(
-@@ -3119,15 +3244,40 @@ impl acp::Agent for MvpAgent {
+-                    session_id = % arguments.session_id.0, unavailable_model = %
+-                    unavailable_model.0, available_count = available.len(),
++                    session_id = % arguments.session_id.0, blocked_on = % block
++                    .persisted_id(), available_count = available.len(),
+                     available_keys = ? available.keys().take(10).collect::< Vec < _ >>
+                     (),
+                     "prompt blocked: session model unavailable since load and still missing from the catalog"
+@@ -2066,8 +2207,8 @@ impl acp::Agent for MvpAgent {
+                     Some(arguments.session_id.0.as_ref()),
+                     Some(
+                         serde_json::json!(
+-                            { "unavailable_model" : unavailable_model.0.as_ref(),
+-                            "available_count" : available.len(), }
++                            { "blocked_on" : block.persisted_id(), "available_count"
++                            : available.len(), }
+                         ),
+                     ),
+                 );
+@@ -3119,15 +3260,40 @@ impl acp::Agent for MvpAgent {
          &self,
          args: acp::SetSessionModelRequest,
      ) -> Result<acp::SetSessionModelResponse, acp::Error> {
@@ -4893,6 +5004,19 @@ index 78a8612..3e512c5 100644
          if res.is_ok()
              && let Some(unavailable) = self
                  .model_unavailable_sessions
+@@ -3135,9 +3301,9 @@ impl acp::Agent for MvpAgent {
+                 .remove(session_id.0.as_ref())
+         {
+             tracing::info!(
+-                session_id = % session_id.0, previously_unavailable_model = % unavailable
+-                .0,
+-                "set_session_model: user model switch cleared the model-unavailable block"
++                session_id = % session_id.0, previously_blocked_on = % unavailable
++                .persisted_id(),
++                "set_session_model: explicit user model choice cleared the block"
+             );
+         }
+         res
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
 index 8ced66a..63f4607 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
@@ -4925,6 +5049,29 @@ index 8ced66a..63f4607 100644
                      agent_name: Some(agent_definition.name.clone()),
                      reasoning_effort: initial_reasoning_effort,
                  });
+diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+index 1afd3a2..c8692d2 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+@@ -55,7 +55,7 @@ use crate::agent::auth_method;
+ use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_credentials};
+ use crate::agent::feedback_client::FeedbackClient;
+ use crate::agent::folder_trust;
+-use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
++use crate::agent::models::resolve_catalog_key;
+ use crate::agent::session_config;
+ use xai_grok_sampling_types::{
+     REASONING_EFFORT_META_KEY, ReasoningEffortOption, reasoning_effort_meta_value,
+@@ -773,7 +773,8 @@ pub struct MvpAgent {
+     /// fetch still in flight after a leader restart), so the prompt path
+     /// re-checks and self-heals — or (b) the user explicitly switches
+     /// models via `set_session_model`.
+-    model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
++    model_unavailable_sessions:
++        RefCell<std::collections::HashMap<String, crate::agent::models::ModelSessionBlock>>,
+     /// Unified sender for all subagent coordinator events.
+     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
+     subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 index fde3dea..df60fb2 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
