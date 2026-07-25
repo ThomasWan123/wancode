@@ -75,6 +75,15 @@ jobs:
         # --no-deps：-D warnings 只对 wancode 自身生效。引擎是固定 commit 的
         # 上游代码，自带若干 clippy 警告，不该由我们的 CI 拦截。
         run: cargo clippy -p wancode --lib --no-deps -- -D warnings
+      # Gate 1：证明"选中某模型"的请求确实落在该模型自己的端点上、带自己的
+      # Key。断言是请求计数（正确端点 1 次、错误端点 0 次）与 Authorization
+      # 头，不是对代码路径的推理。跑在引擎目录，与克隆步同一套路径推导。
+      - name: Gate 1 引擎侧路由证据（双 mock 端点）
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          Set-Location $engine
+          cargo test -p xai-grok-shell --test model_endpoint_routing
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
         run: cargo test -p wancode --lib --test engine_canary

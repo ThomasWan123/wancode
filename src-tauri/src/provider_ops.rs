@@ -1530,15 +1530,18 @@ mod endpoint_and_key_isolation_tests {
     const ZHIPU_OPEN: &str = "https://open.bigmodel.cn/api/paas/v4";
     const ZHIPU_CODING: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 
+    const OPEN: (&str, &str, &str) = ("glm-open", ZHIPU_OPEN, "key-for-open-platform");
+    const CODING: (&str, &str, &str) = ("glm-coding", ZHIPU_CODING, "key-for-coding-plan");
+
     /// 两个条目共享上游 slug `glm-4.6`，但端点与 Key 完全不同——正是事故里
     /// "开放平台 vs Coding Plan"那对，两者的 Key 互不通用，串台即 401。
-    fn crossover_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>)
-    {
+    /// 插入顺序由参数决定：last-wins 的症状就是"排最后的那个赢"，不把顺序
+    /// 真的换过来，就谈不上验证过顺序无关。
+    fn crossover_catalog(
+        order: [(&str, &str, &str); 2],
+    ) -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
         let mut models = IndexMap::new();
-        for (key, base, api_key) in [
-            ("glm-open", ZHIPU_OPEN, "key-for-open-platform"),
-            ("glm-coding", ZHIPU_CODING, "key-for-coding-plan"),
-        ] {
+        for (key, base, api_key) in order {
             let mut info = ModelInfo::fallback("glm-4.6");
             info.base_url = base.to_owned();
             models.insert(
@@ -1561,22 +1564,24 @@ mod endpoint_and_key_isolation_tests {
         (models, available)
     }
 
-    fn route(key: &str) -> (String, Option<String>, String) {
-        let (models, available) = crossover_catalog();
+    /// 断言的是 **SamplerConfig 自己的字段**，不是它上游那份 ResolvedCredentials
+    /// 的副本。之前我读的是副本，等于 sampling_config_for_model 把端点或 Key
+    /// 写错了测试也照样绿——那是假覆盖。
+    fn route(order: [(&str, &str, &str); 2], key: &str) -> (String, Option<String>, String) {
+        let (models, available) = crossover_catalog(order);
         let selection = resolve_requested_model(&models, &available, key)
             .unwrap_or_else(|e| panic!("{key} 必须能精确解析: {e:?}"));
         let creds = resolve_credentials(selection.entry(), None);
-        let (base_url, api_key) = (creds.base_url.clone(), creds.api_key.clone());
         let sampling =
             sampling_config_for_model(selection.entry(), creds, None, None, None, None);
-        (base_url, api_key, sampling.model)
+        (sampling.base_url, sampling.api_key, sampling.model)
     }
 
     /// 选 Coding Plan：必须发往 coding 端点、带 coding 的 Key，
     /// 且绝不能出现开放平台那一方的任何东西。
     #[test]
     fn choosing_coding_plan_never_leaks_into_the_open_platform_entry() {
-        let (base_url, api_key, model) = route("glm-coding");
+        let (base_url, api_key, model) = route([OPEN, CODING], "glm-coding");
         assert_eq!(base_url, ZHIPU_CODING);
         assert_eq!(api_key.as_deref(), Some("key-for-coding-plan"));
         assert_ne!(base_url, ZHIPU_OPEN, "端点串台——这正是用户报的那个 bug");
@@ -1592,7 +1597,7 @@ mod endpoint_and_key_isolation_tests {
     /// 反方向同样成立。只测一个方向正是我前几轮反复犯的错。
     #[test]
     fn choosing_open_platform_never_leaks_into_the_coding_entry() {
-        let (base_url, api_key, model) = route("glm-open");
+        let (base_url, api_key, model) = route([OPEN, CODING], "glm-open");
         assert_eq!(base_url, ZHIPU_OPEN);
         assert_eq!(api_key.as_deref(), Some("key-for-open-platform"));
         assert_ne!(base_url, ZHIPU_CODING);
@@ -1600,14 +1605,29 @@ mod endpoint_and_key_isolation_tests {
         assert_eq!(model, "glm-4.6");
     }
 
-    /// 目录顺序不得影响路由。旧 last-wins 的症状就是"排最后的那个赢"，
-    /// 把顺序倒过来仍然各走各的，才说明结果来自 entry 而不是位置。
+    /// 目录顺序不得影响路由——这次真的把顺序换过来。
+    ///
+    /// 上一版这条测试两次调用的是同一个目录，插入顺序根本没变，只不过再次
+    /// 证明了两个 key 不相等；名字写了顺序，测试里没有顺序。last-wins 恰恰
+    /// 只在顺序变化时露出马脚，所以那是最不该省的一维。
     #[test]
-    fn routing_is_independent_of_catalog_order() {
-        let (a_base, a_key, _) = route("glm-coding");
-        let (b_base, b_key, _) = route("glm-open");
-        assert_ne!(a_base, b_base);
-        assert_ne!(a_key, b_key);
+    fn routing_is_identical_under_both_catalog_orders() {
+        for key in ["glm-coding", "glm-open"] {
+            let forward = route([OPEN, CODING], key);
+            let reversed = route([CODING, OPEN], key);
+            assert_eq!(
+                forward, reversed,
+                "{key} 的路由随目录顺序变了——说明结果来自位置而不是 entry"
+            );
+        }
+        // 并且两个 key 在任一顺序下都各走各的，没有并到同一端点。
+        for order in [[OPEN, CODING], [CODING, OPEN]] {
+            let (c_base, c_key, _) = route(order, "glm-coding");
+            let (o_base, o_key, _) = route(order, "glm-open");
+            assert_eq!(c_base, ZHIPU_CODING);
+            assert_eq!(o_base, ZHIPU_OPEN);
+            assert_ne!(c_key, o_key);
+        }
     }
 }
 
