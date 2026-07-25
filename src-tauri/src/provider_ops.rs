@@ -1110,3 +1110,149 @@ mod literal_name_collision_tests {
         );
     }
 }
+
+/// v0.18.6 步2b（RED）：歧义必须是**结构化** ACP 错误。
+///
+/// Codex 的理由是产品性的，不是洁癖：前端要做"加载历史但暂停发送、要求
+/// 用户选模型"的 UX，就必须从错误里拿到候选列表。一句人话 message 前端
+/// 只能弹个提示，做不了选择器。
+#[cfg(test)]
+mod ambiguous_error_shape_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{
+        resolve_requested_model, AmbiguousModelError, ModelSelectionError, MODEL_AMBIGUOUS,
+    };
+
+    fn dup_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        // 两个 key 都不等于 slug，确保走到歧义分支而非精确 key 命中
+        for (key, base) in [
+            ("zhipu", "https://user:s3cret@open.bigmodel.cn/api/coding/paas/v4?token=abc"),
+            ("proxy", "https://llm.corp.internal:8443/v1"),
+        ] {
+            let mut info = ModelInfo::fallback("glm-4.6");
+            info.base_url = base.to_owned();
+            info.name = Some(format!("GLM 4.6 ({key})"));
+            models.insert(
+                key.to_owned(),
+                ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
+            );
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    #[test]
+    fn ambiguous_carries_candidates_the_frontend_can_render() {
+        let (m, a) = dup_catalog();
+        let err = resolve_requested_model(&m, &a, "glm-4.6").expect_err("重复 slug 必须失败");
+        let parsed = AmbiguousModelError::from_acp_error(&err.into_acp_error())
+            .expect("歧义必须是结构化载荷，不能只是一句 message");
+        assert_eq!(parsed.code, MODEL_AMBIGUOUS);
+        assert_eq!(parsed.requested, "glm-4.6");
+        let labels: Vec<_> = parsed
+            .candidates
+            .iter()
+            .map(|c| (c.id.as_str(), c.endpoint_label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("zhipu", "open.bigmodel.cn"),
+                ("proxy", "llm.corp.internal:8443"),
+            ],
+            "候选必须带可区分的端点标签——用户正是靠它分辨同名模型"
+        );
+    }
+
+    /// 端点标签是要显示给用户、也要进日志的，绝不能把凭据带出来。
+    #[test]
+    fn structured_payload_never_leaks_credentials_or_query() {
+        let (m, a) = dup_catalog();
+        let err = resolve_requested_model(&m, &a, "glm-4.6").unwrap_err();
+        let json = serde_json::to_string(&match err {
+            ModelSelectionError::Ambiguous { requested, candidates } => {
+                AmbiguousModelError::new(requested, candidates)
+            }
+            other => panic!("expected ambiguous, got {other:?}"),
+        })
+        .unwrap();
+        for leak in ["s3cret", "token=abc", "user:", "/api/coding"] {
+            assert!(!json.contains(leak), "结构化载荷泄漏了 {leak}: {json}");
+        }
+    }
+
+    /// 未知模型不是歧义——不能把两种失败混成一个码，否则前端会对着空候选
+    /// 列表弹选择器。
+    #[test]
+    fn unknown_model_is_not_reported_as_ambiguous() {
+        let (m, a) = dup_catalog();
+        let err = resolve_requested_model(&m, &a, "no-such-model").unwrap_err();
+        assert!(matches!(err, ModelSelectionError::Unknown(_)));
+        assert!(AmbiguousModelError::from_acp_error(&err.into_acp_error()).is_none());
+    }
+}
+
+/// v0.18.6 步2c：原子解析——key 与 entry 必须同时来自同一条目。
+///
+/// 这是 apply_resolved 存在的全部理由。旧路径分两步取（resolve_model_id 拿
+/// entry、另一处 resolve_catalog_key 拿 key），两步用不同的匹配规则
+/// （first-match vs last-wins），重复 slug 下就能取出 A 的 key 配 B 的 entry
+/// ——也就是"选中模型 X，请求却发往 Y 的端点"。
+#[cfg(test)]
+mod atomic_resolution_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::resolve_trusted_model;
+
+    fn catalog() -> IndexMap<String, ModelEntry> {
+        let mut m = IndexMap::new();
+        for (key, slug, base) in [
+            ("glm-coding", "glm-4.6", "https://open.bigmodel.cn/api/coding/paas/v4"),
+            ("glm-open", "glm-4.6", "https://open.bigmodel.cn/api/paas/v4"),
+            ("solo", "deepseek-chat", "https://api.deepseek.com"),
+        ] {
+            let mut info = ModelInfo::fallback(slug);
+            info.base_url = base.to_owned();
+            m.insert(
+                key.to_owned(),
+                ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
+            );
+        }
+        m
+    }
+
+    /// 精确 key 必须连带它**自己**的 entry —— 这正是 v0.18.5 那个 bug 的形状：
+    /// 选 Coding Plan 端点，请求却发到开放平台端点。
+    #[test]
+    fn exact_key_carries_its_own_endpoint_not_a_slug_sibling() {
+        let sel = resolve_trusted_model(&catalog(), "glm-coding").expect("精确 key");
+        assert_eq!(sel.catalog_key, acp::ModelId::new("glm-coding"));
+        assert_eq!(sel.entry.info.base_url, "https://open.bigmodel.cn/api/coding/paas/v4");
+        assert_eq!(sel.entry.info.model, "glm-4.6", "上游 slug 仍是共享的那个");
+    }
+
+    #[test]
+    fn unique_slug_carries_the_matching_entry() {
+        let sel = resolve_trusted_model(&catalog(), "deepseek-chat").expect("唯一 slug");
+        assert_eq!(sel.catalog_key, acp::ModelId::new("solo"));
+        assert_eq!(sel.entry.info.base_url, "https://api.deepseek.com");
+    }
+
+    /// 重复 slug 返回 None 而不是随便挑一个：内部路径宁可退回默认模型，
+    /// 也不能把一次抛硬币当成身份写进会话。
+    #[test]
+    fn duplicate_slug_yields_none_never_a_coin_flip() {
+        assert!(resolve_trusted_model(&catalog(), "glm-4.6").is_none());
+        assert!(resolve_trusted_model(&catalog(), "nope").is_none());
+    }
+}
