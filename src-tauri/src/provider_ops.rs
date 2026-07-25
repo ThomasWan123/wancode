@@ -861,3 +861,87 @@ mod model_selection_tests {
         );
     }
 }
+
+/// v0.18.6 步1c（RED）：切断"猜测 → 权威身份"这条链。
+///
+/// 953b50e 把 last-wins 的 resolve_catalog_key 结果直接持久化成
+/// catalog_model_id。原来每次恢复都是"临时猜错"，那样一改就变成"猜测被写成
+/// 权威记录"——危害升级。修复原则：**绝不持久化猜测**。请求无法唯一识别时
+/// 清除身份（回落 slug 解析，会去问用户），而不是发明一个。
+///
+/// 注意这只决定"持久化什么"，刻意不拦截切换本身——共享 apply 是 ungated
+/// 底层，new_session/load_session 直接调用它，内部隐藏模型必须继续可用。
+#[cfg(test)]
+mod switch_identity_patch_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{catalog_patch_for_switch, CatalogModelPatch};
+
+    fn entry(slug: &str, base_url: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn catalog(
+        pairs: &[(&str, &str, &str)],
+    ) -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        for (key, slug, url) in pairs {
+            models.insert((*key).to_owned(), entry(slug, url));
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// 明确的 key → 写入该身份。
+    #[test]
+    fn unambiguous_request_sets_its_key() {
+        let (m, a) = catalog(&[
+            ("zhipu-glm", "glm-4.6", "https://open.bigmodel.cn/api/paas/v4"),
+            ("my-test-model", "glm-4.6", "https://api.company.com/v1"),
+        ]);
+        assert_eq!(
+            catalog_patch_for_switch(&m, &a, "my-test-model"),
+            CatalogModelPatch::Set(acp::ModelId::new("my-test-model"))
+        );
+    }
+
+    /// RED 核心：重复 slug 绝不写入猜出来的 key——必须 Clear。
+    #[test]
+    fn ambiguous_slug_never_persists_a_guess() {
+        let (m, a) = catalog(&[
+            ("zhipu-glm", "glm-4.6", "https://open.bigmodel.cn/api/paas/v4"),
+            ("my-test-model", "glm-4.6", "https://api.company.com/v1"),
+        ]);
+        assert_eq!(
+            catalog_patch_for_switch(&m, &a, "glm-4.6"),
+            CatalogModelPatch::Clear,
+            "重复 slug 时写入任一 key 都是把猜测洗成权威身份"
+        );
+    }
+
+    /// 唯一 slug 走兼容路径：归一化成 key 后写入（广播/持久化都用归一后的 key）。
+    #[test]
+    fn unique_slug_normalizes_to_its_key() {
+        let (m, a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
+        assert_eq!(
+            catalog_patch_for_switch(&m, &a, "glm-4.6"),
+            CatalogModelPatch::Set(acp::ModelId::new("only"))
+        );
+    }
+
+    /// 未知 id：清除而非保留陈旧身份。
+    #[test]
+    fn unknown_request_clears_stale_identity() {
+        let (m, a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
+        assert_eq!(catalog_patch_for_switch(&m, &a, "nope"), CatalogModelPatch::Clear);
+    }
+}

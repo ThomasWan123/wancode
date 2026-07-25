@@ -3995,26 +3995,27 @@ index 662052d..f39e7b4 100644
      pub created: u64,
      pub model: String,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
-index 2d4043a..edcb1fb 100644
+index 2d4043a..d8a0df4 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
-@@ -32,6 +32,15 @@ pub(crate) async fn apply(
+@@ -32,6 +32,16 @@ pub(crate) async fn apply(
          .await
          .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
      let model = agent.resolve_model_id(&model_id)?;
-+    // Identity for persistence/UI. The requested id may be a legacy routing
-+    // slug; resolving it to the catalog key here is what stops a restored
-+    // session from re-resolving the slug later and landing on a different
-+    // entry's endpoint.
-+    let catalog_model_id = crate::agent::models::resolve_catalog_key(
++    // Identity to persist. Strict: an ambiguous or unknown request yields
++    // `Clear`, never a guessed key — persisting a `.rev()` coin flip would
++    // launder it into authoritative identity, which is worse than the
++    // ambiguity it hides. This decides persistence only; the switch itself
++    // stays ungated so internal (non-selectable) models keep working.
++    let catalog_model_id = crate::agent::models::catalog_patch_for_switch(
 +        &agent.models_manager.models(),
-+        &model_id,
-+    )
-+    .unwrap_or_else(|| model_id.clone());
++        &agent.models_manager.available(),
++        model_id.0.as_ref(),
++    );
      let use_concise = model.info().use_concise;
      let session_default = handle
          .session_default_agent_profile
-@@ -191,6 +200,7 @@ pub(crate) async fn apply(
+@@ -191,6 +201,7 @@ pub(crate) async fn apply(
      };
      let (tx, rx) = oneshot::channel();
      let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
@@ -4023,10 +4024,10 @@ index 2d4043a..edcb1fb 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..47fc562 100644
+index a1c9b68..bd8bc6c 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,229 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,251 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4241,6 +4242,28 @@ index a1c9b68..47fc562 100644
 +    Clear,
 +}
 +
++/// Which identity a model *switch* should persist for `requested`.
++///
++/// The one rule: **never persist a guess.** When the request doesn't identify
++/// exactly one entry, this clears the stored key rather than inventing one —
++/// a guessed key written to `catalog_model_id` would launder a coin flip into
++/// authoritative identity, which is strictly worse than the ambiguity it hides
++/// (a cleared key just falls back to slug resolution, which asks the user).
++///
++/// Note this decides only what is *persisted*; it deliberately does not gate
++/// the switch itself, so internal paths that legitimately use non-selectable
++/// models keep working.
++pub fn catalog_patch_for_switch(
++    models: &IndexMap<String, ModelEntry>,
++    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
++    requested: &str,
++) -> CatalogModelPatch {
++    match resolve_requested_model(models, available, requested) {
++        Ok(selection) => CatalogModelPatch::Set(selection.catalog_key),
++        Err(_) => CatalogModelPatch::Clear,
++    }
++}
++
 +/// Apply a [`CatalogModelPatch`] to the currently stored key.
 +pub fn next_catalog_model_id(
 +    existing: Option<&acp::ModelId>,
@@ -4257,7 +4280,7 @@ index a1c9b68..47fc562 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
-index 8ced66a..681fead 100644
+index 8ced66a..5d38fa6 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
 @@ -3478,6 +3478,9 @@ impl MvpAgent {
@@ -4266,12 +4289,12 @@ index 8ced66a..681fead 100644
                      model_id: session_model_id.clone(),
 +                    // 会话创建期不写 catalog key：请求 id 可能是 slug，
 +                    // 宁可留空由加载期唯一匹配迁移补齐，也绝不写入错误身份。
-+                    catalog_model_id: None,
++                    catalog_model_id: crate::agent::models::CatalogModelPatch::Clear,
                      agent_name: Some(agent_definition.name.clone()),
                      reasoning_effort: initial_reasoning_effort,
                  });
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index fde3dea..8137007 100644
+index fde3dea..df60fb2 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 @@ -1038,6 +1038,8 @@ pub(crate) async fn handle_subagent_request(
@@ -4279,7 +4302,7 @@ index fde3dea..8137007 100644
          .send(crate::session::persistence::PersistenceMsg::CurrentModel {
              model_id: effective_model_id.clone(),
 +            // 同创建期：子 Agent 的 effective id 未必是 catalog key。
-+            catalog_model_id: None,
++            catalog_model_id: crate::agent::models::CatalogModelPatch::Clear,
              agent_name: Some(definition.name.clone()),
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });
@@ -4311,14 +4334,14 @@ index 91e7f14..d425006 100644
              .normalize_images_with_notices(wrapped, images, is_cursor)
              .await;
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/model_switch.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/model_switch.rs
-index 2b827f2..c6ae343 100644
+index 2b827f2..e96d559 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/model_switch.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/model_switch.rs
 @@ -4,12 +4,15 @@ use xai_chat_state::conversation_util::replace_or_insert_system_head;
  impl SessionActor {
      pub(super) async fn handle_set_session_model(
          &self,
-+        catalog_model_id: acp::ModelId,
++        catalog_model_id: crate::agent::models::CatalogModelPatch,
          sampling_config: xai_grok_sampler::SamplerConfig,
          use_concise: bool,
          apply_prompt_override: bool,
@@ -4334,7 +4357,7 @@ index 2b827f2..c6ae343 100644
              .persistence_tx
              .send(PersistenceMsg::CurrentModel {
                  model_id: model_id.clone(),
-+                catalog_model_id: Some(catalog_model_id.clone()),
++                catalog_model_id: catalog_model_id.clone(),
                  agent_name: Some(agent_name),
                  reasoning_effort: Some(sampling_config.reasoning_effort),
              });
@@ -4450,10 +4473,10 @@ index 99e3801..0990fd2 100644
              request.x_grok_turn_idx =
                  Some(self.chat_state_handle.get_prompt_index().await.to_string());
 diff --git a/crates/codegen/xai-grok-shell/src/session/commands.rs b/crates/codegen/xai-grok-shell/src/session/commands.rs
-index 5df2285..36013a4 100644
+index 5df2285..99ad555 100644
 --- a/crates/codegen/xai-grok-shell/src/session/commands.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/commands.rs
-@@ -159,6 +159,11 @@ pub enum SessionCommand {
+@@ -159,6 +159,13 @@ pub enum SessionCommand {
          responds_to: oneshot::Sender<()>,
      },
      SetSessionModel {
@@ -4461,7 +4484,9 @@ index 5df2285..36013a4 100644
 +        /// Distinct from `sampling_config.model`, which stays the upstream
 +        /// routing slug the request carries. Never derive one from the other:
 +        /// several entries may share a slug (same model, different proxy).
-+        catalog_model_id: acp::ModelId,
++        /// Never a guess: an ambiguous request yields `Clear`, not a coin flip
++        /// laundered into authoritative identity.
++        catalog_model_id: crate::agent::models::CatalogModelPatch,
          sampling_config: xai_grok_sampler::SamplerConfig,
          use_concise: bool,
          /// When `false`, skip the system prompt rewrite (concise/default swap).
@@ -4598,22 +4623,24 @@ index cc61f43..80b105a 100644
  pub mod inference_metrics;
  pub use xai_grok_shared::session::info;
 diff --git a/crates/codegen/xai-grok-shell/src/session/persistence.rs b/crates/codegen/xai-grok-shell/src/session/persistence.rs
-index a2473d0..3a21507 100644
+index a2473d0..8c683ad 100644
 --- a/crates/codegen/xai-grok-shell/src/session/persistence.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/persistence.rs
-@@ -311,7 +311,11 @@ pub enum PersistenceMsg {
+@@ -311,7 +311,13 @@ pub enum PersistenceMsg {
      /// Replace the entire chat history (used for compaction)
      ReplaceChatHistory(Vec<ConversationItem>),
      CurrentModel {
 +        /// Upstream routing slug (what requests carry).
          model_id: acp::ModelId,
-+        /// Catalog key — the stable identity. `None` for callers that can't
-+        /// know it; never clears an already persisted key.
-+        catalog_model_id: Option<acp::ModelId>,
++        /// Catalog key patch. Three states because "identity unknown" and
++        /// "keep what's stored" are different intents: this message means the
++        /// model *changed*, so an unknown identity must `Clear` rather than
++        /// let a stale key outlive the model it named.
++        catalog_model_id: crate::agent::models::CatalogModelPatch,
          /// The active agent definition name (e.g. `"grok-build"`).
          /// Persisted in `summary.agent_name` so session resume doesn't depend
          /// on the mutable model catalog.
-@@ -792,7 +796,14 @@ pub struct Summary {
+@@ -792,7 +798,14 @@ pub struct Summary {
      pub num_messages: usize,
      #[serde(default)]
      pub num_chat_messages: usize,
@@ -4628,7 +4655,7 @@ index a2473d0..3a21507 100644
      /// Parent session ID if this session was forked from another session
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub parent_session_id: Option<String>,
-@@ -917,6 +928,7 @@ impl Summary {
+@@ -917,6 +930,7 @@ impl Summary {
              num_messages: 0,
              num_chat_messages: 0,
              current_model_id: model_id,
@@ -4636,7 +4663,7 @@ index a2473d0..3a21507 100644
              parent_session_id: None,
              forked_at: None,
              collection_id: None,
-@@ -1602,6 +1614,7 @@ impl SessionPersistence {
+@@ -1602,6 +1616,7 @@ impl SessionPersistence {
                  }
                  PersistenceMsg::CurrentModel {
                      model_id,
@@ -4644,16 +4671,16 @@ index a2473d0..3a21507 100644
                      agent_name,
                      reasoning_effort,
                  } => {
-@@ -1612,6 +1625,7 @@ impl SessionPersistence {
+@@ -1612,6 +1627,7 @@ impl SessionPersistence {
                              &model_id,
                              agent_name.as_deref(),
                              reasoning_effort,
-+                            catalog_model_id.as_ref(),
++                            &catalog_model_id,
                          )
                          .await
                      {
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
-index d0b61fd..69c240e 100644
+index d0b61fd..3e7c261 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
 @@ -707,6 +707,8 @@ impl JsonlStorageAdapter {
@@ -4669,31 +4696,37 @@ index d0b61fd..69c240e 100644
          model_id: &acp::ModelId,
          agent_name: Option<&str>,
          reasoning_effort: Option<Option<xai_grok_sampling_types::ReasoningEffort>>,
-+        catalog_model_id: Option<&acp::ModelId>,
++        catalog_model_id: &crate::agent::models::CatalogModelPatch,
      ) -> io::Result<()> {
          self.apply_summary_patch(
              info,
              super::summary_write::SummaryPatch {
                  model: Some(super::summary_write::ModelPatch {
                      model_id: model_id.clone(),
-+                    catalog_model_id: catalog_model_id.cloned(),
++                    catalog_model_id: catalog_model_id.clone(),
                      agent_name: agent_name.map(String::from),
                      reasoning_effort,
                  }),
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-index f511495..4b07e8c 100644
+index f511495..0c024e0 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-@@ -518,7 +518,7 @@ pub trait StorageAdapter: Send + Sync {
+@@ -518,7 +518,13 @@ pub trait StorageAdapter: Send + Sync {
      /// Update the current model in summary (delegates to
      /// `update_current_model_and_agent` with `agent_name = None`).
      async fn update_current_model(&self, info: &Info, model_id: &acp::ModelId) -> io::Result<()> {
 -        self.update_current_model_and_agent(info, model_id, None, None)
-+        self.update_current_model_and_agent(info, model_id, None, None, None)
++        self.update_current_model_and_agent(
++            info,
++            model_id,
++            None,
++            None,
++            &crate::agent::models::CatalogModelPatch::Clear,
++        )
              .await
      }
  
-@@ -527,12 +527,16 @@ pub trait StorageAdapter: Send + Sync {
+@@ -527,12 +533,16 @@ pub trait StorageAdapter: Send + Sync {
      /// persisted so session resume doesn't depend on the mutable model catalog.
      /// `None` leaves the existing `agent_name` unchanged (used by legacy callers
      /// that only update the model ID).
@@ -4706,12 +4739,12 @@ index f511495..4b07e8c 100644
          model_id: &acp::ModelId,
          agent_name: Option<&str>,
          reasoning_effort: Option<Option<ReasoningEffort>>,
-+        catalog_model_id: Option<&acp::ModelId>,
++        catalog_model_id: &crate::agent::models::CatalogModelPatch,
      ) -> io::Result<()>;
  
      /// Update the collection ID for telemetry tracing
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs b/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
-index 31fc0d5..e87fca3 100644
+index 31fc0d5..93f46ae 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
 @@ -45,7 +45,13 @@ impl CounterOp {
@@ -4721,10 +4754,10 @@ index 31fc0d5..e87fca3 100644
 +    /// Upstream routing slug (what the API request carries). Kept for
 +    /// diagnostics and for reading sessions written before `catalog_model_id`.
      pub model_id: acp::ModelId,
-+    /// Catalog key — the stable identity. `None` only for callers that cannot
-+    /// know it (legacy/internal paths); a `None` here never clears an already
-+    /// persisted key.
-+    pub catalog_model_id: Option<acp::ModelId>,
++    /// Catalog key patch. Three states on purpose: for a *model change*,
++    /// "identity unknown" must clear the stored key, not keep it — a stale key
++    /// outliving the model it named wins on restore and lands on the old model.
++    pub catalog_model_id: crate::agent::models::CatalogModelPatch,
      pub agent_name: Option<String>,
      pub reasoning_effort: Option<Option<ReasoningEffort>>,
  }
@@ -4732,10 +4765,10 @@ index 31fc0d5..e87fca3 100644
          }
          if let Some(model) = &patch.model {
              self.current_model_id = model.model_id.clone();
-+            // Only overwrite when the caller knows the key; never clear it.
-+            if let Some(catalog_model_id) = &model.catalog_model_id {
-+                self.catalog_model_id = Some(catalog_model_id.clone());
-+            }
++            self.catalog_model_id = crate::agent::models::next_catalog_model_id(
++                self.catalog_model_id.as_ref(),
++                &model.catalog_model_id,
++            );
              if let Some(agent_name) = &model.agent_name {
                  self.agent_name = Some(agent_name.clone());
              }
