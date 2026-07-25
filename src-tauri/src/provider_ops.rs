@@ -876,7 +876,7 @@ mod switch_identity_patch_tests {
     use agent_client_protocol as acp;
     use indexmap::IndexMap;
     use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
-    use xai_grok_shell::agent::models::{catalog_patch_for_switch, CatalogModelPatch};
+    use xai_grok_shell::agent::models::{catalog_patch_for_ungated_switch, CatalogModelPatch};
 
     fn entry(slug: &str, base_url: &str) -> ModelEntry {
         let mut info = ModelInfo::fallback(slug);
@@ -904,12 +904,12 @@ mod switch_identity_patch_tests {
     /// 明确的 key → 写入该身份。
     #[test]
     fn unambiguous_request_sets_its_key() {
-        let (m, a) = catalog(&[
+        let (m, _a) = catalog(&[
             ("zhipu-glm", "glm-4.6", "https://open.bigmodel.cn/api/paas/v4"),
             ("my-test-model", "glm-4.6", "https://api.company.com/v1"),
         ]);
         assert_eq!(
-            catalog_patch_for_switch(&m, &a, "my-test-model"),
+            catalog_patch_for_ungated_switch(&m, "my-test-model"),
             CatalogModelPatch::Set(acp::ModelId::new("my-test-model"))
         );
     }
@@ -917,12 +917,12 @@ mod switch_identity_patch_tests {
     /// RED 核心：重复 slug 绝不写入猜出来的 key——必须 Clear。
     #[test]
     fn ambiguous_slug_never_persists_a_guess() {
-        let (m, a) = catalog(&[
+        let (m, _a) = catalog(&[
             ("zhipu-glm", "glm-4.6", "https://open.bigmodel.cn/api/paas/v4"),
             ("my-test-model", "glm-4.6", "https://api.company.com/v1"),
         ]);
         assert_eq!(
-            catalog_patch_for_switch(&m, &a, "glm-4.6"),
+            catalog_patch_for_ungated_switch(&m, "glm-4.6"),
             CatalogModelPatch::Clear,
             "重复 slug 时写入任一 key 都是把猜测洗成权威身份"
         );
@@ -931,9 +931,9 @@ mod switch_identity_patch_tests {
     /// 唯一 slug 走兼容路径：归一化成 key 后写入（广播/持久化都用归一后的 key）。
     #[test]
     fn unique_slug_normalizes_to_its_key() {
-        let (m, a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
+        let (m, _a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
         assert_eq!(
-            catalog_patch_for_switch(&m, &a, "glm-4.6"),
+            catalog_patch_for_ungated_switch(&m, "glm-4.6"),
             CatalogModelPatch::Set(acp::ModelId::new("only"))
         );
     }
@@ -941,7 +941,71 @@ mod switch_identity_patch_tests {
     /// 未知 id：清除而非保留陈旧身份。
     #[test]
     fn unknown_request_clears_stale_identity() {
-        let (m, a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
-        assert_eq!(catalog_patch_for_switch(&m, &a, "nope"), CatalogModelPatch::Clear);
+        let (m, _a) = catalog(&[("only", "glm-4.6", "https://api.company.com/v1")]);
+        assert_eq!(catalog_patch_for_ungated_switch(&m, "nope"), CatalogModelPatch::Clear);
+    }
+}
+
+/// Codex 第六轮：给 ungated 底层用的持久化判断，本身也必须是 ungated 的。
+///
+/// 我上一版用 `available`（仅用户可选）过滤，只想到"不拦截切换"，没想到
+/// 反方向：内部路径传**精确的隐藏模型 key** 时 available 里没有它 →
+/// 解析失败 → Clear → **一个完全准确的身份被抹掉**。切换当次成功，但下次
+/// 恢复只剩 slug，隐藏模型可能恢复不了或重新歧义。所谓"零副作用"不成立。
+#[cfg(test)]
+mod hidden_model_identity_tests {
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{catalog_patch_for_ungated_switch, CatalogModelPatch};
+    use agent_client_protocol as acp;
+
+    /// 隐藏模型：user_selectable=false（不会出现在 available 里）。
+    fn hidden(slug: &str, base_url: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        info.user_selectable = false;
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn visible(slug: &str, base_url: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    /// 精确的隐藏 key 必须被持久化——它是完全准确的身份，不在用户菜单里
+    /// 不代表它不真实。
+    #[test]
+    fn exact_hidden_key_is_still_persisted() {
+        let mut m = IndexMap::new();
+        m.insert("internal-hidden".to_owned(), hidden("grok-internal", "https://internal/v1"));
+        assert_eq!(
+            catalog_patch_for_ungated_switch(&m, "internal-hidden"),
+            CatalogModelPatch::Set(acp::ModelId::new("internal-hidden")),
+            "隐藏模型的精确 key 被清除会导致下次恢复只剩 slug"
+        );
+    }
+
+    /// 隐藏模型的唯一 slug 同样归一化成 key。
+    #[test]
+    fn hidden_unique_slug_normalizes() {
+        let mut m = IndexMap::new();
+        m.insert("internal-hidden".to_owned(), hidden("grok-internal", "https://internal/v1"));
+        assert_eq!(
+            catalog_patch_for_ungated_switch(&m, "grok-internal"),
+            CatalogModelPatch::Set(acp::ModelId::new("internal-hidden"))
+        );
+    }
+
+    /// 但隐藏模型参与的重复 slug 仍必须 Clear——不猜这条规则对隐藏模型一视同仁。
+    #[test]
+    fn hidden_duplicate_slug_still_clears() {
+        let mut m = IndexMap::new();
+        m.insert("internal-hidden".to_owned(), hidden("glm-4.6", "https://internal/v1"));
+        m.insert("public-proxy".to_owned(), visible("glm-4.6", "https://api.company.com/v1"));
+        assert_eq!(
+            catalog_patch_for_ungated_switch(&m, "glm-4.6"),
+            CatalogModelPatch::Clear
+        );
     }
 }

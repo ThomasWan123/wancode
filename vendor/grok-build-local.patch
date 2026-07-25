@@ -3995,10 +3995,10 @@ index 662052d..f39e7b4 100644
      pub created: u64,
      pub model: String,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
-index 2d4043a..d8a0df4 100644
+index 2d4043a..a103af4 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
-@@ -32,6 +32,16 @@ pub(crate) async fn apply(
+@@ -32,6 +32,15 @@ pub(crate) async fn apply(
          .await
          .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
      let model = agent.resolve_model_id(&model_id)?;
@@ -4007,15 +4007,14 @@ index 2d4043a..d8a0df4 100644
 +    // launder it into authoritative identity, which is worse than the
 +    // ambiguity it hides. This decides persistence only; the switch itself
 +    // stays ungated so internal (non-selectable) models keep working.
-+    let catalog_model_id = crate::agent::models::catalog_patch_for_switch(
++    let catalog_model_id = crate::agent::models::catalog_patch_for_ungated_switch(
 +        &agent.models_manager.models(),
-+        &agent.models_manager.available(),
 +        model_id.0.as_ref(),
 +    );
      let use_concise = model.info().use_concise;
      let session_default = handle
          .session_default_agent_profile
-@@ -191,6 +201,7 @@ pub(crate) async fn apply(
+@@ -191,6 +200,7 @@ pub(crate) async fn apply(
      };
      let (tx, rx) = oneshot::channel();
      let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
@@ -4024,10 +4023,10 @@ index 2d4043a..d8a0df4 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..bd8bc6c 100644
+index a1c9b68..7e64ab1 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,251 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,259 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4242,25 +4241,33 @@ index a1c9b68..bd8bc6c 100644
 +    Clear,
 +}
 +
-+/// Which identity a model *switch* should persist for `requested`.
++/// Which identity a model switch should persist for `requested`, on the
++/// **ungated** shared path.
 +///
-+/// The one rule: **never persist a guess.** When the request doesn't identify
-+/// exactly one entry, this clears the stored key rather than inventing one —
-+/// a guessed key written to `catalog_model_id` would launder a coin flip into
-+/// authoritative identity, which is strictly worse than the ambiguity it hides
-+/// (a cleared key just falls back to slug resolution, which asks the user).
++/// Two rules, and they pull in opposite directions:
++/// - never persist a guess — a coin-flipped key written to `catalog_model_id`
++///   launders ambiguity into authority, worse than the ambiguity it hides
++///   (a cleared key falls back to slug resolution, which asks the user);
++/// - never erase a *known* identity — including one the user can't pick from
++///   the model menu.
 +///
-+/// Note this decides only what is *persisted*; it deliberately does not gate
-+/// the switch itself, so internal paths that legitimately use non-selectable
-+/// models keep working.
-+pub fn catalog_patch_for_switch(
++/// Hence no `available` filter here: this serves `apply`, which internal
++/// callers use with hidden / non-user-selectable models. Filtering by
++/// selectability would let an exact hidden key resolve to "unknown" and wipe a
++/// perfectly accurate identity. Strict *selection* (which does gate on
++/// selectability) stays in [`resolve_requested_model`], for the external
++/// user-driven path only — the two responsibilities must not be merged.
++pub fn catalog_patch_for_ungated_switch(
 +    models: &IndexMap<String, ModelEntry>,
-+    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
 +    requested: &str,
 +) -> CatalogModelPatch {
-+    match resolve_requested_model(models, available, requested) {
-+        Ok(selection) => CatalogModelPatch::Set(selection.catalog_key),
-+        Err(_) => CatalogModelPatch::Clear,
++    if models.contains_key(requested) {
++        return CatalogModelPatch::Set(acp::ModelId::new(requested.to_owned()));
++    }
++    let mut slug_matches = models.iter().filter(|(_, e)| e.info.model == requested);
++    match (slug_matches.next(), slug_matches.next()) {
++        (Some((key, _)), None) => CatalogModelPatch::Set(acp::ModelId::new(key.clone())),
++        _ => CatalogModelPatch::Clear,
 +    }
 +}
 +
