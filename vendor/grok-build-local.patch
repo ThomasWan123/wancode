@@ -4097,10 +4097,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..8430af8 100644
+index a1c9b68..8763689 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,451 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,479 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4284,6 +4284,34 @@ index a1c9b68..8430af8 100644
 +        }
 +    };
 +    available.contains_key(&resolved).then_some(resolved)
++}
++
++/// What the prompt handler should do after attempting a recovery.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum RecoveryOutcome {
++    /// The model switch landed; the block is gone and the message may go out.
++    Continue,
++    /// Something failed. The block stands and the message must not be sent.
++    Hold,
++}
++
++/// Commit or abandon a recovery attempt, in that order.
++///
++/// The block is released **only** once the switch has actually applied. The
++/// earlier code removed it first and merely logged a warning if the switch
++/// then failed — so a session whose recovery blew up went on to send the
++/// user's message on whatever model it happened to be sitting on, with nothing
++/// left to stop it next time either.
++pub fn settle_recovery(
++    blocks: &mut std::collections::HashMap<String, ModelSessionBlock>,
++    session_id: &str,
++    applied: bool,
++) -> RecoveryOutcome {
++    if !applied {
++        return RecoveryOutcome::Hold;
++    }
++    blocks.remove(session_id);
++    RecoveryOutcome::Continue
 +}
 +
 +/// A model the user asked for, resolved once into both halves of its identity.
@@ -4553,7 +4581,7 @@ index a1c9b68..8430af8 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 78a8612..c25e7a0 100644
+index 78a8612..e193637 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 @@ -906,34 +906,68 @@ impl acp::Agent for MvpAgent {
@@ -4693,6 +4721,15 @@ index 78a8612..c25e7a0 100644
          }
          if let Some(requested) = disallowed_custom {
              let current = self.models_manager.current_model_id();
+@@ -1718,7 +1757,7 @@ impl acp::Agent for MvpAgent {
+         let persisted_model = summary.current_model_id.clone();
+         let models = self.models_manager.models();
+         let available = self.models_manager.available();
+-        self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
++        self.model_blocked_sessions.borrow_mut().remove(session_id.0.as_ref());
+         let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
+         tracing::debug!(
+             session_id = % session_id.0, persisted = % persisted_model.0,
 @@ -1734,12 +1773,32 @@ impl acp::Agent for MvpAgent {
          } else {
              available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
@@ -4740,7 +4777,7 @@ index 78a8612..c25e7a0 100644
 +            // Several entries share this slug. Any pick would be a coin flip
 +            // written back as authoritative identity, so pick nothing: load the
 +            // history, block prompting, and let the user say which one they
-+            // meant. `model_unavailable_sessions` already gives us exactly that
++            // meant. `model_blocked_sessions` already gives us exactly that
 +            // hold — the session is unusable until a model is chosen either way.
 +            let listed = candidates
 +                .iter()
@@ -4769,7 +4806,7 @@ index 78a8612..c25e7a0 100644
 +            let empty_id = acp::ModelId::new(String::new());
 +            self.send_model_auto_switched(&session_id, &persisted_model, &empty_id, &reason)
 +                .await;
-+            self.model_unavailable_sessions
++            self.model_blocked_sessions
 +                .borrow_mut()
 +                .insert(
 +                    session_id.0.to_string(),
@@ -4800,9 +4837,12 @@ index 78a8612..c25e7a0 100644
          } else {
              let fallback = available
                  .keys()
-@@ -1828,14 +1930,24 @@ impl acp::Agent for MvpAgent {
+@@ -1826,16 +1928,26 @@ impl acp::Agent for MvpAgent {
+                     &reason,
+                 )
                  .await;
-             self.model_unavailable_sessions
+-            self.model_unavailable_sessions
++            self.model_blocked_sessions
                  .borrow_mut()
 -                .insert(session_id.0.to_string(), persisted_model.clone());
 -            fallback
@@ -4862,7 +4902,12 @@ index 78a8612..c25e7a0 100644
          }
          let mut response_meta_map = serde_json::Map::new();
          response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-@@ -2013,16 +2139,21 @@ impl acp::Agent for MvpAgent {
+@@ -2009,20 +2135,25 @@ impl acp::Agent for MvpAgent {
+             return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+         }
+         let latched_model = self
+-            .model_unavailable_sessions
++            .model_blocked_sessions
              .borrow()
              .get(arguments.session_id.0.as_ref())
              .cloned();
@@ -4892,10 +4937,13 @@ index 78a8612..c25e7a0 100644
                  tracing::info!(
                      session_id = % arguments.session_id.0, model_id = % restore_model_id
                      .0,
-@@ -2038,25 +2169,35 @@ impl acp::Agent for MvpAgent {
-                 self.model_unavailable_sessions
-                     .borrow_mut()
-                     .remove(arguments.session_id.0.as_ref());
+@@ -2035,28 +2166,54 @@ impl acp::Agent for MvpAgent {
+                         serde_json::json!({ "model_id" : restore_model_id.0.as_ref(), }),
+                     ),
+                 );
+-                self.model_unavailable_sessions
+-                    .borrow_mut()
+-                    .remove(arguments.session_id.0.as_ref());
 -                if let Err(e) = crate::agent::handlers::model_switch::apply(
 -                        self,
 -                        acp::SetSessionModelRequest::new(
@@ -4904,15 +4952,20 @@ index 78a8612..c25e7a0 100644
 -                        ),
 -                    )
 -                    .await
--                {
++                // Apply first, release the block last. Anything that fails in
++                // between leaves the block standing and stops the message —
++                // "recovery attempted" is not "recovery succeeded", and a
++                // half-recovered session must not quietly send the user's
++                // message on whatever model it happens to be sitting on.
++                let applied = match self.resolve_model_trusted(restore_model_id.0.as_ref())
+                 {
 -                    tracing::warn!(
 -                        session_id = % arguments.session_id.0, model_id = %
 -                        restore_model_id.0, error = ? e,
 -                        "prompt: failed to restore previously-unavailable model; continuing with the session's current model"
 -                    );
-+                match self.resolve_model_trusted(restore_model_id.0.as_ref()) {
 +                    Some(selection) => {
-+                        if let Err(e) = crate::agent::handlers::model_switch::apply_resolved(
++                        match crate::agent::handlers::model_switch::apply_resolved(
 +                                self,
 +                                arguments.session_id.clone(),
 +                                selection,
@@ -4920,20 +4973,33 @@ index 78a8612..c25e7a0 100644
 +                            )
 +                            .await
 +                        {
-+                            tracing::warn!(
-+                                session_id = % arguments.session_id.0, model_id = %
-+                                restore_model_id.0, error = ? e,
-+                                "prompt: failed to restore previously-unavailable model; continuing with the session's current model"
-+                            );
++                            Ok(_) => true,
++                            Err(e) => {
++                                tracing::warn!(
++                                    session_id = % arguments.session_id.0, model_id = %
++                                    restore_model_id.0, error = ? e,
++                                    "prompt: recovery switch failed; keeping the session blocked rather than sending on an unverified model"
++                                );
++                                false
++                            }
 +                        }
 +                    }
 +                    None => {
 +                        tracing::warn!(
 +                            session_id = % arguments.session_id.0, model_id = %
 +                            restore_model_id.0,
-+                            "prompt: recovered model id no longer maps to exactly one catalog entry; continuing with the session's current model"
++                            "prompt: recovered model id no longer maps to exactly one catalog entry; keeping the session blocked"
 +                        );
++                        false
 +                    }
++                };
++                if crate::agent::models::settle_recovery(
++                    &mut self.model_blocked_sessions.borrow_mut(),
++                    arguments.session_id.0.as_ref(),
++                    applied,
++                ) == crate::agent::models::RecoveryOutcome::Hold
++                {
++                    return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
                  }
              } else {
                  tracing::warn!(
@@ -4944,7 +5010,7 @@ index 78a8612..c25e7a0 100644
                      available_keys = ? available.keys().take(10).collect::< Vec < _ >>
                      (),
                      "prompt blocked: session model unavailable since load and still missing from the catalog"
-@@ -2066,8 +2207,8 @@ impl acp::Agent for MvpAgent {
+@@ -2066,8 +2223,8 @@ impl acp::Agent for MvpAgent {
                      Some(arguments.session_id.0.as_ref()),
                      Some(
                          serde_json::json!(
@@ -4955,7 +5021,7 @@ index 78a8612..c25e7a0 100644
                          ),
                      ),
                  );
-@@ -3119,15 +3260,40 @@ impl acp::Agent for MvpAgent {
+@@ -3119,25 +3276,50 @@ impl acp::Agent for MvpAgent {
          &self,
          args: acp::SetSessionModelRequest,
      ) -> Result<acp::SetSessionModelResponse, acp::Error> {
@@ -5003,8 +5069,9 @@ index 78a8612..c25e7a0 100644
 +            .await;
          if res.is_ok()
              && let Some(unavailable) = self
-                 .model_unavailable_sessions
-@@ -3135,9 +3301,9 @@ impl acp::Agent for MvpAgent {
+-                .model_unavailable_sessions
++                .model_blocked_sessions
+                 .borrow_mut()
                  .remove(session_id.0.as_ref())
          {
              tracing::info!(
@@ -5018,7 +5085,7 @@ index 78a8612..c25e7a0 100644
          }
          res
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
-index 8ced66a..63f4607 100644
+index 8ced66a..973be46 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
 @@ -1081,6 +1081,17 @@ impl MvpAgent {
@@ -5039,6 +5106,15 @@ index 8ced66a..63f4607 100644
      pub(crate) fn prepare_sampling_config_for_model(
          &self,
          model: &ModelEntry,
+@@ -1534,7 +1545,7 @@ impl MvpAgent {
+                     crate::session::mcp_servers::McpState::new(vec![]),
+                 ),
+             ),
+-            model_unavailable_sessions: RefCell::new(std::collections::HashMap::new()),
++            model_blocked_sessions: RefCell::new(std::collections::HashMap::new()),
+             subagent_event_tx,
+             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
+             subagent_coordinator: RefCell::new(subagent_coordinator),
 @@ -3478,6 +3489,9 @@ impl MvpAgent {
                  .tx
                  .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -5050,7 +5126,7 @@ index 8ced66a..63f4607 100644
                      reasoning_effort: initial_reasoning_effort,
                  });
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
-index 1afd3a2..c8692d2 100644
+index 1afd3a2..65c5acb 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
 @@ -55,7 +55,7 @@ use crate::agent::auth_method;
@@ -5062,12 +5138,16 @@ index 1afd3a2..c8692d2 100644
  use crate::agent::session_config;
  use xai_grok_sampling_types::{
      REASONING_EFFORT_META_KEY, ReasoningEffortOption, reasoning_effort_meta_value,
-@@ -773,7 +773,8 @@ pub struct MvpAgent {
+@@ -773,7 +773,12 @@ pub struct MvpAgent {
      /// fetch still in flight after a leader restart), so the prompt path
      /// re-checks and self-heals — or (b) the user explicitly switches
      /// models via `set_session_model`.
 -    model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
-+    model_unavailable_sessions:
++    /// Sessions that cannot prompt yet, and why. Named for the *state*,
++    /// not one of its causes: it also holds ambiguous-identity blocks, and
++    /// reading it as "model temporarily missing" is what let the recovery
++    /// path unblock an ambiguous session by guessing.
++    model_blocked_sessions:
 +        RefCell<std::collections::HashMap<String, crate::agent::models::ModelSessionBlock>>,
      /// Unified sender for all subagent coordinator events.
      /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.

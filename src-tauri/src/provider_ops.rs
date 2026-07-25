@@ -1442,3 +1442,65 @@ mod blocked_session_recovery_tests {
         assert_eq!(recover_blocked_model(&m, &empty, &block), None);
     }
 }
+
+/// v0.18.6 步5（RED）：恢复必须"先落地、后解锁"，且这次测的是真实容器。
+///
+/// Codex 第十二轮两条纠正，都对：
+/// 1. 原顺序是先 remove(block) 再 apply，两条失败分支只 warn 就继续发消息
+///    ——恢复失败的会话不但发了，而且下次也拦不住了。
+/// 2. 我上一条说"5 条测试覆盖状态转移"是过度表述：那 5 条只测了纯决策
+///    函数 recover_blocked_model，从没碰过存放 block 的那张表。
+/// 所以落定动作抽成 settle_recovery，对真实 HashMap 操作，下面直接断言表本身。
+#[cfg(test)]
+mod recovery_commit_order_tests {
+    use agent_client_protocol as acp;
+    use std::collections::HashMap;
+    use xai_grok_shell::agent::models::{
+        settle_recovery, ModelSessionBlock, RecoveryOutcome,
+    };
+
+    fn blocked() -> HashMap<String, ModelSessionBlock> {
+        let mut m = HashMap::new();
+        m.insert(
+            "sess-1".to_owned(),
+            ModelSessionBlock::Unavailable {
+                persisted_model: acp::ModelId::new("glm-4.6"),
+            },
+        );
+        m
+    }
+
+    /// 切换失败：表里 block 必须还在，且不许继续发用户消息。
+    #[test]
+    fn failed_apply_keeps_the_block_and_holds_the_prompt() {
+        let mut blocks = blocked();
+        assert_eq!(settle_recovery(&mut blocks, "sess-1", false), RecoveryOutcome::Hold);
+        assert!(
+            blocks.contains_key("sess-1"),
+            "恢复失败却把 block 删了，等于这次发错、下次也拦不住"
+        );
+    }
+
+    /// 切换成功：block 清除，放行。
+    #[test]
+    fn successful_apply_clears_the_block_and_continues() {
+        let mut blocks = blocked();
+        assert_eq!(settle_recovery(&mut blocks, "sess-1", true), RecoveryOutcome::Continue);
+        assert!(!blocks.contains_key("sess-1"));
+    }
+
+    /// 只动本会话，别的会话的 block 不受影响。
+    #[test]
+    fn settling_one_session_leaves_other_blocks_alone() {
+        let mut blocks = blocked();
+        blocks.insert(
+            "sess-2".to_owned(),
+            ModelSessionBlock::Ambiguous {
+                requested: "glm-4.6".to_owned(),
+                candidates: Vec::new(),
+            },
+        );
+        settle_recovery(&mut blocks, "sess-1", true);
+        assert!(blocks.contains_key("sess-2"));
+    }
+}
