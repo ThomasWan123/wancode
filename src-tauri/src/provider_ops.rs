@@ -792,8 +792,8 @@ mod model_selection_tests {
         let (models, available) = dup_catalog();
         let sel = resolve_requested_model(&models, &available, "my-test-model")
             .expect("精确 key 必须解析成功");
-        assert_eq!(sel.catalog_key, acp::ModelId::new("my-test-model"));
-        assert_eq!(sel.entry.info.base_url, "https://api.company.com/v1");
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("my-test-model"));
+        assert_eq!(sel.entry().info.base_url, "https://api.company.com/v1");
     }
 
     /// RED：slug 唯一时兼容成功并归一到 key。
@@ -809,7 +809,7 @@ mod model_selection_tests {
             })
             .collect();
         let sel = resolve_requested_model(&models, &available, "glm-4.6").expect("唯一 slug 应成功");
-        assert_eq!(sel.catalog_key, acp::ModelId::new("only"));
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("only"));
     }
 
     /// RED（本轮核心）：重复 slug 必须报歧义，**绝不 last-wins 猜测**。
@@ -1060,8 +1060,8 @@ mod literal_name_collision_tests {
     fn user_selection_prefers_exact_key_over_shared_slug() {
         let (m, a) = collision_catalog();
         let sel = resolve_requested_model(&m, &a, "glm-4.6").expect("精确 key 必须胜出");
-        assert_eq!(sel.catalog_key, acp::ModelId::new("glm-4.6"));
-        assert_eq!(sel.entry.info.base_url, "https://official/v1");
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("glm-4.6"));
+        assert_eq!(sel.entry().info.base_url, "https://official/v1");
     }
 
     /// ②旧会话只有 model_id="glm-4.6"、无 catalog key：必须当**旧 slug** 处理
@@ -1236,16 +1236,16 @@ mod atomic_resolution_tests {
     #[test]
     fn exact_key_carries_its_own_endpoint_not_a_slug_sibling() {
         let sel = resolve_trusted_model(&catalog(), "glm-coding").expect("精确 key");
-        assert_eq!(sel.catalog_key, acp::ModelId::new("glm-coding"));
-        assert_eq!(sel.entry.info.base_url, "https://open.bigmodel.cn/api/coding/paas/v4");
-        assert_eq!(sel.entry.info.model, "glm-4.6", "上游 slug 仍是共享的那个");
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("glm-coding"));
+        assert_eq!(sel.entry().info.base_url, "https://open.bigmodel.cn/api/coding/paas/v4");
+        assert_eq!(sel.entry().info.model, "glm-4.6", "上游 slug 仍是共享的那个");
     }
 
     #[test]
     fn unique_slug_carries_the_matching_entry() {
         let sel = resolve_trusted_model(&catalog(), "deepseek-chat").expect("唯一 slug");
-        assert_eq!(sel.catalog_key, acp::ModelId::new("solo"));
-        assert_eq!(sel.entry.info.base_url, "https://api.deepseek.com");
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("solo"));
+        assert_eq!(sel.entry().info.base_url, "https://api.deepseek.com");
     }
 
     /// 重复 slug 返回 None 而不是随便挑一个：内部路径宁可退回默认模型，
@@ -1254,5 +1254,70 @@ mod atomic_resolution_tests {
     fn duplicate_slug_yields_none_never_a_coin_flip() {
         assert!(resolve_trusted_model(&catalog(), "glm-4.6").is_none());
         assert!(resolve_trusted_model(&catalog(), "nope").is_none());
+    }
+}
+
+/// v0.18.6 步3（RED）：歧义的**存在与否**必须按全目录判定。
+///
+/// Codex 第十轮纠正的一条规则，比我原来的写法更严：available 只该决定
+/// "给用户展示哪些可选操作"，不该决定"是不是存在歧义"。我原先按可选集
+/// 统计匹配数，理由是"隐藏模型没法当候选给用户点"——但由此推出的行为是
+/// 静默选中那个可见的，这本身就是猜，正是前几轮反复禁止的那件事。
+/// 候选是否可选，改由 ModelCandidate.selectable 表达，交给前端渲染。
+#[cfg(test)]
+mod ambiguity_spans_full_catalog_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{resolve_persisted_model, PersistedModelResolution};
+
+    fn entry(slug: &str, base: &str, selectable: bool) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base.to_owned();
+        info.user_selectable = selectable;
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    /// 一可见 + 一隐藏、同 slug、旧会话只有 slug：真实情况就是两个候选，
+    /// 不能因为其中一个用户点不了就当它不存在、静默迁移到另一个。
+    #[test]
+    fn one_visible_one_hidden_sharing_a_slug_is_still_ambiguous() {
+        let mut models = IndexMap::new();
+        models.insert("visible-proxy".to_owned(), entry("glm-4.6", "https://proxy/v1", true));
+        models.insert("hidden-model".to_owned(), entry("glm-4.6", "https://internal/v1", false));
+        let available: IndexMap<acp::ModelId, acp::ModelInfo> = [("visible-proxy", ())]
+            .iter()
+            .map(|(k, _)| {
+                let id = acp::ModelId::new((*k).to_owned());
+                (id.clone(), acp::ModelInfo::new(id, (*k).to_owned()))
+            })
+            .collect();
+
+        match resolve_persisted_model(&models, &available, None, "glm-4.6") {
+            PersistedModelResolution::Ambiguous { candidates, .. } => {
+                let seen: Vec<_> = candidates
+                    .iter()
+                    .map(|c| (c.id.as_str(), c.selectable))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    vec![("visible-proxy", true), ("hidden-model", false)],
+                    "两个候选都要给出，可选性用字段表达而不是靠过滤掉一个"
+                );
+            }
+            other => panic!("必须报歧义，绝不静默选可见的那个，实际: {other:?}"),
+        }
+    }
+
+    /// 全目录唯一才迁移——即使那唯一一条是隐藏的。
+    #[test]
+    fn unique_across_full_catalog_migrates_even_when_hidden() {
+        let mut models = IndexMap::new();
+        models.insert("hidden-only".to_owned(), entry("grok-internal", "https://i/v1", false));
+        let available: IndexMap<acp::ModelId, acp::ModelInfo> = IndexMap::new();
+        assert_eq!(
+            resolve_persisted_model(&models, &available, None, "grok-internal"),
+            PersistedModelResolution::Migrated(acp::ModelId::new("hidden-only"))
+        );
     }
 }

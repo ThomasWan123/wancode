@@ -3995,7 +3995,7 @@ index 662052d..f39e7b4 100644
      pub created: u64,
      pub model: String,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
-index 2d4043a..d0d8665 100644
+index 2d4043a..11d9372 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/handlers/model_switch.rs
 @@ -1,7 +1,16 @@
@@ -4018,7 +4018,7 @@ index 2d4043a..d0d8665 100644
  use crate::agent::mvp_agent::{
      MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
  };
-@@ -9,29 +18,44 @@ use crate::session::SessionCommand;
+@@ -9,29 +18,41 @@ use crate::session::SessionCommand;
  use agent_client_protocol::{self as acp};
  use tokio::sync::oneshot;
  use xai_grok_sampling_types::parse_reasoning_effort_meta;
@@ -4026,11 +4026,11 @@ index 2d4043a..d0d8665 100644
 -pub(crate) async fn apply(
 +/// Apply an already-resolved model selection to a session.
 +///
-+/// `selection.catalog_key` is the single identity used from here on — session
-+/// handle, `ModelChanged` broadcast, telemetry, and the persisted
++/// The selection's catalog key is the single identity used from here on —
++/// session handle, `ModelChanged` broadcast, telemetry, and the persisted
 +/// `catalog_model_id` all carry it, so a restore reads back exactly the entry
-+/// that ran. `selection.entry` is the only source of the sampling config, so
-+/// the endpoint can never come from a different entry than the key.
++/// that ran. Its entry is the only source of the sampling config, so the
++/// endpoint can never come from a different entry than the key.
 +pub(crate) async fn apply_resolved(
      agent: &MvpAgent,
 -    args: acp::SetSessionModelRequest,
@@ -4039,10 +4039,7 @@ index 2d4043a..d0d8665 100644
 +    meta: Option<acp::Meta>,
  ) -> Result<acp::SetSessionModelResponse, acp::Error> {
 -    tracing::info!("Received set session model request {args:?}");
-+    let ResolvedModelSelection {
-+        catalog_key: model_id,
-+        entry: model,
-+    } = selection;
++    let (model_id, model) = selection.into_parts();
 +    tracing::info!(
 +        session_id = %session_id.0, catalog_key = %model_id.0,
 +        upstream_slug = %model.info.model,
@@ -4077,7 +4074,7 @@ index 2d4043a..d0d8665 100644
      let use_concise = model.info().use_concise;
      let session_default = handle
          .session_default_agent_profile
-@@ -181,16 +205,18 @@ pub(crate) async fn apply(
+@@ -181,16 +202,18 @@ pub(crate) async fn apply(
      let model_unchanged = previous_model_id == model_id.0;
      let new_threshold = {
          let cfg = agent.cfg.borrow();
@@ -4100,10 +4097,10 @@ index 2d4043a..d0d8665 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..e445d33 100644
+index a1c9b68..2aa8e7d 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,373 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,401 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4118,6 +4115,12 @@ index a1c9b68..e445d33 100644
 +    pub name: String,
 +    /// Host of `base_url`, e.g. `open.bigmodel.cn`.
 +    pub endpoint_label: String,
++    /// Whether `allowed_models` lets the user pick this one. Selectability
++    /// governs what the client *offers*, never whether the ambiguity exists —
++    /// dropping a non-selectable match from the count would silently promote
++    /// the remaining one, which is exactly the guess this type exists to
++    /// prevent.
++    pub selectable: bool,
 +}
 +
 +/// Outcome of resolving a persisted session model back to a catalog entry.
@@ -4190,32 +4193,29 @@ index a1c9b68..e445d33 100644
 +            return PersistedModelResolution::Exact(acp::ModelId::new(key.to_owned()));
 +        }
 +    }
-+    // Migration, by contrast, IS a guess presented to the user, so it stays
-+    // inside the selectable set: offering a hidden model as a disambiguation
-+    // candidate would give the user a choice they cannot make.
++    // No exact key: fall back to the legacy slug. Matches are counted across
++    // the **whole catalog**, not the selectable subset. Selectability decides
++    // what the client offers, never whether the ambiguity exists — filtering a
++    // hidden twin out of the count would leave one match standing and migrate
++    // to it silently, which is a guess wearing the costume of a unique answer.
++    // Callers render `ModelCandidate::selectable` instead.
 +    let matches: Vec<(&String, &ModelEntry)> = models
 +        .iter()
-+        .filter(|(key, entry)| {
-+            entry.info.model == legacy_model_id
-+                && available.contains_key(&acp::ModelId::new((*key).clone()))
-+        })
++        .filter(|(_, entry)| entry.info.model == legacy_model_id)
 +        .collect();
 +    match matches.len() {
++        // No slug match anywhere: the record may predate slugs being written
++        // and already hold a catalog key. Accepting it is exact, not a guess —
++        // there is nothing for it to be ambiguous with.
 +        0 => {
-+            // No selectable slug match. Before giving up, two exact (non-guess)
-+            // fallbacks: a unique slug match anywhere in the catalog — which
-+            // recovers a legacy hidden-model session — then the record already
-+            // holding a catalog key (predates slugs being written).
-+            let mut all = models.iter().filter(|(_, e)| e.info.model == legacy_model_id);
-+            if let (Some((key, _)), None) = (all.next(), all.next()) {
-+                return PersistedModelResolution::Migrated(acp::ModelId::new(key.clone()));
-+            }
 +            if models.contains_key(legacy_model_id) {
 +                PersistedModelResolution::Migrated(acp::ModelId::new(legacy_model_id.to_owned()))
 +            } else {
 +                PersistedModelResolution::NotFound
 +            }
 +        }
++        // Unique across the whole catalog — including when that one entry is
++        // hidden, which is how a legacy internal-model session recovers.
 +        1 => PersistedModelResolution::Migrated(acp::ModelId::new(matches[0].0.clone())),
 +        _ => PersistedModelResolution::Ambiguous {
 +            legacy_model: legacy_model_id.to_owned(),
@@ -4229,6 +4229,7 @@ index a1c9b68..e445d33 100644
 +                        .clone()
 +                        .unwrap_or_else(|| entry.info.model.clone()),
 +                    endpoint_label: endpoint_authority_label(&entry.info.base_url),
++                    selectable: available.contains_key(&acp::ModelId::new((*key).clone())),
 +                })
 +                .collect(),
 +        },
@@ -4238,13 +4239,34 @@ index a1c9b68..e445d33 100644
 +/// A model the user asked for, resolved once into both halves of its identity.
 +/// Returning them together stops the old two-step (`resolve_model_id` for the
 +/// entry, then a second lookup for the key) from drifting apart again.
++///
++/// The fields are private on purpose. Public fields would let any caller
++/// hand-assemble one entry's key with another entry's endpoint — the exact
++/// mismatch this type exists to rule out — so the only way to obtain one is
++/// through a resolver in this module.
 +#[derive(Debug, Clone)]
 +pub struct ResolvedModelSelection {
++    catalog_key: acp::ModelId,
++    entry: ModelEntry,
++}
++
++impl ResolvedModelSelection {
 +    /// Catalog key — persist this, show this, switch on this.
-+    pub catalog_key: acp::ModelId,
-+    /// The entry itself; `entry.info.model` is the upstream slug the request
-+    /// carries and `entry.info.base_url` its endpoint.
-+    pub entry: ModelEntry,
++    pub fn catalog_key(&self) -> &acp::ModelId {
++        &self.catalog_key
++    }
++
++    /// The entry itself; `info().model` is the upstream slug the request
++    /// carries and `info().base_url` its endpoint.
++    pub fn entry(&self) -> &ModelEntry {
++        &self.entry
++    }
++
++    /// Consume into both halves at once. Taking them together keeps them
++    /// together — there is no way to take one and look the other up again.
++    pub fn into_parts(self) -> (acp::ModelId, ModelEntry) {
++        (self.catalog_key, self.entry)
++    }
 +}
 +
 +/// Why a requested model id could not be resolved to exactly one entry.
@@ -4383,6 +4405,9 @@ index a1c9b68..e445d33 100644
 +                        .clone()
 +                        .unwrap_or_else(|| entry.info.model.clone()),
 +                    endpoint_label: endpoint_authority_label(&entry.info.base_url),
++                    // This path already filtered on `available`, so every
++                    // candidate here is one the user can actually pick.
++                    selectable: true,
 +                })
 +                .collect(),
 +        }),
@@ -4478,46 +4503,270 @@ index a1c9b68..e445d33 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 78a8612..070eb8c 100644
+index 78a8612..3e512c5 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-@@ -1109,15 +1109,26 @@ impl acp::Agent for MvpAgent {
+@@ -906,34 +906,68 @@ impl acp::Agent for MvpAgent {
+         let mut disallowed_custom: Option<String> = None;
+         let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
+         let build_custom_model_id = if is_chat_kind { None } else { custom_model_id };
+-        let resolved_custom_model = build_custom_model_id
+-            .and_then(|custom_model| match self
+-                .resolve_model_id(&acp::ModelId::new(custom_model))
+-            {
+-                Ok(model) if model.info.user_selectable => {
+-                    model_agent_type = Some(model.info().agent_type.clone());
+-                    let origin_client = self
+-                        .origin_client_info_from_meta(arguments.meta.as_ref());
+-                    session_sampling_override = Some(
+-                        self.prepare_sampling_config_for_model(&model, origin_client),
+-                    );
+-                    Some(custom_model)
+-                }
+-                Ok(_) => {
+-                    tracing::warn!(
+-                        requested_model = custom_model,
+-                        "Requested model not allowed by allowed_models; falling back to current default model"
+-                    );
+-                    disallowed_custom = Some(custom_model.to_string());
+-                    None
+-                }
+-                Err(_) => {
+-                    tracing::warn!(
+-                        requested_model = custom_model, fallback_model = % self
+-                        .models_manager.current_model_id().0,
+-                        "Requested model not found, falling back to current default model"
+-                    );
+-                    None
++        // `_meta.modelId` is client input, so it gets the same strict treatment
++        // as `setModel`: gated on `allowed_models`, and an id matching several
++        // entries is refused rather than resolved by position. Resolving here —
++        // *before* the session actor is built — is the point: the very same
++        // `ResolvedModelSelection` produces the initial sampling config and is
++        // handed to `apply_resolved` later, so a session can never be created on
++        // one entry and then recorded under another entry's key.
++        let resolved_custom_selection = build_custom_model_id
++            .and_then(|custom_model| {
++                let models = self.models_manager.models();
++                match crate::agent::models::resolve_requested_model(
++                    &models,
++                    &self.models_manager.available(),
++                    custom_model,
++                ) {
++                    Ok(selection) => {
++                        model_agent_type = Some(selection.entry().info().agent_type.clone());
++                        let origin_client = self
++                            .origin_client_info_from_meta(arguments.meta.as_ref());
++                        session_sampling_override = Some(
++                            self
++                                .prepare_sampling_config_for_model(
++                                    selection.entry(),
++                                    origin_client,
++                                ),
++                        );
++                        Some(selection)
++                    }
++                    Err(crate::agent::models::ModelSelectionError::Unknown(_)) => {
++                        // Configured but not selectable is the user's to fix in
++                        // settings; genuinely unknown is not. Only the former
++                        // earns the `allowed_models` notice.
++                        if self.resolve_model_trusted(custom_model).is_some() {
++                            tracing::warn!(
++                                requested_model = custom_model,
++                                "Requested model not allowed by allowed_models; falling back to current default model"
++                            );
++                            disallowed_custom = Some(custom_model.to_string());
++                        } else {
++                            tracing::warn!(
++                                requested_model = custom_model, fallback_model = % self
++                                .models_manager.current_model_id().0,
++                                "Requested model not found, falling back to current default model"
++                            );
++                        }
++                        None
++                    }
++                    Err(crate::agent::models::ModelSelectionError::Ambiguous {
++                        candidates,
++                        ..
++                    }) => {
++                        // Starting on a coin flip would bake the wrong endpoint
++                        // into the session identity from turn zero. Start on the
++                        // default and say why.
++                        tracing::warn!(
++                            requested_model = custom_model, candidate_count = candidates
++                            .len(),
++                            "Requested model matches several catalog entries; refusing to guess, starting on the default model"
++                        );
++                        disallowed_custom = Some(custom_model.to_string());
++                        None
++                    }
+                 }
+             });
+         if model_agent_type.is_none() && custom_model_id.is_none()
+@@ -982,8 +1016,13 @@ impl acp::Agent for MvpAgent {
+         let model_id = match &session_initial_model {
+             Some(chat_model) => acp::ModelId::new(chat_model.clone()),
+             None => {
+-                resolved_custom_model
+-                    .map(acp::ModelId::new)
++                // The canonical catalog key, not the raw string the client
++                // sent: this id seeds the session handle and the first Summary
++                // write, so seeding it with a routing slug is what let a
++                // restore later re-resolve to a different provider's entry.
++                resolved_custom_selection
++                    .as_ref()
++                    .map(|selection| selection.catalog_key().clone())
+                     .unwrap_or_else(|| self.models_manager.current_model_id())
+             }
+         };
+@@ -1108,16 +1147,16 @@ impl acp::Agent for MvpAgent {
+                 xai_grok_telemetry::session_ctx::log_event_dual(internal_gate_open, ev);
              });
          }
-         if let Some(model_id) = resolved_custom_model {
--            let _ = crate::timed!(
--                log : "new_session: set_session_model", { crate
+-        if let Some(model_id) = resolved_custom_model {
++        // The selection resolved above, carried through unchanged — not a second
++        // lookup from the same string, which is how the two halves of the
++        // identity used to drift apart.
++        if let Some(selection) = resolved_custom_selection {
+             let _ = crate::timed!(
+                 log : "new_session: set_session_model", { crate
 -                ::agent::handlers::model_switch::apply(self,
 -                acp::SetSessionModelRequest::new(session_id.clone(),
 -                acp::ModelId::new(model_id)),). await }
 -            );
 -            tracing::debug!(
 -                session_id = % session_id.0, "new_session: set_session_model"
--            );
-+            // Trusted: the id came from this session's own config, and a new
-+            // session may legitimately open on a non-user-selectable model.
-+            match self.resolve_model_trusted(&model_id) {
-+                Some(selection) => {
-+                    let _ = crate::timed!(
-+                        log : "new_session: set_session_model", { crate
-+                        ::agent::handlers::model_switch::apply_resolved(self, session_id
-+                        .clone(), selection, None,). await }
-+                    );
-+                    tracing::debug!(
-+                        session_id = % session_id.0, "new_session: set_session_model"
-+                    );
-+                }
-+                None => {
-+                    tracing::warn!(
-+                        session_id = % session_id.0, requested = % model_id,
-+                        "new_session: requested model is unknown or maps to several entries; keeping the default model rather than guessing"
-+                    );
-+                }
-+            }
++                ::agent::handlers::model_switch::apply_resolved(self, session_id.clone(),
++                selection, None,). await }
+             );
++            tracing::debug!(session_id = % session_id.0, "new_session: set_session_model");
          }
          if let Some(requested) = disallowed_custom {
              let current = self.models_manager.current_model_id();
-@@ -1847,12 +1858,26 @@ impl acp::Agent for MvpAgent {
+@@ -1734,12 +1773,32 @@ impl acp::Agent for MvpAgent {
+         } else {
+             available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
+         };
+-        let selectable_catalog_key = selectable_catalog_key_for_persisted(
++        // Identity first, fallbacks second. `catalog_model_id` is the exact key
++        // this session ran on and is honored unconditionally; only when it is
++        // absent (a pre-v0.18.6 record) do we fall back to matching the
++        // persisted routing slug, and a slug that matches several entries is
++        // reported as ambiguous rather than resolved by position. The old
++        // `selectable_catalog_key_for_persisted` did the opposite — a `.rev()`
++        // last-wins scan — which is precisely how a session could come back on
++        // a different provider's endpoint.
++        let mut ambiguous_candidates: Option<Vec<crate::agent::models::ModelCandidate>> = None;
++        let resolved_identity = match crate::agent::models::resolve_persisted_model(
+             &models,
+             &available,
+-            &persisted_model,
+-        );
+-        let model_id = if let Some(catalog_key) = selectable_catalog_key {
++            summary.catalog_model_id.as_ref().map(|k| k.0.as_ref()),
++            persisted_model.0.as_ref(),
++        ) {
++            crate::agent::models::PersistedModelResolution::Exact(id) => Some(id),
++            crate::agent::models::PersistedModelResolution::Migrated(id) => Some(id),
++            crate::agent::models::PersistedModelResolution::Ambiguous {
++                candidates, ..
++            } => {
++                ambiguous_candidates = Some(candidates);
++                None
++            }
++            crate::agent::models::PersistedModelResolution::NotFound => None,
++        };
++        let model_id = if let Some(catalog_key) = resolved_identity {
+             if catalog_key != persisted_model {
+                 tracing::info!(
+                     session_id = % session_id.0, persisted = % persisted_model.0,
+@@ -1757,7 +1816,44 @@ impl acp::Agent for MvpAgent {
+                     ),
+                 );
+             }
+-            catalog_key
++            Some(catalog_key)
++        } else if let Some(candidates) = ambiguous_candidates {
++            // Several entries share this slug. Any pick would be a coin flip
++            // written back as authoritative identity, so pick nothing: load the
++            // history, block prompting, and let the user say which one they
++            // meant. `model_unavailable_sessions` already gives us exactly that
++            // hold — the session is unusable until a model is chosen either way.
++            let listed = candidates
++                .iter()
++                .map(|c| format!("{} ({})", c.id, c.endpoint_label))
++                .collect::<Vec<_>>()
++                .join(", ");
++            tracing::warn!(
++                session_id = % session_id.0, persisted = % persisted_model.0,
++                candidates = % listed,
++                "load_session: persisted model id matches several catalog entries; refusing to guess, holding the session until the user chooses"
++            );
++            xai_grok_telemetry::unified_log::warn(
++                "load_session: ambiguous persisted model, session held for user choice",
++                Some(session_id.0.as_ref()),
++                Some(
++                    serde_json::json!(
++                        { "persisted_model" : persisted_model.0.as_ref(), "candidates"
++                        : candidates, }
++                    ),
++                ),
++            );
++            let reason = format!(
++                "\"{}\" matches more than one configured model ({listed}). Pick the one you meant to continue this session.",
++                persisted_model.0,
++            );
++            let empty_id = acp::ModelId::new(String::new());
++            self.send_model_auto_switched(&session_id, &persisted_model, &empty_id, &reason)
++                .await;
++            self.model_unavailable_sessions
++                .borrow_mut()
++                .insert(session_id.0.to_string(), persisted_model.clone());
++            None
+         } else if available.is_empty() {
+             tracing::warn!(
+                 session_id = % session_id.0, persisted = % persisted_model.0,
+@@ -1772,7 +1868,7 @@ impl acp::Agent for MvpAgent {
+                     ),
+                 ),
+             );
+-            persisted_model
++            Some(persisted_model)
+         } else if let Some(fallback) = same_family_fallback {
+             tracing::warn!(
+                 session_id = % session_id.0, previous = % persisted_model.0, new = %
+@@ -1790,7 +1886,7 @@ impl acp::Agent for MvpAgent {
+                     &reason,
+                 )
+                 .await;
+-            fallback
++            Some(fallback)
+         } else {
+             let fallback = available
+                 .keys()
+@@ -1829,13 +1925,18 @@ impl acp::Agent for MvpAgent {
+             self.model_unavailable_sessions
+                 .borrow_mut()
+                 .insert(session_id.0.to_string(), persisted_model.clone());
+-            fallback
++            Some(fallback)
+         };
+         tracing::debug!(
+-            session_id = % session_id.0, final_model_id = % model_id.0,
++            session_id = % session_id.0, final_model_id = ? model_id.as_ref().map(| m | m
++            .0.as_ref()),
+             "load_session: resolved final model_id for set_session_model"
+         );
+-        {
++        // `None` means the identity could not be pinned — an ambiguous legacy
++        // slug, or nothing usable left in the catalog. The session still loads
++        // and its history is readable; it simply does not switch onto a guessed
++        // model. Prompting is already held by whichever branch produced `None`.
++        if let Some(model_id) = model_id {
+             let _timer = crate::instrumentation_timer!("session.restore_model");
+             let restore_meta = summary
+                 .reasoning_effort
+@@ -1847,12 +1948,26 @@ impl acp::Agent for MvpAgent {
                      );
                      map
                  });
@@ -4550,7 +4799,7 @@ index 78a8612..070eb8c 100644
          }
          let mut response_meta_map = serde_json::Map::new();
          response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-@@ -2038,20 +2063,30 @@ impl acp::Agent for MvpAgent {
+@@ -2038,20 +2153,30 @@ impl acp::Agent for MvpAgent {
                  self.model_unavailable_sessions
                      .borrow_mut()
                      .remove(arguments.session_id.0.as_ref());
@@ -4595,7 +4844,7 @@ index 78a8612..070eb8c 100644
                  }
              } else {
                  tracing::warn!(
-@@ -3119,15 +3154,40 @@ impl acp::Agent for MvpAgent {
+@@ -3119,15 +3244,40 @@ impl acp::Agent for MvpAgent {
          &self,
          args: acp::SetSessionModelRequest,
      ) -> Result<acp::SetSessionModelResponse, acp::Error> {
