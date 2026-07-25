@@ -544,3 +544,158 @@ mod quick_setup_gate_tests {
         assert!(!cfg.exists());
     }
 }
+
+/// v0.18.6 步 0（RED）：模型身份不变量。
+///
+/// 根因（双证据）：`session/acp_session_impl/model_switch.rs:13` 把
+/// `sampling_config.model`（上游 slug）包成 `model_id` 写进
+/// `PersistenceMsg::CurrentModel`；恢复时按 slug 反查、`.rev()` 最后一个胜出。
+/// 磁盘实证：config key = `my-test-model` 的会话，events.jsonl 里存的是
+/// `"model_id":"glm-4.6"`。两个条目共用同一 slug（同模型走不同代理，是合法
+/// 需求）时，恢复会话就会串到别的端点——用户实报的正是这一现象。
+///
+/// 不变量：config key 是唯一身份；slug 只有唯一匹配时才允许兜底；重复时
+/// 必须报歧义让用户选，**绝不猜**。
+#[cfg(test)]
+mod model_identity_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{resolve_persisted_model, PersistedModelResolution};
+
+    fn entry(slug: &str, base_url: &str, name: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        info.name = Some(name.to_owned());
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    /// 目录：两个条目共用 slug `glm-4.6`，分别指向智谱官方与自建代理。
+    fn dup_slug_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        models.insert(
+            "zhipu-glm".to_owned(),
+            entry("glm-4.6", "https://open.bigmodel.cn/api/paas/v4", "GLM 智谱官方"),
+        );
+        models.insert(
+            "my-test-model".to_owned(),
+            entry("glm-4.6", "https://api.company.com/v1", "GLM 公司代理"),
+        );
+        let available = available_of(&models);
+        (models, available)
+    }
+
+    fn available_of(
+        models: &IndexMap<String, ModelEntry>,
+    ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+        models
+            .iter()
+            .map(|(k, e)| {
+                let id = acp::ModelId::new(k.clone());
+                let name = e.info.name.clone().unwrap_or_else(|| e.info.model.clone());
+                (id.clone(), acp::ModelInfo::new(id, name))
+            })
+            .collect()
+    }
+
+    /// RED ①：新格式会话带 catalog_model_id —— slug 重复也必须精确命中原条目。
+    /// 这是修复的核心：`.rev()` 猜测被 config key 取代。
+    #[test]
+    fn exact_catalog_key_wins_over_duplicate_slug() {
+        let (models, available) = dup_slug_catalog();
+        let r = resolve_persisted_model(&models, &available, Some("my-test-model"), "glm-4.6");
+        assert_eq!(
+            r,
+            PersistedModelResolution::Exact(acp::ModelId::new("my-test-model")),
+            "带 catalog_model_id 的会话必须精确恢复到该 config key，不得按 slug 重猜"
+        );
+    }
+
+    /// RED ②：旧格式（无 catalog_model_id）+ slug 唯一 → 自动迁移。
+    #[test]
+    fn legacy_unique_slug_migrates_to_key() {
+        let mut models = IndexMap::new();
+        models.insert(
+            "only-one".to_owned(),
+            entry("glm-4.6", "https://api.company.com/v1", "唯一条目"),
+        );
+        let available = available_of(&models);
+        let r = resolve_persisted_model(&models, &available, None, "glm-4.6");
+        assert_eq!(
+            r,
+            PersistedModelResolution::Migrated(acp::ModelId::new("only-one")),
+            "旧会话 slug 唯一匹配时应自动迁移为 config key"
+        );
+    }
+
+    /// RED ③：旧格式 + slug 重复 → 必须歧义报错，附带候选，绝不静默挑一个。
+    /// endpoint_label 只给主机名（不得含完整 URL/查询参数/Key）。
+    #[test]
+    fn legacy_duplicate_slug_is_ambiguous_never_guesses() {
+        let (models, available) = dup_slug_catalog();
+        let r = resolve_persisted_model(&models, &available, None, "glm-4.6");
+        match r {
+            PersistedModelResolution::Ambiguous { legacy_model, candidates } => {
+                assert_eq!(legacy_model, "glm-4.6");
+                let ids: Vec<_> = candidates.iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, vec!["zhipu-glm", "my-test-model"], "候选需按目录顺序稳定给出");
+                let labels: Vec<_> = candidates.iter().map(|c| c.endpoint_label.as_str()).collect();
+                assert_eq!(
+                    labels,
+                    vec!["open.bigmodel.cn", "api.company.com"],
+                    "endpoint_label 必须只有主机名"
+                );
+                assert!(
+                    candidates.iter().all(|c| !c.endpoint_label.contains("http")
+                        && !c.endpoint_label.contains('/')),
+                    "endpoint_label 不得泄漏完整 URL"
+                );
+            }
+            other => panic!("重复 slug 必须报歧义，实际: {other:?}"),
+        }
+    }
+
+    /// RED ④：catalog_model_id 指向已删除的条目、但 slug 唯一 → 迁移到幸存条目。
+    #[test]
+    fn stale_catalog_key_with_unique_slug_migrates() {
+        let mut models = IndexMap::new();
+        models.insert(
+            "survivor".to_owned(),
+            entry("glm-4.6", "https://api.company.com/v1", "幸存条目"),
+        );
+        let available = available_of(&models);
+        let r = resolve_persisted_model(&models, &available, Some("deleted-key"), "glm-4.6");
+        assert_eq!(
+            r,
+            PersistedModelResolution::Migrated(acp::ModelId::new("survivor")),
+            "key 已删但 slug 唯一时应迁移，而不是判定找不到"
+        );
+    }
+
+    /// RED ⑤：catalog_model_id 已删除且 slug 重复 → 要求用户重选。
+    #[test]
+    fn stale_catalog_key_with_duplicate_slug_requires_user_choice() {
+        let (models, available) = dup_slug_catalog();
+        let r = resolve_persisted_model(&models, &available, Some("deleted-key"), "glm-4.6");
+        assert!(
+            matches!(r, PersistedModelResolution::Ambiguous { .. }),
+            "key 已删且 slug 重复时必须让用户重选，实际: {r:?}"
+        );
+    }
+
+    /// 绿色基线（非 RED，防回归）：按 config key 直取条目，端点始终是它自己的。
+    /// 主切换路径是 entry-carried（`prepare_sampling_config_for_model` 收 ModelEntry），
+    /// 本来就正确——修持久化时不得把它破坏。
+    #[test]
+    fn direct_key_lookup_keeps_its_own_endpoint() {
+        let (models, _) = dup_slug_catalog();
+        assert_eq!(
+            models.get("my-test-model").unwrap().info.base_url,
+            "https://api.company.com/v1"
+        );
+        assert_eq!(
+            models.get("zhipu-glm").unwrap().info.base_url,
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+    }
+}

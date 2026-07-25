@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 695ef59..479e2ec 100644
+index 695ef59..c7804ed 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -88,7 +88,7 @@ version = "0.26.0"
@@ -3162,17 +3162,18 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "vte"
  version = "0.14.1"
-@@ -11526,6 +13413,36 @@ dependencies = [
+@@ -11526,6 +13413,37 @@ dependencies = [
   "winapi-util",
  ]
  
 +[[package]]
 +name = "wancode"
-+version = "0.18.3"
++version = "0.18.5"
 +dependencies = [
 + "agent-client-protocol",
 + "anyhow",
 + "git2",
++ "indexmap 2.12.0",
 + "keyring",
 + "reqwest 0.12.24",
 + "serde",
@@ -3199,7 +3200,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "want"
  version = "0.3.1"
-@@ -11535,6 +13452,12 @@ dependencies = [
+@@ -11535,6 +13453,12 @@ dependencies = [
   "try-lock",
  ]
  
@@ -3212,7 +3213,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "wasi"
  version = "0.11.1+wasi-snapshot-preview1"
-@@ -11641,7 +13564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11641,7 +13565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
  dependencies = [
   "anyhow",
@@ -3221,7 +3222,7 @@ index 695ef59..479e2ec 100644
   "wasm-encoder",
   "wasmparser",
  ]
-@@ -11680,7 +13603,7 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
+@@ -11680,7 +13604,7 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
  dependencies = [
   "bitflags 2.13.0",
   "hashbrown 0.15.5",
@@ -3230,7 +3231,7 @@ index 695ef59..479e2ec 100644
   "semver",
  ]
  
-@@ -11802,6 +13725,50 @@ dependencies = [
+@@ -11802,6 +13726,50 @@ dependencies = [
   "web-sys",
  ]
  
@@ -3281,7 +3282,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "webpki-root-certs"
  version = "1.0.3"
-@@ -11829,6 +13796,42 @@ dependencies = [
+@@ -11829,6 +13797,42 @@ dependencies = [
   "rustls-pki-types",
  ]
  
@@ -3324,7 +3325,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "weezl"
  version = "0.1.10"
-@@ -11960,6 +13963,21 @@ version = "0.4.0"
+@@ -11960,6 +13964,21 @@ version = "0.4.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
  
@@ -3346,7 +3347,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "windows"
  version = "0.54.0"
-@@ -12305,6 +14323,15 @@ dependencies = [
+@@ -12305,6 +14324,15 @@ dependencies = [
   "windows-link 0.2.1",
  ]
  
@@ -3362,7 +3363,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "windows_aarch64_gnullvm"
  version = "0.42.2"
-@@ -12485,6 +14512,15 @@ version = "0.53.1"
+@@ -12485,6 +14513,15 @@ version = "0.53.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
  
@@ -3378,7 +3379,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "winnow"
  version = "0.7.14"
-@@ -12513,6 +14549,16 @@ dependencies = [
+@@ -12513,6 +14550,16 @@ dependencies = [
   "windows-sys 0.48.0",
  ]
  
@@ -3395,7 +3396,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "winsafe"
  version = "0.0.19"
-@@ -12526,7 +14572,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12526,7 +14573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "08db1edfb05d9b3c1542e521aea074442088292f00b5f28e435c714a98f85031"
  dependencies = [
   "assert-json-diff",
@@ -3404,7 +3405,7 @@ index 695ef59..479e2ec 100644
   "deadpool",
   "futures",
   "http 1.4.0",
-@@ -12564,7 +14610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12564,7 +14611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
  dependencies = [
   "anyhow",
@@ -3413,7 +3414,7 @@ index 695ef59..479e2ec 100644
   "wit-parser",
  ]
  
-@@ -12575,8 +14621,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12575,8 +14622,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
  dependencies = [
   "anyhow",
@@ -3424,7 +3425,7 @@ index 695ef59..479e2ec 100644
   "prettyplease",
   "syn 2.0.117",
   "wasm-metadata",
-@@ -12607,7 +14653,7 @@ checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
+@@ -12607,7 +14654,7 @@ checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
  dependencies = [
   "anyhow",
   "bitflags 2.13.0",
@@ -3433,7 +3434,7 @@ index 695ef59..479e2ec 100644
   "log",
   "serde",
   "serde_derive",
-@@ -12626,7 +14672,7 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
+@@ -12626,7 +14673,7 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
  dependencies = [
   "anyhow",
   "id-arena",
@@ -3442,7 +3443,7 @@ index 695ef59..479e2ec 100644
   "log",
   "semver",
   "serde",
-@@ -12661,7 +14707,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -12661,7 +14708,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "886614b5ce857341226aa091f3c285e450683894acaaa7887f366c361efef79d"
  dependencies = [
   "font-types",
@@ -3451,7 +3452,7 @@ index 695ef59..479e2ec 100644
   "kurbo 0.12.0",
   "log",
   "read-fonts",
-@@ -12673,6 +14719,72 @@ version = "0.6.1"
+@@ -12673,6 +14720,72 @@ version = "0.6.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ea2f10b9bb0928dfb1b42b65e1f9e36f7f54dbdf08457afefb38afcdec4fa2bb"
  
@@ -3524,7 +3525,7 @@ index 695ef59..479e2ec 100644
  [[package]]
  name = "x11rb"
  version = "0.13.2"
-@@ -12742,7 +14854,7 @@ dependencies = [
+@@ -12742,7 +14855,7 @@ dependencies = [
  name = "xai-chat-state"
  version = "0.1.0"
  dependencies = [
@@ -3533,7 +3534,7 @@ index 695ef59..479e2ec 100644
   "regex",
   "serde",
   "serde_json",
-@@ -12840,14 +14952,14 @@ dependencies = [
+@@ -12840,14 +14953,14 @@ dependencies = [
   "arc-swap",
   "async-trait",
   "axum",
@@ -3550,7 +3551,7 @@ index 695ef59..479e2ec 100644
   "opentelemetry",
   "opentelemetry-proto",
   "opentelemetry_sdk",
-@@ -12925,14 +15037,14 @@ dependencies = [
+@@ -12925,14 +15038,14 @@ dependencies = [
   "aws-sdk-s3",
   "aws-smithy-http-client",
   "axum",
@@ -3567,7 +3568,7 @@ index 695ef59..479e2ec 100644
   "opentelemetry",
   "opentelemetry_sdk",
   "prod-mc-cli-chat-proxy-types",
-@@ -13062,7 +15174,7 @@ dependencies = [
+@@ -13062,7 +15175,7 @@ dependencies = [
  name = "xai-grok-config"
  version = "0.1.0"
  dependencies = [
@@ -3576,7 +3577,7 @@ index 695ef59..479e2ec 100644
   "blake3",
   "core-foundation",
   "dunce",
-@@ -13074,7 +15186,7 @@ dependencies = [
+@@ -13074,7 +15187,7 @@ dependencies = [
   "shellexpand",
   "tempfile",
   "thiserror 2.0.18",
@@ -3585,7 +3586,7 @@ index 695ef59..479e2ec 100644
   "tracing",
   "urlencoding",
   "which",
-@@ -13087,7 +15199,7 @@ name = "xai-grok-config-types"
+@@ -13087,7 +15200,7 @@ name = "xai-grok-config-types"
  version = "0.1.0"
  dependencies = [
   "agent-client-protocol",
@@ -3594,7 +3595,7 @@ index 695ef59..479e2ec 100644
   "serde",
   "serde_json",
   "strum 0.27.2",
-@@ -13276,7 +15388,7 @@ dependencies = [
+@@ -13276,7 +15389,7 @@ dependencies = [
   "ansi-to-tui",
   "anyhow",
   "backon",
@@ -3603,7 +3604,7 @@ index 695ef59..479e2ec 100644
   "blake3",
   "chrono",
   "clap",
-@@ -13291,7 +15403,7 @@ dependencies = [
+@@ -13291,7 +15404,7 @@ dependencies = [
   "flate2",
   "git2",
   "image",
@@ -3612,7 +3613,7 @@ index 695ef59..479e2ec 100644
   "insta",
   "libc",
   "nix 0.30.1",
-@@ -13317,7 +15429,7 @@ dependencies = [
+@@ -13317,7 +15430,7 @@ dependencies = [
   "textwrap",
   "tokio",
   "tokio-util",
@@ -3621,7 +3622,7 @@ index 695ef59..479e2ec 100644
   "toml_edit 0.22.27",
   "tracing",
   "tracing-subscriber",
-@@ -13415,7 +15527,7 @@ version = "0.1.0"
+@@ -13415,7 +15528,7 @@ version = "0.1.0"
  dependencies = [
   "alacritty_terminal",
   "anyhow",
@@ -3630,7 +3631,7 @@ index 695ef59..479e2ec 100644
   "clap",
   "dunce",
   "image",
-@@ -13441,7 +15553,7 @@ dependencies = [
+@@ -13441,7 +15554,7 @@ dependencies = [
   "agent-client-protocol",
   "anstyle",
   "anyhow",
@@ -3639,7 +3640,7 @@ index 695ef59..479e2ec 100644
   "crossterm",
   "dark-light",
   "dirs 5.0.1",
-@@ -13464,7 +15576,7 @@ dependencies = [
+@@ -13464,7 +15577,7 @@ dependencies = [
   "tempfile",
   "textwrap",
   "tokio",
@@ -3648,7 +3649,7 @@ index 695ef59..479e2ec 100644
   "toml_edit 0.22.27",
   "tracing",
   "tui-scrollbar",
-@@ -13509,7 +15621,7 @@ dependencies = [
+@@ -13509,7 +15622,7 @@ dependencies = [
   "serde_json",
   "tempfile",
   "thiserror 2.0.18",
@@ -3657,7 +3658,7 @@ index 695ef59..479e2ec 100644
   "tracing",
   "xai-grok-agent",
   "xai-grok-config",
-@@ -13527,7 +15639,7 @@ dependencies = [
+@@ -13527,7 +15640,7 @@ dependencies = [
   "chrono",
   "eventsource-stream",
   "futures-util",
@@ -3666,7 +3667,7 @@ index 695ef59..479e2ec 100644
   "reqwest 0.12.24",
   "serde",
   "serde_json",
-@@ -13546,7 +15658,7 @@ version = "0.1.0"
+@@ -13546,7 +15659,7 @@ version = "0.1.0"
  dependencies = [
   "assert_matches",
   "async-openai",
@@ -3675,7 +3676,7 @@ index 695ef59..479e2ec 100644
   "reqwest 0.12.24",
   "serde",
   "serde_json",
-@@ -13572,7 +15684,7 @@ dependencies = [
+@@ -13572,7 +15685,7 @@ dependencies = [
   "serde",
   "serde_json",
   "serial_test",
@@ -3684,7 +3685,7 @@ index 695ef59..479e2ec 100644
   "tracing",
   "xai-grok-config",
  ]
-@@ -13593,7 +15705,7 @@ dependencies = [
+@@ -13593,7 +15706,7 @@ dependencies = [
   "agent-client-protocol",
   "anyhow",
   "arboard",
@@ -3693,7 +3694,7 @@ index 695ef59..479e2ec 100644
   "dirs 6.0.0",
   "dunce",
   "image",
-@@ -13627,7 +15739,7 @@ dependencies = [
+@@ -13627,7 +15740,7 @@ dependencies = [
   "async-trait",
   "axum",
   "backon",
@@ -3702,7 +3703,7 @@ index 695ef59..479e2ec 100644
   "blake3",
   "bm25",
   "bytes",
-@@ -13649,7 +15761,7 @@ dependencies = [
+@@ -13649,7 +15762,7 @@ dependencies = [
   "globset",
   "ignore",
   "image",
@@ -3711,7 +3712,7 @@ index 695ef59..479e2ec 100644
   "infer 0.15.0",
   "jsonschema",
   "jsonwebtoken",
-@@ -13683,7 +15795,7 @@ dependencies = [
+@@ -13683,7 +15796,7 @@ dependencies = [
   "sha2 0.10.9",
   "shlex",
   "similar",
@@ -3720,7 +3721,7 @@ index 695ef59..479e2ec 100644
   "strum 0.27.2",
   "tar",
   "tdigests",
-@@ -13695,7 +15807,7 @@ dependencies = [
+@@ -13695,7 +15808,7 @@ dependencies = [
   "tokio-stream",
   "tokio-tungstenite 0.27.0",
   "tokio-util",
@@ -3729,7 +3730,7 @@ index 695ef59..479e2ec 100644
   "toml_edit 0.22.27",
   "tonic",
   "tonic-prost",
-@@ -13811,7 +15923,7 @@ dependencies = [
+@@ -13811,7 +15924,7 @@ dependencies = [
   "serde_json",
   "tempfile",
   "thiserror 2.0.18",
@@ -3738,7 +3739,7 @@ index 695ef59..479e2ec 100644
   "tracing",
   "xai-grok-sampling-types",
   "xai-grok-tools",
-@@ -13901,7 +16013,7 @@ dependencies = [
+@@ -13901,7 +16014,7 @@ dependencies = [
   "async-openai",
   "async-stream",
   "async-trait",
@@ -3747,7 +3748,7 @@ index 695ef59..479e2ec 100644
   "chrono",
   "command-fds",
   "crc32fast",
-@@ -13917,7 +16029,7 @@ dependencies = [
+@@ -13917,7 +16030,7 @@ dependencies = [
   "htmd",
   "ignore",
   "image",
@@ -3756,7 +3757,7 @@ index 695ef59..479e2ec 100644
   "infer 0.19.0",
   "libc",
   "minijinja",
-@@ -13967,7 +16079,7 @@ dependencies = [
+@@ -13967,7 +16080,7 @@ dependencies = [
   "xai-tool-runtime",
   "xai-tool-types",
   "xai-tty-utils",
@@ -3765,7 +3766,7 @@ index 695ef59..479e2ec 100644
  ]
  
  [[package]]
-@@ -14027,7 +16139,7 @@ dependencies = [
+@@ -14027,7 +16140,7 @@ dependencies = [
   "thiserror 2.0.18",
   "tokio",
   "tokio-tungstenite 0.27.0",
@@ -3774,7 +3775,7 @@ index 695ef59..479e2ec 100644
   "tracing",
   "tracing-subscriber",
   "url",
-@@ -14043,7 +16155,7 @@ dependencies = [
+@@ -14043,7 +16156,7 @@ dependencies = [
   "async-stream",
   "async-trait",
   "axum",
@@ -3783,7 +3784,7 @@ index 695ef59..479e2ec 100644
   "bstr",
   "chrono",
   "clap",
-@@ -14060,7 +16172,7 @@ dependencies = [
+@@ -14060,7 +16173,7 @@ dependencies = [
   "hashbrown 0.16.1",
   "humantime-serde",
   "ignore",
@@ -3792,7 +3793,7 @@ index 695ef59..479e2ec 100644
   "infer 0.19.0",
   "libc",
   "md5",
-@@ -14083,7 +16195,7 @@ dependencies = [
+@@ -14083,7 +16196,7 @@ dependencies = [
   "tokio",
   "tokio-tungstenite 0.27.0",
   "tokio-util",
@@ -3801,7 +3802,7 @@ index 695ef59..479e2ec 100644
   "tonic",
   "tracing",
   "tracing-subscriber",
-@@ -14147,7 +16259,7 @@ dependencies = [
+@@ -14147,7 +16260,7 @@ dependencies = [
  name = "xai-grok-workspace-types"
  version = "0.1.0"
  dependencies = [
@@ -3810,7 +3811,7 @@ index 695ef59..479e2ec 100644
   "chrono",
   "serde",
   "serde_json",
-@@ -14194,7 +16306,7 @@ dependencies = [
+@@ -14194,7 +16307,7 @@ dependencies = [
  name = "xai-mixpanel"
  version = "0.1.0"
  dependencies = [
@@ -3819,7 +3820,7 @@ index 695ef59..479e2ec 100644
   "reqwest 0.12.24",
   "serde_json",
   "thiserror 2.0.18",
-@@ -14472,7 +16584,7 @@ dependencies = [
+@@ -14472,7 +16585,7 @@ dependencies = [
   "uds_windows",
   "uuid",
   "windows-sys 0.61.2",
@@ -3828,7 +3829,7 @@ index 695ef59..479e2ec 100644
   "zbus_macros",
   "zbus_names",
   "zvariant",
-@@ -14484,7 +16596,7 @@ version = "5.14.0"
+@@ -14484,7 +16597,7 @@ version = "5.14.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "897e79616e84aac4b2c46e9132a4f63b93105d54fe8c0e8f6bffc21fa8d49222"
  dependencies = [
@@ -3837,7 +3838,7 @@ index 695ef59..479e2ec 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -14500,7 +16612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -14500,7 +16613,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ffd8af6d5b78619bab301ff3c560a5bd22426150253db278f164d6cf3b72c50f"
  dependencies = [
   "serde",
@@ -3846,7 +3847,7 @@ index 695ef59..479e2ec 100644
   "zvariant",
  ]
  
-@@ -14607,7 +16719,19 @@ dependencies = [
+@@ -14607,7 +16720,19 @@ dependencies = [
   "arbitrary",
   "crc32fast",
   "flate2",
@@ -3867,7 +3868,7 @@ index 695ef59..479e2ec 100644
   "memchr",
  ]
  
-@@ -14697,7 +16821,7 @@ dependencies = [
+@@ -14697,7 +16822,7 @@ dependencies = [
   "enumflags2",
   "serde",
   "url",
@@ -3876,7 +3877,7 @@ index 695ef59..479e2ec 100644
   "zvariant_derive",
   "zvariant_utils",
  ]
-@@ -14708,7 +16832,7 @@ version = "5.10.0"
+@@ -14708,7 +16833,7 @@ version = "5.10.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "5b59b012ebe9c46656f9cc08d8da8b4c726510aef12559da3e5f1bf72780752c"
  dependencies = [
@@ -3885,7 +3886,7 @@ index 695ef59..479e2ec 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -14725,5 +16849,5 @@ dependencies = [
+@@ -14725,5 +16850,5 @@ dependencies = [
   "quote",
   "serde",
   "syn 2.0.117",
@@ -3993,6 +3994,132 @@ index 662052d..f39e7b4 100644
      pub object: String,
      pub created: u64,
      pub model: String,
+diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
+index a1c9b68..72e99e9 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/models.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
+@@ -1649,6 +1649,121 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+     resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
+ }
+ 
++/// One selectable catalog entry offered to the user when a legacy persisted
++/// slug is ambiguous. `endpoint_label` is the **host only** — never the full
++/// URL, query string, or any credential.
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++pub struct ModelCandidate {
++    /// Catalog key — the stable identity that must be persisted.
++    pub id: String,
++    /// Display name (falls back to the routing slug).
++    pub name: String,
++    /// Host of `base_url`, e.g. `open.bigmodel.cn`.
++    pub endpoint_label: String,
++}
++
++/// Outcome of resolving a persisted session model back to a catalog entry.
++///
++/// The identity split this encodes:
++/// - `catalog_model_id` — config key, the only stable identity;
++/// - `legacy_model_id` — the upstream routing slug older sessions persisted
++///   (and which newer sessions still keep for diagnostics).
++///
++/// Duplicate slugs across entries (same model reached through different
++/// proxies) are legitimate, so a slug alone may not identify an entry. When it
++/// doesn't, this never guesses — it reports the candidates and lets the user
++/// choose. That guess is exactly what routed a restored session to the wrong
++/// endpoint before (`.rev()` last-wins in `selectable_catalog_key_for_persisted`).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum PersistedModelResolution {
++    /// `catalog_model_id` was present and still selectable — restore verbatim.
++    Exact(acp::ModelId),
++    /// No usable catalog key, but the legacy slug matched exactly one
++    /// selectable entry. Caller restores it and writes the key back.
++    Migrated(acp::ModelId),
++    /// The legacy slug matches several selectable entries. Load the history,
++    /// pause sending, and ask the user which entry this session meant.
++    Ambiguous {
++        legacy_model: String,
++        candidates: Vec<ModelCandidate>,
++    },
++    /// Nothing in the catalog matches.
++    NotFound,
++}
++
++/// Display host for a base URL: authority only, userinfo stripped. Credentials
++/// embedded in a URL (`https://user:pass@host/…`) must never reach the UI.
++fn endpoint_host(base_url: &str) -> String {
++    let after_scheme = base_url
++        .split_once("://")
++        .map(|(_, rest)| rest)
++        .unwrap_or(base_url);
++    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
++    authority
++        .rsplit_once('@')
++        .map(|(_, host)| host)
++        .unwrap_or(authority)
++        .to_owned()
++}
++
++/// Resolve a persisted session model to a catalog key. See
++/// [`PersistedModelResolution`] for the rules.
++///
++/// Order matters: the catalog key is consulted first, and the legacy slug is
++/// only ever a *unique*-match fallback. Notably the slug is **not** looked up
++/// as a catalog key before the duplicate scan — doing so would let an entry
++/// literally keyed `glm-4.6` silently win over a same-slug proxy entry, which
++/// is the ambiguity this function exists to surface.
++pub fn resolve_persisted_model(
++    models: &IndexMap<String, ModelEntry>,
++    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
++    catalog_model_id: Option<&str>,
++    legacy_model_id: &str,
++) -> PersistedModelResolution {
++    if let Some(key) = catalog_model_id {
++        let id = acp::ModelId::new(key.to_owned());
++        if available.contains_key(&id) {
++            return PersistedModelResolution::Exact(id);
++        }
++    }
++    let matches: Vec<(&String, &ModelEntry)> = models
++        .iter()
++        .filter(|(key, entry)| {
++            entry.info.model == legacy_model_id
++                && available.contains_key(&acp::ModelId::new((*key).clone()))
++        })
++        .collect();
++    match matches.len() {
++        // No slug match at all: the record may predate slugs being written and
++        // already hold a catalog key. Safe to accept — nothing to be ambiguous
++        // with.
++        0 => {
++            let id = acp::ModelId::new(legacy_model_id.to_owned());
++            if available.contains_key(&id) {
++                PersistedModelResolution::Migrated(id)
++            } else {
++                PersistedModelResolution::NotFound
++            }
++        }
++        1 => PersistedModelResolution::Migrated(acp::ModelId::new(matches[0].0.clone())),
++        _ => PersistedModelResolution::Ambiguous {
++            legacy_model: legacy_model_id.to_owned(),
++            candidates: matches
++                .iter()
++                .map(|(key, entry)| ModelCandidate {
++                    id: (*key).clone(),
++                    name: entry
++                        .info
++                        .name
++                        .clone()
++                        .unwrap_or_else(|| entry.info.model.clone()),
++                    endpoint_label: endpoint_host(&entry.info.base_url),
++                })
++                .collect(),
++        },
++    }
++}
++
+ /// A "campaign-only" preferred flip: the default changed and either side's value
+ /// is an active campaign default, i.e. the change is attributable to a campaign
+ /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs
 index 91e7f14..d425006 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/interjection.rs

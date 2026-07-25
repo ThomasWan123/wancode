@@ -40,6 +40,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 agent-client-protocol = { workspace = true }
+indexmap = { workspace = true }
 xai-acp-lib = { path = "../../grok-build/crates/codegen/xai-acp-lib" }
 xai-grok-paths = { path = "../../grok-build/crates/codegen/xai-grok-paths" }
 xai-grok-pager = { path = "../../grok-build/crates/codegen/xai-grok-pager" }
