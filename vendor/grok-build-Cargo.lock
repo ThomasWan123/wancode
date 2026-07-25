@@ -13415,11 +13415,12 @@ dependencies = [
 
 [[package]]
 name = "wancode"
-version = "0.12.2"
+version = "0.18.5"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "git2",
+ "indexmap 2.12.0",
  "keyring",
  "reqwest 0.12.24",
  "serde",
@@ -13434,9 +13435,11 @@ dependencies = [
  "tokio-util",
  "toml_edit 0.22.27",
  "tracing",
+ "windows-sys 0.59.0",
  "xai-acp-lib",
  "xai-grok-pager",
  "xai-grok-paths",
+ "xai-grok-sampling-types",
  "xai-grok-shell",
  "xai-grok-tools",
 ]

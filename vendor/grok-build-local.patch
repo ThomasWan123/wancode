@@ -4023,10 +4023,10 @@ index 2d4043a..a103af4 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..7e64ab1 100644
+index a1c9b68..bc26ef7 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,259 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,270 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4103,12 +4103,19 @@ index a1c9b68..7e64ab1 100644
 +    catalog_model_id: Option<&str>,
 +    legacy_model_id: &str,
 +) -> PersistedModelResolution {
++    // Exact identity is honored unconditionally — `available` is the
++    // *user-selectable* set, and restoring a session is not a user selection.
++    // Gating this on selectability would fail to restore internal/hidden
++    // models that hold a perfectly accurate catalog key (the same mistake
++    // `catalog_patch_for_ungated_switch` had to be corrected for).
 +    if let Some(key) = catalog_model_id {
-+        let id = acp::ModelId::new(key.to_owned());
-+        if available.contains_key(&id) {
-+            return PersistedModelResolution::Exact(id);
++        if models.contains_key(key) {
++            return PersistedModelResolution::Exact(acp::ModelId::new(key.to_owned()));
 +        }
 +    }
++    // Migration, by contrast, IS a guess presented to the user, so it stays
++    // inside the selectable set: offering a hidden model as a disambiguation
++    // candidate would give the user a choice they cannot make.
 +    let matches: Vec<(&String, &ModelEntry)> = models
 +        .iter()
 +        .filter(|(key, entry)| {
@@ -4117,13 +4124,17 @@ index a1c9b68..7e64ab1 100644
 +        })
 +        .collect();
 +    match matches.len() {
-+        // No slug match at all: the record may predate slugs being written and
-+        // already hold a catalog key. Safe to accept — nothing to be ambiguous
-+        // with.
 +        0 => {
-+            let id = acp::ModelId::new(legacy_model_id.to_owned());
-+            if available.contains_key(&id) {
-+                PersistedModelResolution::Migrated(id)
++            // No selectable slug match. Before giving up, two exact (non-guess)
++            // fallbacks: a unique slug match anywhere in the catalog — which
++            // recovers a legacy hidden-model session — then the record already
++            // holding a catalog key (predates slugs being written).
++            let mut all = models.iter().filter(|(_, e)| e.info.model == legacy_model_id);
++            if let (Some((key, _)), None) = (all.next(), all.next()) {
++                return PersistedModelResolution::Migrated(acp::ModelId::new(key.clone()));
++            }
++            if models.contains_key(legacy_model_id) {
++                PersistedModelResolution::Migrated(acp::ModelId::new(legacy_model_id.to_owned()))
 +            } else {
 +                PersistedModelResolution::NotFound
 +            }

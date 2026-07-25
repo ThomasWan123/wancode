@@ -1012,3 +1012,101 @@ mod hidden_model_identity_tests {
         );
     }
 }
+
+/// v0.18.6 步2（RED，feature branch）：Codex 指定的四条硬边界测试。
+///
+/// 其中"同名字面值"三条是他两次点名要的回归护栏——防止未来开发者重新混淆
+/// "请求里的精确 key"与"旧文件里的 slug"。目录构造刻意让一个条目的 key
+/// 字面上等于另一个条目的 slug：
+///     key = glm-4.6      slug = glm-4.6   （条目 A）
+///     key = company-proxy slug = glm-4.6   （条目 B）
+#[cfg(test)]
+mod literal_name_collision_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{
+        resolve_persisted_model, resolve_requested_model, PersistedModelResolution,
+        ModelSelectionError,
+    };
+
+    fn entry(slug: &str, base_url: &str, selectable: bool) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base_url.to_owned();
+        info.user_selectable = selectable;
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn collision_catalog(
+    ) -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        // A：key 字面就叫 glm-4.6，slug 也是 glm-4.6
+        models.insert("glm-4.6".to_owned(), entry("glm-4.6", "https://official/v1", true));
+        // B：key 不同，但 slug 与 A 相同
+        models.insert("company-proxy".to_owned(), entry("glm-4.6", "https://proxy/v1", true));
+        let available = models
+            .iter()
+            .filter(|(_, e)| e.info.user_selectable)
+            .map(|(k, _)| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// ①用户 setModel("glm-4.6")：作为**精确 key** 解析，选中 A，不报歧义。
+    #[test]
+    fn user_selection_prefers_exact_key_over_shared_slug() {
+        let (m, a) = collision_catalog();
+        let sel = resolve_requested_model(&m, &a, "glm-4.6").expect("精确 key 必须胜出");
+        assert_eq!(sel.catalog_key, acp::ModelId::new("glm-4.6"));
+        assert_eq!(sel.entry.info.base_url, "https://official/v1");
+    }
+
+    /// ②旧会话只有 model_id="glm-4.6"、无 catalog key：必须当**旧 slug** 处理
+    /// → 两个条目都匹配 → 歧义。
+    /// 这条是整个修复的关键排序：slug 绝不能先当 key 查，否则字面键为 glm-4.6
+    /// 的条目会静默压过同 slug 的代理条目，歧义检查根本不触发。
+    #[test]
+    fn legacy_session_treats_it_as_slug_and_reports_ambiguity() {
+        let (m, a) = collision_catalog();
+        match resolve_persisted_model(&m, &a, None, "glm-4.6") {
+            PersistedModelResolution::Ambiguous { candidates, .. } => {
+                let ids: Vec<_> = candidates.iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, vec!["glm-4.6", "company-proxy"]);
+            }
+            other => panic!("旧格式必须按 slug 处理并报歧义，实际: {other:?}"),
+        }
+    }
+
+    /// ③新会话带 catalog_model_id="glm-4.6"：精确恢复 A。
+    #[test]
+    fn new_format_session_restores_exact_key() {
+        let (m, a) = collision_catalog();
+        assert_eq!(
+            resolve_persisted_model(&m, &a, Some("glm-4.6"), "glm-4.6"),
+            PersistedModelResolution::Exact(acp::ModelId::new("glm-4.6"))
+        );
+    }
+
+    /// ④（疑似真 RED）内部隐藏模型的恢复不得被 selectable gate 挡住。
+    /// 与上一轮 catalog_patch_for_ungated_switch 误用 available 是同类问题：
+    /// 隐藏模型有精确 catalog key 却不在 available 里，若恢复按可选性过滤，
+    /// 精确身份会解析失败 → 会话恢复不到它自己的模型。
+    #[test]
+    fn hidden_model_with_exact_key_still_restores() {
+        let mut models = IndexMap::new();
+        models.insert(
+            "internal-hidden".to_owned(),
+            entry("grok-internal", "https://internal/v1", false),
+        );
+        // available 只含可选模型——隐藏模型不在其中
+        let available: IndexMap<acp::ModelId, acp::ModelInfo> = IndexMap::new();
+        assert_eq!(
+            resolve_persisted_model(&models, &available, Some("internal-hidden"), "grok-internal"),
+            PersistedModelResolution::Exact(acp::ModelId::new("internal-hidden")),
+            "隐藏模型的精确 catalog key 必须能恢复——恢复不是用户选择，不该过 selectable gate"
+        );
+    }
+}
