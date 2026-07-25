@@ -1717,3 +1717,113 @@ mod persisted_record_routing_tests {
         }
     }
 }
+
+/// v0.18.6 步6（RED）：新会话的第一次 Summary 落盘必须**同一次写入**里带上
+/// 双身份（current_model_id + catalog_model_id）。
+///
+/// 崩溃窗口：此前 Summary::new 硬编码 catalog_model_id: None，先落盘，
+/// 等 apply_resolved 的 CurrentModel 消息再补 key。两步之间进程崩溃/断电，
+/// 磁盘上就留下一份"只有 slug 语义"的记录——如果目录里恰有同名字面 key
+/// 与共享 slug（glm-4.6 那对），下次恢复直接掉进歧义，用户被迫重选一个
+/// 他明明已经选过的模型。原子双写把这个窗口整个删掉。
+///
+/// 测试直接读**磁盘上的 summary.json**，不是内存对象——写入原子性只能在
+/// 落盘产物上验证。
+#[cfg(test)]
+mod atomic_dual_identity_write_tests {
+    use agent_client_protocol as acp;
+    use xai_grok_shell::session::info::Info;
+    use xai_grok_shell::session::storage::jsonl::JsonlStorageAdapter;
+    use xai_grok_shell::session::storage::StorageAdapter;
+
+    fn temp_session_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wancode-dual-write-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn info(dir: &std::path::Path) -> Info {
+        Info {
+            id: acp::SessionId::new("dual-write-test"),
+            cwd: dir.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// 首写即双身份：磁盘 JSON 里两个字段都在，且都是传进去的值。
+    #[tokio::test]
+    async fn first_summary_write_carries_both_identities() {
+        let dir = temp_session_dir("first");
+        let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
+        adapter
+            .init_session(
+                &info(&dir),
+                acp::ModelId::new("glm-4.6"),
+                Some(acp::ModelId::new("glm-coding")),
+            )
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(dir.join("summary.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["current_model_id"], "glm-4.6");
+        assert_eq!(
+            json["catalog_model_id"], "glm-coding",
+            "第一次落盘就必须有 key——这之后的任何一步崩溃都不再产生无身份记录"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 调用方不知道 key 时（None）不得编造：字段整个缺席，落回旧格式语义。
+    #[tokio::test]
+    async fn unknown_key_is_omitted_not_invented() {
+        let dir = temp_session_dir("none");
+        let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
+        adapter
+            .init_session(&info(&dir), acp::ModelId::new("glm-4.6"), None)
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(dir.join("summary.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            json.get("catalog_model_id").is_none(),
+            "不知道就空着——宁可留空绝不写错，这条原则在步1c已经立过"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已存在的会话再 init（恢复路径）：磁盘上已有的身份不得被覆盖。
+    #[tokio::test]
+    async fn reinit_of_existing_session_preserves_stored_identity() {
+        let dir = temp_session_dir("reinit");
+        let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
+        adapter
+            .init_session(
+                &info(&dir),
+                acp::ModelId::new("glm-4.6"),
+                Some(acp::ModelId::new("glm-coding")),
+            )
+            .await
+            .unwrap();
+        // 二次 init 传入不同身份——存在即加载，绝不改写。
+        let summary = adapter
+            .init_session(
+                &info(&dir),
+                acp::ModelId::new("other-slug"),
+                Some(acp::ModelId::new("other-key")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.current_model_id, acp::ModelId::new("glm-4.6"));
+        assert_eq!(
+            summary.catalog_model_id,
+            Some(acp::ModelId::new("glm-coding")),
+            "已有记录的身份是历史事实，init 只许读不许写"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
