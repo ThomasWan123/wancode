@@ -55,3 +55,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+# tests/model_block_over_acp.rs：用隔离的 $GROK_HOME 起真实引擎，验证
+# load_session 会经 ACP meta 交回 x.ai/modelBlock。
+tempfile = { workspace = true }

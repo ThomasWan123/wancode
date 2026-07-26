@@ -95,4 +95,4 @@ jobs:
           cargo test -p xai-grok-shell --test model_identity_e2e
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
-        run: cargo test -p wancode --lib --test engine_canary
+        run: cargo test -p wancode --lib --test engine_canary --test model_block_over_acp
