@@ -1761,7 +1761,7 @@ mod atomic_dual_identity_write_tests {
         let dir = temp_session_dir("first");
         let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
         adapter
-            .init_session(
+            .init_session_with_catalog(
                 &info(&dir),
                 acp::ModelId::new("glm-4.6"),
                 Some(acp::ModelId::new("glm-coding")),
@@ -1784,7 +1784,7 @@ mod atomic_dual_identity_write_tests {
         let dir = temp_session_dir("none");
         let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
         adapter
-            .init_session(&info(&dir), acp::ModelId::new("glm-4.6"), None)
+            .init_session_with_catalog(&info(&dir), acp::ModelId::new("glm-4.6"), None)
             .await
             .unwrap();
         let raw = std::fs::read_to_string(dir.join("summary.json")).unwrap();
@@ -1802,7 +1802,7 @@ mod atomic_dual_identity_write_tests {
         let dir = temp_session_dir("reinit");
         let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
         adapter
-            .init_session(
+            .init_session_with_catalog(
                 &info(&dir),
                 acp::ModelId::new("glm-4.6"),
                 Some(acp::ModelId::new("glm-coding")),
@@ -1811,7 +1811,7 @@ mod atomic_dual_identity_write_tests {
             .unwrap();
         // 二次 init 传入不同身份——存在即加载，绝不改写。
         let summary = adapter
-            .init_session(
+            .init_session_with_catalog(
                 &info(&dir),
                 acp::ModelId::new("other-slug"),
                 Some(acp::ModelId::new("other-key")),
@@ -1887,6 +1887,24 @@ mod initial_identity_assembly_tests {
         );
         assert_eq!(current, acp::ModelId::new("some-upstream-slug"));
         assert_eq!(catalog, None);
+    }
+
+    /// key 存在但其条目的 slug 与将要持久化的 slug 不一致：fail-closed，
+    /// key 不写。裸 contains_key 会把"A 的 key 配 B 的模型"记成权威身份——
+    /// 目录热重载与建会话竞态、或未来调用者传错参数时都可能发生。
+    #[test]
+    fn key_whose_entry_slug_mismatches_is_dropped() {
+        let models = catalog_with("glm-coding", "glm-4.6");
+        let (current, catalog) = initial_persisted_identity(
+            &models,
+            &acp::ModelId::new("glm-coding"),
+            "some-other-slug",
+        );
+        assert_eq!(current, acp::ModelId::new("some-other-slug"));
+        assert_eq!(
+            catalog, None,
+            "担保不了的身份宁可留空——key 与 slug 必须作为一对被验证"
+        );
     }
 
     /// key 与 slug 字面相同（key=glm-4.6, slug=glm-4.6）：两个字段值相同是

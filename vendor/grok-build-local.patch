@@ -4112,10 +4112,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..337085f 100644
+index a1c9b68..47acd4f 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,501 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,508 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4317,9 +4317,16 @@ index a1c9b68..337085f 100644
 +    sampling_model: &str,
 +) -> (acp::ModelId, Option<acp::ModelId>) {
 +    let current = acp::ModelId::new(sampling_model.to_owned());
++    // Fail closed on the pair, not just the key: the key is written only when
++    // its entry's slug is the slug actually being persisted alongside it.
++    // A bare `contains_key` would happily record "A's key with B's model" —
++    // the exact mismatch this whole effort exists to rule out — whenever a
++    // catalog hot-reload races session creation or a future caller passes an
++    // inconsistent pair. An identity we cannot vouch for is left empty.
 +    let catalog = models
-+        .contains_key(runtime_model_id.0.as_ref())
-+        .then(|| runtime_model_id.clone());
++        .get(runtime_model_id.0.as_ref())
++        .filter(|entry| entry.info.model == sampling_model)
++        .map(|_| runtime_model_id.clone());
 +    (current, catalog)
 +}
 +
@@ -5240,32 +5247,6 @@ index fde3dea..d2a622c 100644
              agent_name: Some(definition.name.clone()),
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });
-diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
-index 36756e2..1ca6956 100644
---- a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
-+++ b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
-@@ -2030,7 +2030,7 @@ async fn copy_session_data_preserves_parent_chat_history() {
-         id: acp::SessionId::new("parent-fork-test"),
-         cwd: "/workspace".to_string(),
-     };
--    adapter.init_session(&parent_info, acp::ModelId::new("test-model")).await.unwrap();
-+    adapter.init_session(&parent_info, acp::ModelId::new("test-model"), None).await.unwrap();
-     adapter
-         .append_chat_message(&parent_info, &ConversationItem::user("What files?"))
-         .await
-diff --git a/crates/codegen/xai-grok-shell/src/extensions/repair.rs b/crates/codegen/xai-grok-shell/src/extensions/repair.rs
-index a70d4eb..407c001 100644
---- a/crates/codegen/xai-grok-shell/src/extensions/repair.rs
-+++ b/crates/codegen/xai-grok-shell/src/extensions/repair.rs
-@@ -169,7 +169,7 @@ mod tests {
-             cwd: "/work".to_string(),
-         };
-         adapter
--            .init_session(&info, default_model_id())
-+            .init_session(&info, default_model_id(), None)
-             .await
-             .expect("init session");
-         for item in items {
 diff --git a/crates/codegen/xai-grok-shell/src/remote/pull.rs b/crates/codegen/xai-grok-shell/src/remote/pull.rs
 index 4564347..0c80486 100644
 --- a/crates/codegen/xai-grok-shell/src/remote/pull.rs
@@ -5611,7 +5592,7 @@ index cc61f43..80b105a 100644
  pub mod inference_metrics;
  pub use xai_grok_shared::session::info;
 diff --git a/crates/codegen/xai-grok-shell/src/session/persistence.rs b/crates/codegen/xai-grok-shell/src/session/persistence.rs
-index a2473d0..6fa3349 100644
+index a2473d0..4c9e7a4 100644
 --- a/crates/codegen/xai-grok-shell/src/session/persistence.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/persistence.rs
 @@ -311,7 +311,13 @@ pub enum PersistenceMsg {
@@ -5697,16 +5678,18 @@ index a2473d0..6fa3349 100644
      sampling_client: OaiCompatClient,
      storage_mode: StorageMode,
      auth_manager: Option<Arc<crate::auth::AuthManager>>,
-@@ -2072,7 +2104,7 @@ pub(crate) async fn new(
+@@ -2072,7 +2104,9 @@ pub(crate) async fn new(
      let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
  
      // Initialize session in storage
 -    let mut summary = storage.init_session(info, model_id.clone()).await?;
-+    let mut summary = storage.init_session(info, model_id.clone(), catalog_model_id).await?;
++    let mut summary = storage
++        .init_session_with_catalog(info, model_id.clone(), catalog_model_id)
++        .await?;
      touch_worktree_for_session(info).await;
  
      // Update model if different
-@@ -2130,6 +2162,7 @@ pub async fn new_with_explicit_dir(
+@@ -2130,6 +2164,7 @@ pub async fn new_with_explicit_dir(
      info: &Info,
      target_dir: PathBuf,
      model_id: acp::ModelId,
@@ -5714,17 +5697,19 @@ index a2473d0..6fa3349 100644
      sampling_client: OaiCompatClient,
      session_summary_model: String,
  ) -> io::Result<PersistenceHandle> {
-@@ -2138,7 +2171,7 @@ pub async fn new_with_explicit_dir(
+@@ -2138,7 +2173,9 @@ pub async fn new_with_explicit_dir(
          Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir));
  
      // Initialize session in storage (creates summary.json, etc.)
 -    let mut summary = storage.init_session(info, model_id.clone()).await?;
-+    let mut summary = storage.init_session(info, model_id.clone(), catalog_model_id).await?;
++    let mut summary = storage
++        .init_session_with_catalog(info, model_id.clone(), catalog_model_id)
++        .await?;
      touch_worktree_for_session(info).await;
      if summary.session_kind.is_none() {
          summary.session_kind = Some("subagent".to_string());
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
-index d0b61fd..0709bfc 100644
+index d0b61fd..7249b54 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
 @@ -707,6 +707,8 @@ impl JsonlStorageAdapter {
@@ -5741,7 +5726,7 @@ index d0b61fd..0709bfc 100644
  #[async_trait]
  impl StorageAdapter for JsonlStorageAdapter {
 -    async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
-+    async fn init_session(
++    async fn init_session_with_catalog(
 +        &self,
 +        info: &Info,
 +        model_id: acp::ModelId,
@@ -5775,22 +5760,31 @@ index d0b61fd..0709bfc 100644
                      reasoning_effort,
                  }),
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-index f511495..1a54c97 100644
+index f511495..08d7512 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-@@ -490,7 +490,19 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
+@@ -490,7 +490,28 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
  pub trait StorageAdapter: Send + Sync {
      /// Initialize a new session or load existing one
      /// Returns the Summary (creates if needed, loads if exists)
 -    async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary>;
 +    /// Create the session record, or load it if it already exists.
 +    ///
-+    /// `catalog_model_id` is written in the SAME first write as
-+    /// `current_model_id` — pass it when the caller knows the exact catalog
-+    /// key so no crash window can produce a slug-only record. It is ignored
-+    /// for sessions that already exist on disk: a stored identity is
-+    /// historical fact, init only reads it.
-+    async fn init_session(
++    /// Compatibility entry: no catalog key (pre-v0.18.6 behavior). Kept as a
++    /// default method so the dual-identity capability does not widen the
++    /// trait's breaking surface — dozens of existing callers and tests stay
++    /// untouched; only the production new-session path opts into
++    /// [`Self::init_session_with_catalog`].
++    async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
++        self.init_session_with_catalog(info, model_id, None).await
++    }
++
++    /// Create the session record with BOTH halves of the model identity in
++    /// the same first write — `current_model_id` (upstream slug) and
++    /// `catalog_model_id` (exact catalog key) — so no crash window can
++    /// produce a slug-only record. Ignored for sessions that already exist on
++    /// disk: a stored identity is historical fact, init only reads it.
++    async fn init_session_with_catalog(
 +        &self,
 +        info: &Info,
 +        model_id: acp::ModelId,
@@ -5799,7 +5793,7 @@ index f511495..1a54c97 100644
  
      /// Set the session title unconditionally (manual `/rename`); last write
      /// wins. Also marks the title manual (`Summary::title_is_manual`) so
-@@ -518,7 +530,13 @@ pub trait StorageAdapter: Send + Sync {
+@@ -518,7 +539,13 @@ pub trait StorageAdapter: Send + Sync {
      /// Update the current model in summary (delegates to
      /// `update_current_model_and_agent` with `agent_name = None`).
      async fn update_current_model(&self, info: &Info, model_id: &acp::ModelId) -> io::Result<()> {
@@ -5814,7 +5808,7 @@ index f511495..1a54c97 100644
              .await
      }
  
-@@ -527,12 +545,16 @@ pub trait StorageAdapter: Send + Sync {
+@@ -527,12 +554,16 @@ pub trait StorageAdapter: Send + Sync {
      /// persisted so session resume doesn't depend on the mutable model catalog.
      /// `None` leaves the existing `agent_name` unchanged (used by legacy callers
      /// that only update the model ID).
@@ -5832,7 +5826,7 @@ index f511495..1a54c97 100644
  
      /// Update the collection ID for telemetry tracing
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs b/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
-index 31fc0d5..7404748 100644
+index 31fc0d5..93f46ae 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/summary_write.rs
 @@ -45,7 +45,13 @@ impl CounterOp {
@@ -5860,24 +5854,6 @@ index 31fc0d5..7404748 100644
              if let Some(agent_name) = &model.agent_name {
                  self.agent_name = Some(agent_name.clone());
              }
-@@ -266,7 +276,7 @@ mod tests {
-         let info = test_info();
- 
-         let init = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
--        init.init_session(&info, acp::ModelId::new("test-model"))
-+        init.init_session(&info, acp::ModelId::new("test-model"), None)
-             .await
-             .unwrap();
- 
-@@ -340,7 +350,7 @@ mod tests {
-         let info = test_info();
-         let adapter = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
-         adapter
--            .init_session(&info, acp::ModelId::new("test-model"))
-+            .init_session(&info, acp::ModelId::new("test-model"), None)
-             .await
-             .unwrap();
-         (adapter, info, session_dir.join("summary.json"))
 diff --git a/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs b/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs
 new file mode 100644
 index 0000000..a149a0b
