@@ -180,3 +180,112 @@ async fn loading_a_legacy_ambiguous_session_returns_a_structured_model_block() {
 
     cancel.cancel();
 }
+
+/// 冒烟里观察到的现象：新建会话落盘为 `current_model_id = glm-open`（配置键）
+/// 且没有 `catalog_model_id`——这是 v0.18.6 之前的字段语义，本分支应当写成
+/// `current = glm-4.6`（上游 slug）+ `catalog = glm-open`（配置键）。
+///
+/// 与其对着一份 summary.json 推测，把它变成可复现的断言。
+/// 现状：**失败**，记录一个已确认的未修 bug。暂时 ignore 是为了不让 CI 变红
+/// 掩盖其它回归，不是为了把它藏起来——它必须在合并前修掉。
+///
+/// 现象（本机冒烟 + 本测试两次独立复现）：默认模型新建的会话落盘为
+///   current_model_id = "glm-open"（配置键）、catalog_model_id 缺失
+/// 而本分支的约定是 current = "glm-4.6"（上游 slug）+ catalog = "glm-open"。
+///
+/// 线索：默认模型走 resolve_sampling_config_for_model()，它在 resolve_model_id
+/// 失败时回落到基线 sampling config，而基线的 .model 就是配置里的默认模型 id
+/// ——一个键。于是 initial_persisted_identity 收到的 sampling_model 本身就是键，
+/// 它的 fail-closed 判断随之把 catalog 留空。判断没错，错在上游喂给它的输入。
+/// 步6b 只修好了 new_session 的自定义模型分支，默认模型这条路没走到。
+///
+/// 同进程里 GROK_HOME 是 OnceLock，本测试与上一条不能共存于一次运行——
+/// 修复时需要把两者合并成共用一份夹具，或拆成两个测试二进制。
+#[ignore = "已确认的未修 bug：默认模型新建会话把配置键写进了 current_model_id"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_session_persists_slug_and_key_in_their_own_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let grok_home = tmp.path().join(".grok");
+    let cwd = tmp.path().join("proj2");
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(grok_home.join("config.toml"), CONFIG).unwrap();
+    unsafe {
+        std::env::set_var("GROK_HOME", &grok_home);
+    }
+
+    let raw_config = xai_grok_shell::config::load_effective_config().unwrap();
+    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config).unwrap();
+    agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
+        raw_config: &raw_config,
+        remote_settings: None,
+        cwd: Some(&cwd),
+        is_headless: true,
+        cli_subagents: None,
+        cli_web_search_model: None,
+        cli_session_summary_model: None,
+        cli_experimental_memory: false,
+        cli_no_memory: false,
+        disable_web_search: true,
+        todo_gate: false,
+        laziness_debug_log: None,
+        storage_mode: None,
+    });
+    agent_config.mode = xai_grok_shell::agent::config::AgentMode::Headless;
+
+    let cancel = CancellationToken::new();
+    let memory_config = agent_config.memory_config.clone();
+    let spawned = spawn_grok_shell(agent_config, &cancel, memory_config)
+        .await
+        .expect("引擎启动");
+    let acp_tx = spawned.channel.tx;
+
+    let init_resp: acp::InitializeResponse = acp_send(
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+            .client_capabilities(acp::ClientCapabilities::new().terminal(false)),
+        &acp_tx,
+    )
+    .await
+    .expect("initialize");
+    let method_id = init_resp
+        .auth_methods
+        .iter()
+        .find(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login())
+        .map(|m| m.id().clone())
+        .expect("非交互认证方式");
+    let _: acp::AuthenticateResponse = acp_send(
+        acp::AuthenticateRequest::new(method_id)
+            .meta(serde_json::json!({"headless": true}).as_object().cloned()),
+        &acp_tx,
+    )
+    .await
+    .expect("authenticate");
+
+    let new_resp: acp::NewSessionResponse = acp_send(
+        acp::NewSessionRequest::new(PathBuf::from(cwd.to_string_lossy().to_string())),
+        &acp_tx,
+    )
+    .await
+    .expect("new session");
+
+    // 直接读落盘产物——字段语义只能在磁盘上验证。
+    let dir = xai_grok_shell::session::persistence::session_dir(
+        &xai_grok_shell::session::info::Info {
+            id: new_resp.session_id.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+        },
+    );
+    let raw = std::fs::read_to_string(dir.join("summary.json")).expect("summary 应已落盘");
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(
+        json["current_model_id"], "glm-4.6",
+        "current_model_id 必须是上游 slug；写成配置键会让旧版本与同步端把它         当成上游模型名。实际落盘：{raw}"
+    );
+    assert_eq!(
+        json["catalog_model_id"], "glm-open",
+        "首写就该带上配置键，否则崩溃窗口还在。实际落盘：{raw}"
+    );
+
+    cancel.cancel();
+}
