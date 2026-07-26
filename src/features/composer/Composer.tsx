@@ -4,6 +4,7 @@
    - ↑/↓ 历史调取只在无候选弹窗时接管，histIdxRef/draftRef 语义保持在 App 层。 */
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { AmbiguousCandidate, ModelBlock } from "../../modelBlock";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
   IconGitBranch, IconPlus, IconShield, IconStop, IconTerminal, IconX,
@@ -13,7 +14,6 @@ import {
 /// returns the candidates instead of picking one. `String(err)` on that object
 /// would render "[object Object]", so the shape is narrowed explicitly here and
 /// anything else falls back to a readable message.
-type AmbiguousCandidate = { id: string; name: string; endpointLabel: string; selectable: boolean };
 type ModelSwitchError =
   | { kind: "ambiguous_model_id"; requested: string; candidates: AmbiguousCandidate[] }
   | { kind: "error"; message: string };
@@ -43,18 +43,18 @@ export function Composer(props: Record<string, any>) {
   // 前者才是主路径：下拉里的 option value 是唯一 catalog key，精确 key 永远
   // 不歧义，所以正常从下拉选是触发不了的——真正需要选择器的是"恢复一个只存了
   // 重复 slug 的旧会话"。只接后者等于把选择器接在几乎不会走到的入口上。
+  const block: ModelBlock | null = modelBlock ?? null;
   const sessionAmbiguity =
-    modelBlock && modelBlock.kind === "ambiguous_model_id"
-      ? {
-          requested: String(modelBlock.requested ?? ""),
-          candidates: (modelBlock.candidates ?? []) as AmbiguousCandidate[],
-          previous: model,
-        }
+    block?.kind === "ambiguous_model_id"
+      ? { requested: block.requested, candidates: block.candidates, previous: model }
       : null;
   // 会话级阻塞可以收起，但收起不是解除——阻塞在引擎里，只有真正选定模型
   // 才会消失。收起后仍留一条常驻提示与重开入口，且发送保持禁用。
   const shownAmbiguity = ambiguity ?? (modelBlockOpen ? sessionAmbiguity : null);
-  const sessionBlocked = !!sessionAmbiguity;
+  // 任何一类阻塞都禁发送。上一版这里只认歧义，于是 model_unavailable 的会话
+  // 按钮看着能点、点了被 App 的 send() 静默吞掉——用户得不到任何解释。
+  const sessionBlocked = !!block;
+  const showUnavailable = block?.kind === "model_unavailable" && modelBlockOpen;
 
   async function switchModel(target: string, previous: string) {
     try {
@@ -364,6 +364,17 @@ export function Composer(props: Record<string, any>) {
                   ),
                 )}
               </select>
+              {showUnavailable && (
+                <div className="model-ambiguity" role="dialog" aria-label={t.unavailableTitle}>
+                  <div className="ma-title">{t.unavailableTitle}</div>
+                  <div className="ma-hint">
+                    <code>{block.requested}</code> — {t.unavailableHint}
+                  </div>
+                  <button className="ma-cancel" onClick={() => setModelBlockOpen?.(false)}>
+                    {t.ambiguousDismiss}
+                  </button>
+                </div>
+              )}
               {sessionBlocked && !modelBlockOpen && (
                 <button className="model-blocked-chip" onClick={() => setModelBlockOpen?.(true)}>
                   {t.ambiguousBlocked} · {t.ambiguousReopen}

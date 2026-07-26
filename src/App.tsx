@@ -17,6 +17,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
@@ -234,10 +235,9 @@ function App() {
   const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
-  // 引擎判定"这个会话现在不能发送，且原因需要用户决断"时的载荷：
-  // {kind, requested, candidates[]}。kind 为 ambiguous_model_id 时渲染
-  // 模型选择器；其它 kind 目前只用于说明，不给选项。
-  const [modelBlock, setModelBlock] = useState<any>(null);
+  // 引擎判定"这个会话现在不能发送"时的载荷。用联合类型而非 any——
+  // 新增 kind 时编译器会指出缺失的 UI 分支（见 modelBlock.ts 注释）。
+  const [modelBlock, setModelBlock] = useState<ModelBlock | null>(null);
   // 选择器是否展开。会话级阻塞可以收起（用户也许想先翻历史），但收起不等于
   // 解除——阻塞在引擎里，只有真正选定模型才会消失。
   const [modelBlockOpen, setModelBlockOpen] = useState(true);
@@ -1345,7 +1345,7 @@ function App() {
     // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
     setGitInfo(null);
     try {
-      const r = await invoke<{ session_id: string; models: string[]; cwd: string; model_block?: any }>(
+      const r = await invoke<{ session_id: string; models: string[]; cwd: string; model_block?: unknown }>(
         "agent_start",
         {
           workspace: wsPath,
@@ -1365,7 +1365,7 @@ function App() {
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
       // 加载结果一起回来，直接进选择器状态。
-      setModelBlock(r.model_block ?? null);
+      setModelBlock(parseModelBlock(r.model_block));
       refreshSessions(wsPath);
       invoke<string[]>("list_workspace_files", { workspace: wsPath })
         .then(setFileList)
