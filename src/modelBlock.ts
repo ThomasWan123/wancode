@@ -2,10 +2,13 @@
    引擎在 LoadSessionResponse.meta["x.ai/modelBlock"] 里给出，Tauri 经
    StartResult.model_block 透传。
 
-   这里用可辨识联合而不是 any，是因为上一版就吃过亏：modelBlock 是 any 时，
-   Composer 只处理了 ambiguous_model_id，编译器不会提醒 model_unavailable
-   没有 UI 分支，于是那类阻塞掉进死区——发送按钮看着能点，点了被 App 静默
-   吞掉，用户得不到任何解释。以后新增 kind 时，下面的 switch 会当场编译失败。 */
+   两条设计原则，都是被同一个失败模式教出来的——"前端以为没事、引擎其实
+   挂着"，用户点发送收到一个空 EndTurn，什么解释都没有：
+
+   1. 解析 fail-closed。载荷不认识不代表没有阻塞，只代表我们读不懂它。
+      读不懂就当作阻塞并说明情况，绝不放行。
+   2. 穷举而非条件判断。下面的 assertNever 让新增 kind 在编译期就炸，
+      而不是等到某个用户撞上没有 UI 分支的那一类。 */
 
 export type AmbiguousCandidate = {
   id: string;
@@ -27,24 +30,58 @@ export type AmbiguousBlock = {
 export type UnavailableBlock = {
   kind: "model_unavailable";
   requested: string;
-  candidates: [];
 };
 
-export type ModelBlock = AmbiguousBlock | UnavailableBlock;
+/** 引擎说这个会话被挂起了，但载荷的形状我们读不懂（版本不匹配、字段损坏）。 */
+export type UnknownBlock = {
+  kind: "unknown";
+  /** 原始 kind 字符串，用于显示和排查。 */
+  raw: string;
+};
 
-/** Tauri 边界过来的是 unknown——收窄一次，形状不认识就当没有阻塞。 */
+export type ModelBlock = AmbiguousBlock | UnavailableBlock | UnknownBlock;
+
+/** 编译期穷举保证：新增 ModelBlock 成员而没处理，这里会报类型错误。 */
+export function assertNever(x: never): never {
+  throw new Error(`unhandled model block: ${JSON.stringify(x)}`);
+}
+
+function isCandidate(c: unknown): c is AmbiguousCandidate {
+  const v = c as any;
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof v.id === "string" &&
+    typeof v.name === "string" &&
+    typeof v.endpointLabel === "string" &&
+    typeof v.selectable === "boolean"
+  );
+}
+
+/**
+ * 把 Tauri 边界过来的未知值收窄成 ModelBlock。
+ *
+ * `null` 只有一个含义：引擎没有报告任何阻塞。其余一切——未知 kind、字段
+ * 缺失、候选损坏——都落到 `unknown`，因为"我们读不懂"和"没有阻塞"是两件
+ * 完全不同的事，把前者当后者处理正是会放行一次注定失败的发送。
+ */
 export function parseModelBlock(raw: unknown): ModelBlock | null {
+  if (raw === null || raw === undefined) return null;
   const b = raw as any;
-  if (!b || typeof b !== "object") return null;
-  if (b.kind === "ambiguous_model_id") {
-    return {
-      kind: "ambiguous_model_id",
-      requested: String(b.requested ?? ""),
-      candidates: Array.isArray(b.candidates) ? b.candidates : [],
-    };
+  if (typeof b !== "object") return { kind: "unknown", raw: String(raw) };
+
+  const rawKind = typeof b.kind === "string" ? b.kind : "";
+  const requested = typeof b.requested === "string" ? b.requested : "";
+
+  if (rawKind === "ambiguous_model_id") {
+    const candidates = Array.isArray(b.candidates) ? b.candidates.filter(isCandidate) : [];
+    // 歧义却没有一条可用候选，选择器就是空的——那不是能让用户解决的状态，
+    // 当作读不懂处理，至少把话说清楚。
+    if (candidates.length === 0) return { kind: "unknown", raw: rawKind };
+    return { kind: "ambiguous_model_id", requested, candidates };
   }
-  if (b.kind === "model_unavailable") {
-    return { kind: "model_unavailable", requested: String(b.requested ?? ""), candidates: [] };
+  if (rawKind === "model_unavailable") {
+    return { kind: "model_unavailable", requested };
   }
-  return null;
+  return { kind: "unknown", raw: rawKind };
 }

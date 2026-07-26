@@ -24,6 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
+      # 阻塞载荷的解析必须 fail-closed：读不懂 ≠ 没有阻塞。
+      - run: npm test
       - run: npm run build
 
   versions:

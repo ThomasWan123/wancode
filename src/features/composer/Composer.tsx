@@ -4,7 +4,7 @@
    - ↑/↓ 历史调取只在无候选弹窗时接管，histIdxRef/draftRef 语义保持在 App 层。 */
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AmbiguousCandidate, ModelBlock } from "../../modelBlock";
+import { assertNever, type AmbiguousCandidate, type ModelBlock } from "../../modelBlock";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
   IconGitBranch, IconPlus, IconShield, IconStop, IconTerminal, IconX,
@@ -44,17 +44,42 @@ export function Composer(props: Record<string, any>) {
   // 不歧义，所以正常从下拉选是触发不了的——真正需要选择器的是"恢复一个只存了
   // 重复 slug 的旧会话"。只接后者等于把选择器接在几乎不会走到的入口上。
   const block: ModelBlock | null = modelBlock ?? null;
-  const sessionAmbiguity =
-    block?.kind === "ambiguous_model_id"
-      ? { requested: block.requested, candidates: block.candidates, previous: model }
-      : null;
+  // 穷举而非条件判断：新增一类阻塞却忘了给它 UI，assertNever 会让编译当场
+  // 失败。上一版用的是 if/else，所以 model_unavailable 加进来时编译器一声
+  // 不吭，那类会话就掉进了无反馈死区。
+  const blockView: {
+    ambiguity: { requested: string; candidates: AmbiguousCandidate[]; previous: string } | null;
+    notice: { title: string; hint: string; subject: string } | null;
+  } = (() => {
+    if (!block) return { ambiguity: null, notice: null };
+    switch (block.kind) {
+      case "ambiguous_model_id":
+        return {
+          ambiguity: { requested: block.requested, candidates: block.candidates, previous: model },
+          notice: null,
+        };
+      case "model_unavailable":
+        return {
+          ambiguity: null,
+          notice: { title: t.unavailableTitle, hint: t.unavailableHint, subject: block.requested },
+        };
+      case "unknown":
+        return {
+          ambiguity: null,
+          notice: { title: t.blockUnknownTitle, hint: t.blockUnknownHint, subject: block.raw },
+        };
+      default:
+        return assertNever(block);
+    }
+  })();
+  const sessionAmbiguity = blockView.ambiguity;
   // 会话级阻塞可以收起，但收起不是解除——阻塞在引擎里，只有真正选定模型
   // 才会消失。收起后仍留一条常驻提示与重开入口，且发送保持禁用。
   const shownAmbiguity = ambiguity ?? (modelBlockOpen ? sessionAmbiguity : null);
   // 任何一类阻塞都禁发送。上一版这里只认歧义，于是 model_unavailable 的会话
   // 按钮看着能点、点了被 App 的 send() 静默吞掉——用户得不到任何解释。
   const sessionBlocked = !!block;
-  const showUnavailable = block?.kind === "model_unavailable" && modelBlockOpen;
+  const shownNotice = modelBlockOpen ? blockView.notice : null;
 
   async function switchModel(target: string, previous: string) {
     try {
@@ -364,11 +389,11 @@ export function Composer(props: Record<string, any>) {
                   ),
                 )}
               </select>
-              {showUnavailable && (
-                <div className="model-ambiguity" role="dialog" aria-label={t.unavailableTitle}>
-                  <div className="ma-title">{t.unavailableTitle}</div>
+              {shownNotice && (
+                <div className="model-ambiguity" role="dialog" aria-label={shownNotice.title}>
+                  <div className="ma-title">{shownNotice.title}</div>
                   <div className="ma-hint">
-                    <code>{block.requested}</code> — {t.unavailableHint}
+                    <code>{shownNotice.subject}</code> — {shownNotice.hint}
                   </div>
                   <button className="ma-cancel" onClick={() => setModelBlockOpen?.(false)}>
                     {t.ambiguousDismiss}
