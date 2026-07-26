@@ -2866,3 +2866,50 @@ button.ghost.small {
 .git-pr-row.closed .git-pr-badge { color: var(--danger, #f85149); }
 .git-pr-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); }
 .git-pr-ci { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
+
+/* 下拉的定位祖先单独一层，与 .mode-wrap 同一套做法——不给 .composer-bar
+   加 position，免得影响它其它子元素的定位基准。 */
+.model-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* v0.18.6 模型歧义选择器：同一个上游模型名对应多个已配置接入点时，引擎
+   拒绝替用户猜，把候选交回来由用户点选。浮在输入区上方，不遮挡对话。 */
+.model-ambiguity {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(360px, 90vw);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.model-ambiguity .ma-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.model-ambiguity .ma-hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 10px; }
+.model-ambiguity .ma-hint code {
+  padding: 1px 5px; border-radius: 4px;
+  background: var(--code-bg, rgba(127, 127, 127, 0.14));
+}
+.model-ambiguity .ma-list { display: flex; flex-direction: column; gap: 6px; }
+.model-ambiguity .ma-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: transparent; color: inherit;
+}
+.model-ambiguity .ma-item:hover:not(:disabled) { background: var(--hover); }
+.model-ambiguity .ma-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.model-ambiguity .ma-name { font-size: 13px; }
+/* 端点是区分同名模型的唯一依据，所以它必须显眼——但只显示 host，
+   凭据与 query 在引擎侧就已剥掉。 */
+.model-ambiguity .ma-endpoint { font-size: 11px; color: var(--muted); font-family: var(--mono, monospace); }
+.model-ambiguity .ma-locked { font-size: 11px; color: var(--muted); }
+.model-ambiguity .ma-cancel {
+  margin-top: 10px; width: 100%; padding: 6px;
+  font-size: 12px; cursor: pointer; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 8px; background: transparent;
+}

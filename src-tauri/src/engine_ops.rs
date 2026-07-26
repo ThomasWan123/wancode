@@ -827,13 +827,74 @@ pub async fn agent_set_mode(state: State<'_, AgentState>, mode: String) -> Resul
     Ok(())
 }
 
+/// Why a model switch failed, in a shape the UI can branch on.
+///
+/// The engine refuses an id that maps to several catalog entries and hands
+/// back the candidate list so the user can say which one they meant. Flattening
+/// that to `e.to_string()` — as this boundary used to — throws the candidates
+/// away and leaves the front end with a sentence it can only put in a toast,
+/// which makes the whole ambiguity design unusable at the last metre.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ModelSwitchError {
+    #[serde(rename = "ambiguous_model_id")]
+    #[serde(rename_all = "camelCase")]
+    Ambiguous {
+        requested: String,
+        candidates: Vec<AmbiguousCandidate>,
+    },
+    #[serde(rename = "error")]
+    Other { message: String },
+}
+
+/// One choice offered to the user. `endpoint_label` is the host only — never a
+/// full URL, query string, or credential.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbiguousCandidate {
+    pub id: String,
+    pub name: String,
+    pub endpoint_label: String,
+    /// False when `allowed_models` excludes it: still shown, so the user
+    /// understands where the collision comes from, but not offered as a pick.
+    pub selectable: bool,
+}
+
+impl ModelSwitchError {
+    pub fn from_acp(err: &acp::Error) -> Self {
+        match xai_grok_shell::agent::models::AmbiguousModelError::from_acp_error(err) {
+            Some(a) => Self::Ambiguous {
+                requested: a.requested,
+                candidates: a
+                    .candidates
+                    .into_iter()
+                    .map(|c| AmbiguousCandidate {
+                        id: c.id,
+                        name: c.name,
+                        endpoint_label: c.endpoint_label,
+                        selectable: c.selectable,
+                    })
+                    .collect(),
+            },
+            None => Self::Other {
+                message: err.to_string(),
+            },
+        }
+    }
+}
+
 /// Switch the active model live, without restarting the session or losing
 /// context (ACP `session/setModel`). Mirrors Claude Code's `/model`.
 #[tauri::command]
-pub async fn agent_set_model(state: State<'_, AgentState>, model: String) -> Result<(), String> {
+pub async fn agent_set_model(
+    state: State<'_, AgentState>,
+    model: String,
+) -> Result<(), ModelSwitchError> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or_else(|| ModelSwitchError::Other {
+            message: "会话未启动".to_owned(),
+        })?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
     let _: acp::SetSessionModelResponse = acp_send(
@@ -844,6 +905,6 @@ pub async fn agent_set_model(state: State<'_, AgentState>, model: String) -> Res
         &acp_tx,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ModelSwitchError::from_acp(&e))?;
     Ok(())
 }

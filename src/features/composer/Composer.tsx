@@ -2,14 +2,57 @@
    步 A 透传。红线：
    - 队列编辑不做乐观更新，引擎 queue/changed 广播回来才刷新（版本守卫是良性 no-op）；
    - ↑/↓ 历史调取只在无候选弹窗时接管，histIdxRef/draftRef 语义保持在 App 层。 */
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
   IconGitBranch, IconPlus, IconShield, IconStop, IconTerminal, IconX,
 } from "../../icons";
 
+/// The engine refuses a model id that maps to several catalog entries and
+/// returns the candidates instead of picking one. `String(err)` on that object
+/// would render "[object Object]", so the shape is narrowed explicitly here and
+/// anything else falls back to a readable message.
+type AmbiguousCandidate = { id: string; name: string; endpointLabel: string; selectable: boolean };
+type ModelSwitchError =
+  | { kind: "ambiguous_model_id"; requested: string; candidates: AmbiguousCandidate[] }
+  | { kind: "error"; message: string };
+
+function asModelSwitchError(err: unknown): ModelSwitchError {
+  const e = err as any;
+  if (e && typeof e === "object" && e.kind === "ambiguous_model_id" && Array.isArray(e.candidates)) {
+    return e as ModelSwitchError;
+  }
+  if (e && typeof e === "object" && typeof e.message === "string") {
+    return { kind: "error", message: e.message };
+  }
+  return { kind: "error", message: String(err) };
+}
+
 export function Composer(props: Record<string, any>) {
   const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+
+  // Non-null while the engine is waiting for the user to disambiguate a model
+  // id. The select is rolled back to `previous` so the dropdown never shows a
+  // model the session is not actually on.
+  const [ambiguity, setAmbiguity] = useState<
+    { requested: string; candidates: AmbiguousCandidate[]; previous: string } | null
+  >(null);
+
+  async function switchModel(target: string, previous: string) {
+    try {
+      await invoke("agent_set_model", { model: target });
+      setAmbiguity(null);
+    } catch (err) {
+      const e = asModelSwitchError(err);
+      setModel(previous);
+      if (e.kind === "ambiguous_model_id") {
+        setAmbiguity({ requested: e.requested, candidates: e.candidates, previous });
+      } else {
+        setError(e.message);
+      }
+    }
+  }
   return (
     <>
       <input
@@ -278,15 +321,17 @@ export function Composer(props: Record<string, any>) {
                   {starting ? t.starting : t.openWorkspace}
                 </button>
               )}
+              <span className="model-wrap">
               <select
                 className="composer-model"
                 value={model}
                 title={t.modelSwitchHint}
                 onChange={(e) => {
                   const m = e.currentTarget.value;
+                  const previous = model;
                   setModel(m);
                   // Live switch — no restart, keeps conversation context.
-                  if (sessionId) invoke("agent_set_model", { model: m }).catch((err) => setError(String(err)));
+                  if (sessionId) void switchModel(m, previous);
                 }}
               >
                 {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
@@ -297,6 +342,36 @@ export function Composer(props: Record<string, any>) {
                   ),
                 )}
               </select>
+              {ambiguity && (
+                <div className="model-ambiguity" role="dialog" aria-label={t.ambiguousTitle}>
+                  <div className="ma-title">{t.ambiguousTitle}</div>
+                  <div className="ma-hint">
+                    <code>{ambiguity.requested}</code> — {t.ambiguousHint}
+                  </div>
+                  <div className="ma-list">
+                    {ambiguity.candidates.map((c) => (
+                      <button
+                        key={c.id}
+                        className="ma-item"
+                        disabled={!c.selectable}
+                        title={c.selectable ? c.endpointLabel : t.ambiguousUnavailable}
+                        onClick={() => {
+                          setModel(c.id);
+                          void switchModel(c.id, ambiguity.previous);
+                        }}
+                      >
+                        <span className="ma-name">{c.name}</span>
+                        <span className="ma-endpoint">{c.endpointLabel}</span>
+                        {!c.selectable && <span className="ma-locked">{t.ambiguousUnavailable}</span>}
+                      </button>
+                    ))}
+                  </div>
+                  <button className="ma-cancel" onClick={() => setAmbiguity(null)}>
+                    {t.ambiguousCancel}
+                  </button>
+                </div>
+              )}
+              </span>
               <div className="mode-wrap">
                 <button
                   className="mode-chip"

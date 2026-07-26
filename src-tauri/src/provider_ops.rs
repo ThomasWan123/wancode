@@ -2029,3 +2029,79 @@ mod fork_identity_tests {
         );
     }
 }
+
+/// v0.18.6 步8（RED）：Tauri 边界必须保留 `ambiguous_model_id` 结构化载荷。
+///
+/// agent_set_model 原来是 .map_err(|e| e.to_string())——引擎辛苦构造的候选
+/// 列表在这一行全没了，前端只剩一句话，弹不出选择器，用户无从选起。
+/// 整条链的最后一米把前面所有工作作废。
+#[cfg(test)]
+mod tauri_boundary_payload_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::resolve_requested_model;
+
+    use crate::engine_ops::ModelSwitchError;
+
+    fn dup_catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        for (key, base) in [
+            ("glm-open", "https://open.bigmodel.cn/api/paas/v4"),
+            ("glm-coding", "https://open.bigmodel.cn/api/coding/paas/v4"),
+        ] {
+            let mut info = ModelInfo::fallback("glm-4.6");
+            info.base_url = base.to_owned();
+            info.name = Some(format!("GLM ({key})"));
+            models.insert(
+                key.to_owned(),
+                ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
+            );
+        }
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// 歧义错误穿过边界后仍带候选，且序列化成前端能判别的形状。
+    #[test]
+    fn ambiguity_survives_the_boundary_with_its_candidates() {
+        let (m, a) = dup_catalog();
+        let acp_err = resolve_requested_model(&m, &a, "glm-4.6").unwrap_err().into_acp_error();
+
+        let mapped = ModelSwitchError::from_acp(&acp_err);
+        let json = serde_json::to_value(&mapped).unwrap();
+
+        assert_eq!(json["kind"], "ambiguous_model_id", "前端靠 kind 分支");
+        assert_eq!(json["requested"], "glm-4.6");
+        let cands = json["candidates"].as_array().expect("必须是数组");
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0]["id"], "glm-open");
+        assert_eq!(cands[0]["endpointLabel"], "open.bigmodel.cn");
+        assert_eq!(cands[0]["selectable"], true);
+    }
+
+    /// 普通错误退化成消息，不伪装成歧义——否则前端会对着空候选弹选择器。
+    #[test]
+    fn ordinary_errors_degrade_to_a_message() {
+        let err = acp::Error::internal_error().data("session actor closed");
+        let json = serde_json::to_value(ModelSwitchError::from_acp(&err)).unwrap();
+        assert_eq!(json["kind"], "error");
+        assert!(json["message"].as_str().unwrap().contains("session actor closed"));
+        assert!(json.get("candidates").is_none());
+    }
+
+    /// 未知模型走普通错误分支——它不是歧义。
+    #[test]
+    fn unknown_model_is_not_dressed_up_as_ambiguity() {
+        let (m, a) = dup_catalog();
+        let acp_err = resolve_requested_model(&m, &a, "nope").unwrap_err().into_acp_error();
+        let json = serde_json::to_value(ModelSwitchError::from_acp(&acp_err)).unwrap();
+        assert_eq!(json["kind"], "error");
+    }
+}
