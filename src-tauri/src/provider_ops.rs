@@ -1921,3 +1921,111 @@ mod initial_identity_assembly_tests {
         assert_eq!(catalog, Some(acp::ModelId::new("glm-4.6")));
     }
 }
+
+/// v0.18.6 步7（RED）：fork/copy 的模型身份继承。
+///
+/// 现状：copy_session_data_sync 里硬写 catalog_model_id: None（注释还是我
+/// 早先写的"由后续 SetSessionModel 或加载期迁移写入"）。于是源会话明明有
+/// 精确 key，fork 出来只剩 slug——重复 slug 目录下一加载就是歧义，用户被迫
+/// 重选一个上游会话早就定过的模型。新会话首写补上了窗口，fork 这条路还漏着。
+///
+/// 规则（Codex 定）：
+///   无 new_model_id → 原样继承源的两个字段
+///   显式 key → 写它
+///   唯一 slug → 归一化成它的 key
+///   重复 / 未知 → 留空，绝不猜
+///
+/// 无覆盖时的继承不需要目录（照抄两个字段即可），所以只有"有覆盖"这条
+/// 需要严格解析——解析发生在持有目录的调用方，存储层不碰目录。
+#[cfg(test)]
+mod fork_identity_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{fork_model_override, inherited_fork_identity};
+
+    fn entry(slug: &str, base: &str) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base.to_owned();
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn catalog() -> (IndexMap<String, ModelEntry>, IndexMap<acp::ModelId, acp::ModelInfo>) {
+        let mut models = IndexMap::new();
+        models.insert("glm-open".to_owned(), entry("glm-4.6", "https://open/v1"));
+        models.insert("glm-coding".to_owned(), entry("glm-4.6", "https://coding/v1"));
+        models.insert("solo".to_owned(), entry("deepseek-chat", "https://ds/v1"));
+        let available = models
+            .keys()
+            .map(|k| {
+                let id = acp::ModelId::new(k.clone());
+                (id.clone(), acp::ModelInfo::new(id, k.clone()))
+            })
+            .collect();
+        (models, available)
+    }
+
+    /// 无覆盖：两个字段原样继承。源的 key 是它自己定过的事实，fork 不该丢。
+    #[test]
+    fn without_override_both_fields_are_inherited_verbatim() {
+        let got = inherited_fork_identity(
+            &acp::ModelId::new("glm-4.6"),
+            Some(&acp::ModelId::new("glm-coding")),
+        );
+        assert_eq!(
+            got,
+            (acp::ModelId::new("glm-4.6"), Some(acp::ModelId::new("glm-coding"))),
+            "fork 丢掉源 key，等于让子会话重新掉进它父辈已经解决过的歧义"
+        );
+    }
+
+    /// 源本来就没有 key（旧格式会话）：继承后依然没有，不凭空造。
+    #[test]
+    fn without_override_a_keyless_source_stays_keyless() {
+        assert_eq!(
+            inherited_fork_identity(&acp::ModelId::new("glm-4.6"), None),
+            (acp::ModelId::new("glm-4.6"), None)
+        );
+    }
+
+    /// 显式给精确 key：slug 取该条目的上游名，key 写它自己。
+    #[test]
+    fn explicit_key_override_resolves_to_slug_and_key() {
+        let (m, a) = catalog();
+        assert_eq!(
+            fork_model_override(&m, &a, "glm-coding"),
+            (acp::ModelId::new("glm-4.6"), Some(acp::ModelId::new("glm-coding")))
+        );
+    }
+
+    /// 给的是全目录唯一的 slug：归一化成它的 key。
+    #[test]
+    fn unique_slug_override_is_normalized_to_its_key() {
+        let (m, a) = catalog();
+        assert_eq!(
+            fork_model_override(&m, &a, "deepseek-chat"),
+            (acp::ModelId::new("deepseek-chat"), Some(acp::ModelId::new("solo")))
+        );
+    }
+
+    /// 给的是重复 slug：留空。fork 不是用户在选模型的时刻，没人可问，
+    /// 猜一个写进去就是把歧义洗成权威。
+    #[test]
+    fn duplicate_slug_override_writes_no_key() {
+        let (m, a) = catalog();
+        assert_eq!(
+            fork_model_override(&m, &a, "glm-4.6"),
+            (acp::ModelId::new("glm-4.6"), None)
+        );
+    }
+
+    /// 目录里根本没有：字面值照旧带走（保持既有 fork 行为不硬失败），但不写 key。
+    #[test]
+    fn unknown_override_keeps_the_literal_but_writes_no_key() {
+        let (m, a) = catalog();
+        assert_eq!(
+            fork_model_override(&m, &a, "never-configured"),
+            (acp::ModelId::new("never-configured"), None)
+        );
+    }
+}

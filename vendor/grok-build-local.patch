@@ -4112,10 +4112,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..47acd4f 100644
+index a1c9b68..8807ece 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,508 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,542 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
@@ -4299,6 +4299,40 @@ index a1c9b68..47acd4f 100644
 +        }
 +    };
 +    available.contains_key(&resolved).then_some(resolved)
++}
++
++/// The identity a fork inherits when the caller supplies no model override.
++///
++/// Both fields are carried over verbatim. The source session already settled
++/// which catalog entry it runs on — dropping its key would hand the child an
++/// ambiguity its parent had resolved, and on a duplicate-slug catalog the user
++/// gets asked to re-pick a model they chose once already.
++pub fn inherited_fork_identity(
++    source_current: &acp::ModelId,
++    source_catalog: Option<&acp::ModelId>,
++) -> (acp::ModelId, Option<acp::ModelId>) {
++    (source_current.clone(), source_catalog.cloned())
++}
++
++/// The identity a fork gets when the caller **does** supply an override.
++///
++/// Strict resolution, then split into its two fields. A fork is not a moment
++/// when the user is choosing a model — there is nobody to ask — so anything
++/// that does not resolve to exactly one entry keeps the literal string for
++/// `current_model_id` (preserving fork's existing never-hard-fail behavior)
++/// and writes no key at all rather than laundering a guess into identity.
++pub fn fork_model_override(
++    models: &IndexMap<String, ModelEntry>,
++    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
++    requested: &str,
++) -> (acp::ModelId, Option<acp::ModelId>) {
++    match resolve_requested_model(models, available, requested) {
++        Ok(selection) => {
++            let slug = acp::ModelId::new(selection.entry().info.model.clone());
++            (slug, Some(selection.catalog_key().clone()))
++        }
++        Err(_) => (acp::ModelId::new(requested.to_owned()), None),
++    }
 +}
 +
 +/// The identity pair for a brand-new session's **first** Summary write.
@@ -5247,6 +5281,32 @@ index fde3dea..d2a622c 100644
              agent_name: Some(definition.name.clone()),
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });
+diff --git a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs b/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
+index 2ddc52c..a006bd6 100644
+--- a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
++++ b/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
+@@ -718,8 +718,19 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
+ 
+ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+     use crate::session::fork::{ForkSessionRequest, fork_session};
+-
+-    let request: ForkSessionRequest = parse_params(args)?;
++    // Resolve the override here, where the catalog exists, so `fork_session`
++    // and the storage layer below it never have to look a model up by string.
++
++    let mut request: ForkSessionRequest = parse_params(args)?;
++    if let Some(requested) = request.new_model_id.clone() {
++        let (slug, catalog_key) = crate::agent::models::fork_model_override(
++            &agent.models_manager.models(),
++            &agent.models_manager.available(),
++            &requested,
++        );
++        request.new_model_id = Some(slug.0.to_string());
++        request.new_catalog_model_id = catalog_key;
++    }
+ 
+     let agent_id = agent_id();
+     let response = fork_session(request, &agent_id, Some(agent.auth_manager.clone()))
 diff --git a/crates/codegen/xai-grok-shell/src/remote/pull.rs b/crates/codegen/xai-grok-shell/src/remote/pull.rs
 index 4564347..0c80486 100644
 --- a/crates/codegen/xai-grok-shell/src/remote/pull.rs
@@ -5459,6 +5519,30 @@ index 5df2285..99ad555 100644
          sampling_config: xai_grok_sampler::SamplerConfig,
          use_concise: bool,
          /// When `false`, skip the system prompt rewrite (concise/default swap).
+diff --git a/crates/codegen/xai-grok-shell/src/session/fork.rs b/crates/codegen/xai-grok-shell/src/session/fork.rs
+index 78057f8..f735da1 100644
+--- a/crates/codegen/xai-grok-shell/src/session/fork.rs
++++ b/crates/codegen/xai-grok-shell/src/session/fork.rs
+@@ -26,6 +26,11 @@ pub struct ForkSessionRequest {
+     /// If None, the source session's model will be used.
+     #[serde(default)]
+     pub new_model_id: Option<String>,
++    /// Catalog key for `new_model_id`, resolved by the ACP entry point where
++    /// the model catalog is available. Not part of the client-facing contract
++    /// — clients send `new_model_id` only.
++    #[serde(skip)]
++    pub new_catalog_model_id: Option<acp::ModelId>,
+     #[serde(default)]
+     pub target_prompt_index: Option<usize>,
+     /// Override `session_kind` in the forked summary. Defaults to `"fork"`.
+@@ -96,6 +101,7 @@ pub async fn fork_session(
+     let options = CopySessionOptions {
+         parent_session_id: Some(request.source_session_id.clone()),
+         new_model_id: request.new_model_id.clone(),
++        new_catalog_model_id: request.new_catalog_model_id.clone(),
+         target_prompt_index: request.target_prompt_index,
+         session_kind: request.session_kind.clone(),
+         source_workspace_dir: request.source_workspace_dir.clone(),
 diff --git a/crates/codegen/xai-grok-shell/src/session/image_describe.rs b/crates/codegen/xai-grok-shell/src/session/image_describe.rs
 index 26d5958..a4b630f 100644
 --- a/crates/codegen/xai-grok-shell/src/session/image_describe.rs
@@ -5709,19 +5793,41 @@ index a2473d0..4c9e7a4 100644
      if summary.session_kind.is_none() {
          summary.session_kind = Some("subagent".to_string());
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
-index d0b61fd..7249b54 100644
+index d0b61fd..156a741 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs
-@@ -707,6 +707,8 @@ impl JsonlStorageAdapter {
+@@ -695,10 +695,18 @@ impl JsonlStorageAdapter {
+         }
+         let num_chat_messages = chat_to_copy.len();
+         let num_messages = updates_to_copy.len();
+-        let target_model_id = options
+-            .new_model_id
+-            .map(acp::ModelId::new)
+-            .unwrap_or(source_summary.current_model_id);
++        // Identity travels as a pair. With no override the fork inherits both
++        // of the source's fields verbatim; with an override the caller — which
++        // is the layer that holds the model catalog — has already resolved it
++        // into (upstream slug, optional catalog key) and passes both here.
++        // This layer never consults the catalog and never invents a key.
++        let (target_model_id, target_catalog_model_id) = match options.new_model_id {
++            None => crate::agent::models::inherited_fork_identity(
++                &source_summary.current_model_id,
++                source_summary.catalog_model_id.as_ref(),
++            ),
++            Some(slug) => (acp::ModelId::new(slug), options.new_catalog_model_id),
++        };
+         let target_summary = crate::session::persistence::Summary {
+             info: target_info.clone(),
+             session_summary: source_summary.session_summary,
+@@ -707,6 +715,7 @@ impl JsonlStorageAdapter {
              num_messages,
              num_chat_messages,
              current_model_id: target_model_id,
-+            // fork/copy：目标会话的 key 由后续 SetSessionModel 或加载期迁移写入。
-+            catalog_model_id: None,
++            catalog_model_id: target_catalog_model_id,
              parent_session_id: options.parent_session_id,
              forked_at: Some(chrono::Utc::now()),
              collection_id: None,
-@@ -885,7 +887,12 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64
+@@ -885,7 +894,12 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64
  }
  #[async_trait]
  impl StorageAdapter for JsonlStorageAdapter {
@@ -5735,7 +5841,7 @@ index d0b61fd..7249b54 100644
          let dir = self.session_dir(info);
          std::fs::create_dir_all(&dir)?;
          let summary_path = self.summary_file(info);
-@@ -896,7 +903,7 @@ impl StorageAdapter for JsonlStorageAdapter {
+@@ -896,7 +910,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                  .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
          } else {
              tracing::info!("Creating new session in JSONL");
@@ -5744,7 +5850,7 @@ index d0b61fd..7249b54 100644
              summary.sandbox_profile = xai_grok_sandbox::configured_profile_name().map(String::from);
              self.write_summary_sync(info, &summary)?;
              Ok(summary)
-@@ -958,12 +965,14 @@ impl StorageAdapter for JsonlStorageAdapter {
+@@ -958,12 +972,14 @@ impl StorageAdapter for JsonlStorageAdapter {
          model_id: &acp::ModelId,
          agent_name: Option<&str>,
          reasoning_effort: Option<Option<xai_grok_sampling_types::ReasoningEffort>>,
@@ -5760,10 +5866,31 @@ index d0b61fd..7249b54 100644
                      reasoning_effort,
                  }),
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-index f511495..08d7512 100644
+index f511495..fe4d1f2 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-@@ -490,7 +490,28 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
+@@ -301,6 +301,12 @@ pub struct CopySessionOptions {
+     pub parent_session_id: Option<String>,
+     /// Model ID override for the forked session (None = keep source model).
+     pub new_model_id: Option<String>,
++    /// Catalog key that goes with `new_model_id`, already resolved by the
++    /// caller. Ignored unless `new_model_id` is set (with no override the fork
++    /// inherits the source's key instead). `None` means "could not be
++    /// resolved to exactly one entry" — the copy then writes no key rather
++    /// than guessing one.
++    pub new_catalog_model_id: Option<acp::ModelId>,
+     /// Truncate copied history to this prompt index (0-based, inclusive).
+     pub target_prompt_index: Option<usize>,
+     /// When true, skip `transform_conversation_cwd` during copy.
+@@ -362,6 +368,7 @@ impl Default for CopySessionOptions {
+         Self {
+             parent_session_id: None,
+             new_model_id: None,
++            new_catalog_model_id: None,
+             target_prompt_index: None,
+             skip_cwd_transform: false,
+             prompt_display_cwd: None,
+@@ -490,7 +497,28 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
  pub trait StorageAdapter: Send + Sync {
      /// Initialize a new session or load existing one
      /// Returns the Summary (creates if needed, loads if exists)
@@ -5793,7 +5920,7 @@ index f511495..08d7512 100644
  
      /// Set the session title unconditionally (manual `/rename`); last write
      /// wins. Also marks the title manual (`Summary::title_is_manual`) so
-@@ -518,7 +539,13 @@ pub trait StorageAdapter: Send + Sync {
+@@ -518,7 +546,13 @@ pub trait StorageAdapter: Send + Sync {
      /// Update the current model in summary (delegates to
      /// `update_current_model_and_agent` with `agent_name = None`).
      async fn update_current_model(&self, info: &Info, model_id: &acp::ModelId) -> io::Result<()> {
@@ -5808,7 +5935,7 @@ index f511495..08d7512 100644
              .await
      }
  
-@@ -527,12 +554,16 @@ pub trait StorageAdapter: Send + Sync {
+@@ -527,12 +561,16 @@ pub trait StorageAdapter: Send + Sync {
      /// persisted so session resume doesn't depend on the mutable model catalog.
      /// `None` leaves the existing `agent_name` unchanged (used by legacy callers
      /// that only update the model ID).
