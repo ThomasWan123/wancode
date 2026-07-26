@@ -86,6 +86,13 @@ jobs:
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
           cargo test -p xai-grok-shell --test model_endpoint_routing
+      # 身份链端到端：磁盘上的旧会话记录 → 歧义 → 用户选定 → 真实 HTTP。
+      - name: 身份链 E2E（旧记录 → 歧义 → 选定 → 正确端点）
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          Set-Location $engine
+          cargo test -p xai-grok-shell --test model_identity_e2e
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
         run: cargo test -p wancode --lib --test engine_canary
