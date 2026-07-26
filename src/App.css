@@ -2913,3 +2913,12 @@ button.ghost.small {
   font-size: 12px; cursor: pointer; color: var(--muted);
   border: 1px solid var(--border); border-radius: 8px; background: transparent;
 }
+
+/* 会话级模型阻塞收起后的常驻提示。收起 ≠ 解除：引擎那边的 block 还在，
+   所以这条一直挂着，点它把选择器重新展开。 */
+.model-blocked-chip {
+  padding: 3px 9px; font-size: 11px; cursor: pointer;
+  color: var(--warn, #b26b00);
+  border: 1px solid var(--warn, #b26b00); border-radius: 999px;
+  background: transparent; white-space: nowrap;
+}

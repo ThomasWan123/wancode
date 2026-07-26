@@ -2144,3 +2144,49 @@ mod tauri_boundary_payload_tests {
         assert_eq!(json["kind"], "error");
     }
 }
+
+/// v0.18.6 步10（RED）：候选在**线上**的字段名必须是 camelCase。
+///
+/// Codex 第二十轮的 P0：引擎把 ModelCandidate 直接序列化进
+/// LoadSessionResponse.meta，产出 snake_case 的 endpoint_label，而前端读
+/// endpointLabel——于是真实恢复弹窗里端点列是空的。端点是区分同名模型的
+/// 唯一依据，空了这个选择器就等于没用。
+///
+/// 这类 bug 完全沉默：编译过、测试过、弹窗也照弹。只有断言线上形状才拦得住。
+#[cfg(test)]
+mod candidate_wire_shape_tests {
+    use xai_grok_shell::agent::models::ModelCandidate;
+
+    #[test]
+    fn candidate_serializes_in_camel_case() {
+        let json = serde_json::to_value(ModelCandidate {
+            id: "glm-coding".to_owned(),
+            name: "GLM Coding Plan".to_owned(),
+            endpoint_label: "open.bigmodel.cn".to_owned(),
+            selectable: true,
+        })
+        .unwrap();
+        assert_eq!(json["endpointLabel"], "open.bigmodel.cn");
+        assert!(
+            json.get("endpoint_label").is_none(),
+            "snake_case 泄漏到线上——前端读不到，端点列会是空的"
+        );
+        assert_eq!(json["id"], "glm-coding");
+        assert_eq!(json["selectable"], true);
+    }
+
+    /// 引擎那条 load-meta 路径直接序列化这个类型，Tauri 那条错误路径要能把它
+    /// 读回来。两条路径必须说同一种话，否则只有其中一条能用。
+    #[test]
+    fn candidate_round_trips_through_the_wire_shape() {
+        let original = ModelCandidate {
+            id: "proxy".to_owned(),
+            name: "Corp proxy".to_owned(),
+            endpoint_label: "llm.corp:8443".to_owned(),
+            selectable: false,
+        };
+        let back: ModelCandidate =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        assert_eq!(back, original);
+    }
+}

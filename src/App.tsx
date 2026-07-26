@@ -238,6 +238,9 @@ function App() {
   // {kind, requested, candidates[]}。kind 为 ambiguous_model_id 时渲染
   // 模型选择器；其它 kind 目前只用于说明，不给选项。
   const [modelBlock, setModelBlock] = useState<any>(null);
+  // 选择器是否展开。会话级阻塞可以收起（用户也许想先翻历史），但收起不等于
+  // 解除——阻塞在引擎里，只有真正选定模型才会消失。
+  const [modelBlockOpen, setModelBlockOpen] = useState(true);
   const [sessionId, setSessionId] = useState("");
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1335,6 +1338,10 @@ function App() {
     setItems([]);
     setSessionId("");
     sessionIdRef.current = "";
+    // 阻塞状态属于某一个具体会话。清在这里而不是拿到响应后——启动失败时
+    // 界面已经空了，却还挂着上一个会话的"请选择模型"，是自相矛盾的状态。
+    setModelBlock(null);
+    setModelBlockOpen(true);
     // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
     setGitInfo(null);
     try {
@@ -1357,8 +1364,7 @@ function App() {
       if (r.models?.length) setModels(r.models);
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
-      // 加载结果一起回来，直接进选择器状态。每次开/切会话都重设，避免上一个
-      // 会话的歧义残留到下一个。
+      // 加载结果一起回来，直接进选择器状态。
       setModelBlock(r.model_block ?? null);
       refreshSessions(wsPath);
       invoke<string[]>("list_workspace_files", { workspace: wsPath })
@@ -1691,6 +1697,12 @@ function App() {
 
   async function send() {
     if (popup) return;
+    // 引擎已挂起这个会话的发送。放行只会换来一个空 EndTurn——用户看不出
+    // 发生了什么，还以为消息发出去了。在这里拦住并把选择器摆回来。
+    if (modelBlock) {
+      setModelBlockOpen(true);
+      return;
+    }
     const text = input.trim();
     if (!text && pastedImages.length === 0) return;
     // Typed before the session was ready — spin one up first, then send.
@@ -1812,6 +1824,7 @@ function App() {
           setSessionId("");
           sessionIdRef.current = "";
           setItems([]);
+          setModelBlock(null);
         } else if (c.action === "rewind") {
           openRewind();
         } else if (c.action === "compact") {
@@ -1890,6 +1903,7 @@ function App() {
         setSessionId("");
         sessionIdRef.current = "";
         setItems([]);
+        setModelBlock(null);
         setSidebarTab("sessions");
       },
     },
@@ -2111,7 +2125,7 @@ function App() {
 
       <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
 
-      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, setModelBlock, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
         <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />

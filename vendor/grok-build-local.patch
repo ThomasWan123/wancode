@@ -4112,17 +4112,24 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..23e3578 100644
+index a1c9b68..f623c25 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,542 @@ pub(crate) fn selectable_catalog_key_for_persisted(
+@@ -1649,6 +1649,549 @@ pub(crate) fn selectable_catalog_key_for_persisted(
      resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
  }
  
 +/// One selectable catalog entry offered to the user when a legacy persisted
 +/// slug is ambiguous. `endpoint_label` is the **host only** — never the full
 +/// URL, query string, or any credential.
++/// camelCase on the wire: this type is serialized straight into
++/// `LoadSessionResponse.meta` and read by the client, so it has to match the
++/// shape the client already uses for the same payload coming back through the
++/// `setModel` error path. Getting this wrong is silent — the picker still
++/// opens, just with an empty endpoint column, which is the one column that
++/// tells the user which of two same-named models they are choosing.
 +#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
 +pub struct ModelCandidate {
 +    /// Catalog key — the stable identity that must be persisted.
 +    pub id: String,

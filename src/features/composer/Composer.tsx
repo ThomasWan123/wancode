@@ -30,7 +30,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, setModelBlock, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -51,7 +51,10 @@ export function Composer(props: Record<string, any>) {
           previous: model,
         }
       : null;
-  const shownAmbiguity = ambiguity ?? sessionAmbiguity;
+  // 会话级阻塞可以收起，但收起不是解除——阻塞在引擎里，只有真正选定模型
+  // 才会消失。收起后仍留一条常驻提示与重开入口，且发送保持禁用。
+  const shownAmbiguity = ambiguity ?? (modelBlockOpen ? sessionAmbiguity : null);
+  const sessionBlocked = !!sessionAmbiguity;
 
   async function switchModel(target: string, previous: string) {
     try {
@@ -65,6 +68,9 @@ export function Composer(props: Record<string, any>) {
       if (e.kind === "ambiguous_model_id") {
         setAmbiguity({ requested: e.requested, candidates: e.candidates, previous });
       } else {
+        // 普通失败：上一次的候选已经过期，留着会让用户对着一份不再适用的
+        // 列表做选择。会话级 block 不清——它不归这次切换管。
+        setAmbiguity(null);
         setError(e.message);
       }
     }
@@ -358,6 +364,11 @@ export function Composer(props: Record<string, any>) {
                   ),
                 )}
               </select>
+              {sessionBlocked && !modelBlockOpen && (
+                <button className="model-blocked-chip" onClick={() => setModelBlockOpen?.(true)}>
+                  {t.ambiguousBlocked} · {t.ambiguousReopen}
+                </button>
+              )}
               {shownAmbiguity && (
                 <div className="model-ambiguity" role="dialog" aria-label={t.ambiguousTitle}>
                   <div className="ma-title">{t.ambiguousTitle}</div>
@@ -385,11 +396,15 @@ export function Composer(props: Record<string, any>) {
                   <button
                     className="ma-cancel"
                     onClick={() => {
-                      setAmbiguity(null);
-                      setModelBlock?.(null);
+                      // 本地一次切换失败：真取消，回到原模型即可。
+                      // 会话级阻塞：只收起弹窗，绝不清 modelBlock——引擎那边
+                      // 的 block 还在，前端假装解除只会让用户点发送后收到一个
+                      // 空 EndTurn，比不给取消按钮更糟。
+                      if (ambiguity) setAmbiguity(null);
+                      else setModelBlockOpen?.(false);
                     }}
                   >
-                    {t.ambiguousCancel}
+                    {ambiguity ? t.ambiguousCancel : t.ambiguousDismiss}
                   </button>
                 </div>
               )}
@@ -483,8 +498,8 @@ export function Composer(props: Record<string, any>) {
                 <button
                   className="send-btn"
                   onClick={send}
-                  disabled={starting || (!input.trim() && pastedImages.length === 0)}
-                  title={t.send}
+                  disabled={sessionBlocked || starting || (!input.trim() && pastedImages.length === 0)}
+                  title={sessionBlocked ? t.ambiguousBlocked : t.send}
                 >
                   <IconArrowUp size={16} />
                 </button>
