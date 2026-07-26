@@ -114,7 +114,11 @@ Set-Content (Join-Path $workspace "README.md") "smoke fixture"
 
 $sessionId = "smoke-legacy-session"
 if (-not $Step7 -and -not $Resume) {
-$sessionDir = Join-Path $grokHome "sessions\$sessionId"
+# 会话目录是 sessions/<百分号编码的 cwd>/<id>，不是 sessions/<id>。
+# 摆错位置的话应用根本列不出这个会话——第一次跑就是这么空跑掉的：
+# 应用开了默认工作区、新建了会话，夹具从头到尾没被碰过。
+$cwdKey = [Uri]::EscapeDataString($workspace)
+$sessionDir = Join-Path $grokHome "sessions\$cwdKey\$sessionId"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 $summary = @{
     info               = @{ id = $sessionId; cwd = $workspace }
@@ -145,7 +149,19 @@ Write-Host "工作区路径已复制到剪贴板——应用里『打开工作�
 Write-Host "第 7 项不用手改 TOML，另开一个终端跑：" -ForegroundColor Green
 Write-Host "  powershell -ExecutionPolicy Bypass -Command `"cd $((Split-Path $PSScriptRoot -Parent)); .\scripts\smoke-model-identity.ps1 -Step7`"" -ForegroundColor DarkGray
 Write-Host ""
+# 冒烟必须跑分支代码，不能跑已安装的旧版。第一次跑就疑似跑成了 v0.18.5：
+# 新建会话落盘为 current=glm-open（配置键）而不是 current=glm-4.6 + catalog=glm-open，
+# 那是本分支之前的字段语义。
+$branch = (git -C (Split-Path $PSScriptRoot -Parent) rev-parse --abbrev-ref HEAD 2>$null)
+Write-Host "将以源码构建启动（当前分支：$branch）。" -ForegroundColor Yellow
+Write-Host "注意：别去点已安装的 WanCode——那是旧版，测不到本分支的改动。" -ForegroundColor Yellow
+Write-Host "自检：新建一个会话后，它的 summary.json 应当是" -ForegroundColor DarkGray
+Write-Host "      current_model_id=glm-4.6（上游 slug）+ catalog_model_id=glm-open（配置键）；" -ForegroundColor DarkGray
+Write-Host "      若 current 是 glm-open 且没有 catalog，说明跑的是旧版。" -ForegroundColor DarkGray
+Write-Host ""
 Write-Host "请核对这七项：" -ForegroundColor Cyan
+Write-Host "  0. 应用启动后先『打开工作区』粘贴上面那个 proj 路径——"
+Write-Host "     开错工作区的话，侧栏里根本不会出现下面那个会话。"
 Write-Host "  1. 恢复上面那个旧会话 → 弹出选择器，列出两个候选，各自显示"
 Write-Host "     真实端点（127.0.0.1:34101 与 :34102）。端点为空即为失败。"
 Write-Host "  2. 此时发送按钮不可用。"
