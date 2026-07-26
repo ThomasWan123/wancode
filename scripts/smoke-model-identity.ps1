@@ -11,16 +11,36 @@
 # 两个"模型"指向本地 mock 端点，不需要任何真实 API Key，也不会发出外网请求。
 
 param(
-    # 保留夹具目录以便反复试；默认用后清掉。
-    [switch]$Keep,
     # 只造夹具、不启动 GUI。用于自检夹具本身是否成立。
-    [switch]$SetupOnly
+    [switch]$SetupOnly,
+    # 第 7 项专用：从已有夹具里删掉 glm-coding 段，然后重新启动。
+    # 不重造夹具，所以第 4 项写回的身份还在——这正是第 7 项要的前提。
+    [switch]$Step7,
+    # 留着上次的夹具继续用（默认每次重造，保证从旧格式记录开始）。
+    [switch]$Resume
 )
 
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:TEMP "wancode-smoke-$(Get-Random)"
+# 固定路径，不用随机临时目录——每次都变的话，第 7 项要你去翻新路径改 TOML，
+# 中途也没法回头看端点日志。这个目录已进 .gitignore。
+$root = Join-Path (Split-Path $PSScriptRoot -Parent) ".smoke-model-identity"
 $grokHome = Join-Path $root ".grok"
+$workspace = Join-Path $root "proj"
+$configPath = Join-Path $grokHome 'config.toml'
+
+if ($Step7) {
+    if (-not (Test-Path $configPath)) { throw "还没有夹具，先不带 -Step7 跑一遍" }
+    $cfg = Get-Content $configPath -Raw
+    # 删掉 glm-coding 整段：模拟"用户把这个模型从配置里去掉了"。
+    $cfg = [Regex]::Replace($cfg, '(?ms)^\[model\.glm-coding\].*?(?=^\[|\z)', '')
+    [IO.File]::WriteAllText($configPath, $cfg, [Text.UTF8Encoding]::new($false))
+    Write-Host "已从配置中删除 glm-coding。" -ForegroundColor Green
+    Write-Host "现在恢复那个会话，应当出现『模型已不在配置中』，且能从下拉另选一个解除。" -ForegroundColor Cyan
+}
+elseif (-not $Resume) {
+    if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+}
 New-Item -ItemType Directory -Force $grokHome | Out-Null
 
 # ── 两个本地 mock 端点：同一个上游 slug，不同 host ────────────────────
@@ -83,15 +103,17 @@ api_key = "key-for-open"
 api_backend = "chat_completions"
 context_window = 128000
 '@
-[IO.File]::WriteAllText((Join-Path $grokHome 'config.toml'), $config, [Text.UTF8Encoding]::new($false))
+if (-not $Step7 -and -not $Resume) {
+    [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
+}
 
 # ── 一份旧格式会话记录：只有 slug，没有 catalog_model_id ──────────────
 # 这就是 v0.18.6 之前所有会话的形状，也是歧义的来源。
-$workspace = Join-Path $root "proj"
 New-Item -ItemType Directory -Force $workspace | Out-Null
 Set-Content (Join-Path $workspace "README.md") "smoke fixture"
 
 $sessionId = "smoke-legacy-session"
+if (-not $Step7 -and -not $Resume) {
 $sessionDir = Join-Path $grokHome "sessions\$sessionId"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 $summary = @{
@@ -108,6 +130,7 @@ $summary = @{
 } | ConvertTo-Json -Depth 6
 [IO.File]::WriteAllText((Join-Path $sessionDir 'summary.json'), $summary, [Text.UTF8Encoding]::new($false))
 New-Item -ItemType File -Force (Join-Path $sessionDir 'chat_history.jsonl') | Out-Null
+}
 
 Write-Host ""
 Write-Host "夹具就绪" -ForegroundColor Green
@@ -115,6 +138,12 @@ Write-Host "  GROK_HOME : $grokHome"
 Write-Host "  工作区    : $workspace"
 Write-Host "  旧会话    : $sessionId （只有 slug glm-4.6，无 catalog key）"
 Write-Host "  端点日志  : $root\OPEN.requests.log / $root\CODING.requests.log"
+Write-Host ""
+# 应用里要"打开文件夹"时直接 Ctrl+V，不用手抄路径。
+Set-Clipboard -Value $workspace
+Write-Host "工作区路径已复制到剪贴板——应用里『打开工作区』时直接粘贴。" -ForegroundColor Green
+Write-Host "第 7 项不用手改 TOML，另开一个终端跑：" -ForegroundColor Green
+Write-Host "  powershell -ExecutionPolicy Bypass -Command `"cd $((Split-Path $PSScriptRoot -Parent)); .\scripts\smoke-model-identity.ps1 -Step7`"" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "请核对这七项：" -ForegroundColor Cyan
 Write-Host "  1. 恢复上面那个旧会话 → 弹出选择器，列出两个候选，各自显示"
@@ -126,7 +155,7 @@ Write-Host "  4. 选『模拟·Coding Plan』→ 发一条消息 → 只有 CODI
 Write-Host "     增加记录，OPEN.requests.log 不变。"
 Write-Host "  5. 切走再恢复同一会话 → 不再询问（身份已写回）。"
 Write-Host "  6. 切到一个新建的普通会话 → 弹窗与提示条完全消失。"
-Write-Host "  7. 编辑 config.toml 删掉 glm-coding 段，重启后恢复该会话 →"
+Write-Host "  7. 关掉应用，跑一次 -Step7（替你删掉 glm-coding），再恢复该会话 →"
 Write-Host "     出现『模型已不在配置中』提示，从下拉另选一个模型可解除。"
 Write-Host ""
 
@@ -150,10 +179,6 @@ finally {
         $n = if (Test-Path $log) { (Get-Content $log | Measure-Object -Line).Lines } else { 0 }
         Write-Host "  $tag : $n 次请求"
     }
-    if ($Keep) {
-        Write-Host "夹具保留在 $root" -ForegroundColor Yellow
-    } else {
-        Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
-        Write-Host "夹具已清理（加 -Keep 可保留）"
-    }
+    Write-Host ""
+    Write-Host "夹具保留在 $root（下次不带参数跑会重造；带 -Resume 沿用）" -ForegroundColor DarkGray
 }

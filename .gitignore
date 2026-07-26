@@ -25,3 +25,4 @@ dist-ssr
 
 # dogfood 实验产物
 blog-demo/
+.smoke-model-identity/
