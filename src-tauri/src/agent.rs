@@ -65,6 +65,15 @@ pub struct StartResult {
     /// 会话真实 cwd——前端必须用它当工作区标签（#83：标签来自
     /// localStorage 而会话另有其主时，面板显示的是别的仓库）。
     pub cwd: String,
+    /// Why this session cannot prompt yet, if it cannot — carried from
+    /// `LoadSessionResponse.meta["x.ai/modelBlock"]`.
+    ///
+    /// A blocked session loads fine and its history is readable; only sending
+    /// is held. Without this the client's first hint is an empty `EndTurn`,
+    /// which it cannot explain or act on. Ambiguity in particular is only
+    /// resolvable by the user, so it has to travel with the load result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_block: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -305,6 +314,7 @@ pub(crate) async fn start_inner(
         &cwd,
         &xai_grok_tools::types::compat::CompatConfig::default(),
     );
+    let mut model_block: Option<serde_json::Value> = None;
     let (session_id, session_models) = if let Some(sid) = resume {
         let resp: acp::LoadSessionResponse = acp_send(
             acp::LoadSessionRequest::new(acp::SessionId::new(sid.clone()), cwd.clone())
@@ -313,6 +323,11 @@ pub(crate) async fn start_inner(
         )
         .await
         .map_err(|e| anyhow!("恢复会话失败: {e}"))?;
+        model_block = resp
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("x.ai/modelBlock"))
+            .cloned();
         (acp::SessionId::new(sid), resp.models)
     } else {
         let resp: acp::NewSessionResponse = acp_send(
@@ -353,6 +368,7 @@ pub(crate) async fn start_inner(
         session_id: session_id.0.to_string(),
         models: model_ids,
         cwd: cwd.to_string_lossy().into_owned(),
+        model_block,
     })
 }
 

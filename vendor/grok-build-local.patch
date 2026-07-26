@@ -4112,7 +4112,7 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..8807ece 100644
+index a1c9b68..23e3578 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
 @@ -1649,6 +1649,542 @@ pub(crate) fn selectable_catalog_key_for_persisted(
@@ -4316,23 +4316,23 @@ index a1c9b68..8807ece 100644
 +
 +/// The identity a fork gets when the caller **does** supply an override.
 +///
-+/// Strict resolution, then split into its two fields. A fork is not a moment
-+/// when the user is choosing a model — there is nobody to ask — so anything
-+/// that does not resolve to exactly one entry keeps the literal string for
-+/// `current_model_id` (preserving fork's existing never-hard-fail behavior)
-+/// and writes no key at all rather than laundering a guess into identity.
++/// An explicit override is user input, so it gets the same strict, gated
++/// treatment as `setModel` and fails rather than degrading.
++///
++/// Letting an unresolvable override through as a bare literal — the earlier
++/// behavior, chosen to keep fork from ever hard-failing — opened a way around
++/// `allowed_models`: restore is deliberately ungated (a hidden model holding
++/// an exact key must be able to come back), so a literal written here was
++/// later honored as identity. The two are only safe together if the gate is
++/// enforced at the point the string enters.
 +pub fn fork_model_override(
 +    models: &IndexMap<String, ModelEntry>,
 +    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
 +    requested: &str,
-+) -> (acp::ModelId, Option<acp::ModelId>) {
-+    match resolve_requested_model(models, available, requested) {
-+        Ok(selection) => {
-+            let slug = acp::ModelId::new(selection.entry().info.model.clone());
-+            (slug, Some(selection.catalog_key().clone()))
-+        }
-+        Err(_) => (acp::ModelId::new(requested.to_owned()), None),
-+    }
++) -> Result<(acp::ModelId, Option<acp::ModelId>), ModelSelectionError> {
++    let selection = resolve_requested_model(models, available, requested)?;
++    let slug = acp::ModelId::new(selection.entry().info.model.clone());
++    Ok((slug, Some(selection.catalog_key().clone())))
 +}
 +
 +/// The identity pair for a brand-new session's **first** Summary write.
@@ -4659,7 +4659,7 @@ index a1c9b68..8807ece 100644
  /// is an active campaign default, i.e. the change is attributable to a campaign
  /// overlay appearing/disappearing rather than a user/CLI/env edit.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 78a8612..0fc6b6f 100644
+index 78a8612..08edef5 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 @@ -906,34 +906,68 @@ impl acp::Agent for MvpAgent {
@@ -4975,7 +4975,7 @@ index 78a8612..0fc6b6f 100644
              let _timer = crate::instrumentation_timer!("session.restore_model");
              let restore_meta = summary
                  .reasoning_effort
-@@ -1847,12 +1976,26 @@ impl acp::Agent for MvpAgent {
+@@ -1847,15 +1976,59 @@ impl acp::Agent for MvpAgent {
                      );
                      map
                  });
@@ -5008,7 +5008,40 @@ index 78a8612..0fc6b6f 100644
          }
          let mut response_meta_map = serde_json::Map::new();
          response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-@@ -2009,20 +2152,25 @@ impl acp::Agent for MvpAgent {
++        // Why this session cannot prompt yet, if it cannot. The block itself
++        // already stops the turn, but a client that only learns about it by
++        // getting an empty `EndTurn` on the user's first message has no way to
++        // show what happened or offer the fix — the ambiguity is only
++        // resolvable by the user, so it has to reach them at load time, not on
++        // a failed send.
++        if let Some(block) = self
++            .model_blocked_sessions
++            .borrow()
++            .get(session_id.0.as_ref())
++        {
++            let payload = match block {
++                crate::agent::models::ModelSessionBlock::Ambiguous {
++                    requested,
++                    candidates,
++                } => serde_json::json!({
++                    "kind": crate::agent::models::MODEL_AMBIGUOUS,
++                    "requested": requested,
++                    "candidates": candidates,
++                }),
++                crate::agent::models::ModelSessionBlock::Unavailable { persisted_model } => {
++                    serde_json::json!({
++                        "kind": "model_unavailable",
++                        "requested": persisted_model.0.as_ref(),
++                        "candidates": [],
++                    })
++                }
++            };
++            response_meta_map.insert("x.ai/modelBlock".to_string(), payload);
++        }
+         if let Some(persist) = persist_data {
+             response_meta_map.insert("x.ai/persist".to_string(), persist);
+         }
+@@ -2009,20 +2182,25 @@ impl acp::Agent for MvpAgent {
              return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
          }
          let latched_model = self
@@ -5043,7 +5076,7 @@ index 78a8612..0fc6b6f 100644
                  tracing::info!(
                      session_id = % arguments.session_id.0, model_id = % restore_model_id
                      .0,
-@@ -2035,28 +2183,54 @@ impl acp::Agent for MvpAgent {
+@@ -2035,28 +2213,54 @@ impl acp::Agent for MvpAgent {
                          serde_json::json!({ "model_id" : restore_model_id.0.as_ref(), }),
                      ),
                  );
@@ -5116,7 +5149,7 @@ index 78a8612..0fc6b6f 100644
                      available_keys = ? available.keys().take(10).collect::< Vec < _ >>
                      (),
                      "prompt blocked: session model unavailable since load and still missing from the catalog"
-@@ -2066,8 +2240,8 @@ impl acp::Agent for MvpAgent {
+@@ -2066,8 +2270,8 @@ impl acp::Agent for MvpAgent {
                      Some(arguments.session_id.0.as_ref()),
                      Some(
                          serde_json::json!(
@@ -5127,7 +5160,7 @@ index 78a8612..0fc6b6f 100644
                          ),
                      ),
                  );
-@@ -3119,25 +3293,50 @@ impl acp::Agent for MvpAgent {
+@@ -3119,25 +3323,50 @@ impl acp::Agent for MvpAgent {
          &self,
          args: acp::SetSessionModelRequest,
      ) -> Result<acp::SetSessionModelResponse, acp::Error> {
@@ -5282,10 +5315,10 @@ index fde3dea..d2a622c 100644
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });
 diff --git a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs b/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
-index 2ddc52c..a006bd6 100644
+index 2ddc52c..255fc15 100644
 --- a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
 +++ b/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
-@@ -718,8 +718,19 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
+@@ -718,8 +718,20 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
  
  async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
      use crate::session::fork::{ForkSessionRequest, fork_session};
@@ -5300,7 +5333,8 @@ index 2ddc52c..a006bd6 100644
 +            &agent.models_manager.models(),
 +            &agent.models_manager.available(),
 +            &requested,
-+        );
++        )
++        .map_err(|e| e.into_acp_error())?;
 +        request.new_model_id = Some(slug.0.to_string());
 +        request.new_catalog_model_id = catalog_key;
 +    }

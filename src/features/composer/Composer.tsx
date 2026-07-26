@@ -30,7 +30,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, setModelBlock, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -39,10 +39,26 @@ export function Composer(props: Record<string, any>) {
     { requested: string; candidates: AmbiguousCandidate[]; previous: string } | null
   >(null);
 
+  // 会话加载时引擎判定的歧义，与本地一次切换失败导致的歧义，走同一个选择器。
+  // 前者才是主路径：下拉里的 option value 是唯一 catalog key，精确 key 永远
+  // 不歧义，所以正常从下拉选是触发不了的——真正需要选择器的是"恢复一个只存了
+  // 重复 slug 的旧会话"。只接后者等于把选择器接在几乎不会走到的入口上。
+  const sessionAmbiguity =
+    modelBlock && modelBlock.kind === "ambiguous_model_id"
+      ? {
+          requested: String(modelBlock.requested ?? ""),
+          candidates: (modelBlock.candidates ?? []) as AmbiguousCandidate[],
+          previous: model,
+        }
+      : null;
+  const shownAmbiguity = ambiguity ?? sessionAmbiguity;
+
   async function switchModel(target: string, previous: string) {
     try {
       await invoke("agent_set_model", { model: target });
       setAmbiguity(null);
+      // 选定即解除会话阻塞——引擎那边成功切换后 block 已清，本地状态同步。
+      setModelBlock?.(null);
     } catch (err) {
       const e = asModelSwitchError(err);
       setModel(previous);
@@ -342,14 +358,14 @@ export function Composer(props: Record<string, any>) {
                   ),
                 )}
               </select>
-              {ambiguity && (
+              {shownAmbiguity && (
                 <div className="model-ambiguity" role="dialog" aria-label={t.ambiguousTitle}>
                   <div className="ma-title">{t.ambiguousTitle}</div>
                   <div className="ma-hint">
-                    <code>{ambiguity.requested}</code> — {t.ambiguousHint}
+                    <code>{shownAmbiguity.requested}</code> — {t.ambiguousHint}
                   </div>
                   <div className="ma-list">
-                    {ambiguity.candidates.map((c) => (
+                    {shownAmbiguity.candidates.map((c: AmbiguousCandidate) => (
                       <button
                         key={c.id}
                         className="ma-item"
@@ -357,7 +373,7 @@ export function Composer(props: Record<string, any>) {
                         title={c.selectable ? c.endpointLabel : t.ambiguousUnavailable}
                         onClick={() => {
                           setModel(c.id);
-                          void switchModel(c.id, ambiguity.previous);
+                          void switchModel(c.id, shownAmbiguity.previous);
                         }}
                       >
                         <span className="ma-name">{c.name}</span>
@@ -366,7 +382,13 @@ export function Composer(props: Record<string, any>) {
                       </button>
                     ))}
                   </div>
-                  <button className="ma-cancel" onClick={() => setAmbiguity(null)}>
+                  <button
+                    className="ma-cancel"
+                    onClick={() => {
+                      setAmbiguity(null);
+                      setModelBlock?.(null);
+                    }}
+                  >
                     {t.ambiguousCancel}
                   </button>
                 </div>

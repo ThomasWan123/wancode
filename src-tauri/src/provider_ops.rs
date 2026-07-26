@@ -1942,7 +1942,9 @@ mod fork_identity_tests {
     use agent_client_protocol as acp;
     use indexmap::IndexMap;
     use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
-    use xai_grok_shell::agent::models::{fork_model_override, inherited_fork_identity};
+    use xai_grok_shell::agent::models::{
+        fork_model_override, inherited_fork_identity, ModelSelectionError,
+    };
 
     fn entry(slug: &str, base: &str) -> ModelEntry {
         let mut info = ModelInfo::fallback(slug);
@@ -1993,7 +1995,7 @@ mod fork_identity_tests {
     fn explicit_key_override_resolves_to_slug_and_key() {
         let (m, a) = catalog();
         assert_eq!(
-            fork_model_override(&m, &a, "glm-coding"),
+            fork_model_override(&m, &a, "glm-coding").unwrap(),
             (acp::ModelId::new("glm-4.6"), Some(acp::ModelId::new("glm-coding")))
         );
     }
@@ -2003,30 +2005,67 @@ mod fork_identity_tests {
     fn unique_slug_override_is_normalized_to_its_key() {
         let (m, a) = catalog();
         assert_eq!(
-            fork_model_override(&m, &a, "deepseek-chat"),
+            fork_model_override(&m, &a, "deepseek-chat").unwrap(),
             (acp::ModelId::new("deepseek-chat"), Some(acp::ModelId::new("solo")))
         );
     }
 
-    /// 给的是重复 slug：留空。fork 不是用户在选模型的时刻，没人可问，
-    /// 猜一个写进去就是把歧义洗成权威。
+    /// 给的是重复 slug：拒绝，返回歧义。
     #[test]
-    fn duplicate_slug_override_writes_no_key() {
+    fn duplicate_slug_override_is_rejected_as_ambiguous() {
         let (m, a) = catalog();
-        assert_eq!(
+        assert!(matches!(
             fork_model_override(&m, &a, "glm-4.6"),
-            (acp::ModelId::new("glm-4.6"), None)
+            Err(ModelSelectionError::Ambiguous { .. })
+        ));
+    }
+
+    /// 目录里根本没有：拒绝。
+    #[test]
+    fn unknown_override_is_rejected() {
+        let (m, a) = catalog();
+        assert!(matches!(
+            fork_model_override(&m, &a, "never-configured"),
+            Err(ModelSelectionError::Unknown(_))
+        ));
+    }
+
+    /// 隐藏模型的**精确 key**不得借 fork override 创建会话。
+    ///
+    /// 这是 Codex 第十九轮抓到的绕过：我原来让 Err 分支"保留字面值继续
+    /// fork"，理由是维持 fork 不硬失败的既有行为。但恢复路径是 ungated 的
+    /// （隐藏模型持精确 key 必须能恢复，这条本身是对的），于是两者一组合，
+    /// 用户就能借 fork override 把 allowed_models 禁掉的模型写进会话，
+    /// 下次加载时被原样恢复。显式 override 是用户输入，必须过门。
+    #[test]
+    fn hidden_model_exact_key_cannot_be_forked_into() {
+        let (mut m, a) = catalog();
+        let mut info = ModelInfo::fallback("internal-slug");
+        info.base_url = "https://internal/v1".to_owned();
+        info.user_selectable = false;
+        m.insert(
+            "hidden-key".to_owned(),
+            ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
+        );
+        assert!(
+            fork_model_override(&m, &a, "hidden-key").is_err(),
+            "fork override 必须过 allowed_models 门——否则它就是一条绕过通道"
         );
     }
 
-    /// 目录里根本没有：字面值照旧带走（保持既有 fork 行为不硬失败），但不写 key。
+    /// 隐藏模型的**唯一 slug**同样不得借 fork override 进来。
+    /// 只堵精确 key 那条是不够的：唯一 slug 归一化同样会解析到隐藏条目。
     #[test]
-    fn unknown_override_keeps_the_literal_but_writes_no_key() {
-        let (m, a) = catalog();
-        assert_eq!(
-            fork_model_override(&m, &a, "never-configured"),
-            (acp::ModelId::new("never-configured"), None)
+    fn hidden_model_unique_slug_cannot_be_forked_into() {
+        let (mut m, a) = catalog();
+        let mut info = ModelInfo::fallback("internal-slug");
+        info.base_url = "https://internal/v1".to_owned();
+        info.user_selectable = false;
+        m.insert(
+            "hidden-key".to_owned(),
+            ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
         );
+        assert!(fork_model_override(&m, &a, "internal-slug").is_err());
     }
 }
 

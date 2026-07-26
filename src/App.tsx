@@ -234,6 +234,10 @@ function App() {
   const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
+  // 引擎判定"这个会话现在不能发送，且原因需要用户决断"时的载荷：
+  // {kind, requested, candidates[]}。kind 为 ambiguous_model_id 时渲染
+  // 模型选择器；其它 kind 目前只用于说明，不给选项。
+  const [modelBlock, setModelBlock] = useState<any>(null);
   const [sessionId, setSessionId] = useState("");
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1334,7 +1338,7 @@ function App() {
     // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
     setGitInfo(null);
     try {
-      const r = await invoke<{ session_id: string; models: string[]; cwd: string }>(
+      const r = await invoke<{ session_id: string; models: string[]; cwd: string; model_block?: any }>(
         "agent_start",
         {
           workspace: wsPath,
@@ -1351,6 +1355,11 @@ function App() {
         localStorage.setItem("wancode-workspace", r.cwd);
       }
       if (r.models?.length) setModels(r.models);
+      // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
+      // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
+      // 加载结果一起回来，直接进选择器状态。每次开/切会话都重设，避免上一个
+      // 会话的歧义残留到下一个。
+      setModelBlock(r.model_block ?? null);
       refreshSessions(wsPath);
       invoke<string[]>("list_workspace_files", { workspace: wsPath })
         .then(setFileList)
@@ -2102,7 +2111,7 @@ function App() {
 
       <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
 
-      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, setModelBlock, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
         <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />
