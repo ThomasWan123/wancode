@@ -41,6 +41,20 @@ describe("parseModelBlock", () => {
     expect(b?.kind).toBe("unknown");
   });
 
+  it("部分候选损坏时整份作废，绝不只显示剩下的那些", () => {
+    const b = parseModelBlock({
+      kind: "ambiguous_model_id",
+      requested: "glm-4.6",
+      candidates: [
+        { id: "glm-open", name: "开放平台", endpointLabel: "open.bigmodel.cn", selectable: true },
+        // 这一条损坏。若只把它 filter 掉，用户会以为只有开放平台可选，
+        // 从而把它固化——而这条损坏的才可能是原会话真正用的端点。
+        { id: "glm-coding", name: "Coding Plan", selectable: true },
+      ],
+    });
+    expect(b?.kind).toBe("unknown");
+  });
+
   it("没有阻塞时才返回 null", () => {
     expect(parseModelBlock(null)).toBeNull();
     expect(parseModelBlock(undefined)).toBeNull();

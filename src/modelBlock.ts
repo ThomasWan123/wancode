@@ -74,11 +74,15 @@ export function parseModelBlock(raw: unknown): ModelBlock | null {
   const requested = typeof b.requested === "string" ? b.requested : "";
 
   if (rawKind === "ambiguous_model_id") {
-    const candidates = Array.isArray(b.candidates) ? b.candidates.filter(isCandidate) : [];
-    // 歧义却没有一条可用候选，选择器就是空的——那不是能让用户解决的状态，
-    // 当作读不懂处理，至少把话说清楚。
-    if (candidates.length === 0) return { kind: "unknown", raw: rawKind };
-    return { kind: "ambiguous_model_id", requested, candidates };
+    // 全有或全无。filter 掉坏的那些看起来更"健壮"，实际是最危险的做法：
+    // A 合法、B 损坏时用户只看到 A，会以为只有这一个选择并把它固化下来，
+    // 而 B 才可能是原会话真正用的那个端点——他连"少了一个"都无从知道。
+    // 一条读不懂，整份载荷就不可信，宁可说"读不懂"也不给残缺的选项。
+    const raw = Array.isArray(b.candidates) ? b.candidates : null;
+    if (!raw || raw.length === 0 || !raw.every(isCandidate)) {
+      return { kind: "unknown", raw: rawKind };
+    }
+    return { kind: "ambiguous_model_id", requested, candidates: raw };
   }
   if (rawKind === "model_unavailable") {
     return { kind: "model_unavailable", requested };
