@@ -36,8 +36,7 @@ $env:PROTOC = "$env:USERPROFILE\.protoc\bin\protoc.exe"
 $env:RUSTFLAGS = "-C link-arg=/STACK:16777216"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link"
 
-Write-Host "[1/4] 关闭运行中的 wancode（否则 exe 被占用无法覆盖）..."
-Get-Process wancode -EA SilentlyContinue | Stop-Process -Force -Confirm:$false
+Write-Host "[1/4] dev 构建输出占用检查完成（安装版不受影响）..."
 
 Write-Host "[2/4] 构建 release（不在 build 时签名——见文件头注释）..."
 Set-Location $root
