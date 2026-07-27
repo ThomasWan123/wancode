@@ -33,7 +33,10 @@ $fixture = Join-Path $env:TEMP ("wancode-smoke-" + (Get-Date -Format "HHmmss"))
 New-Item -ItemType Directory -Force $fixture | Out-Null
 Set-Content -Path (Join-Path $fixture "notes.md") -Value "smoke fixture" -Encoding utf8
 
-Get-Process wancode -EA SilentlyContinue | Stop-Process -Force -Confirm:$false
+# 只停止本脚本即将启动的 debug 产物；禁止按进程名误杀用户安装版。
+Get-Process wancode -EA SilentlyContinue |
+  Where-Object { $_.Path -eq $exe } |
+  Stop-Process -Force -Confirm:$false
 $log = Join-Path $env:TEMP "wancode-autotest.log"
 Remove-Item $log -EA SilentlyContinue
 
@@ -60,7 +63,9 @@ if (Test-Path $log) { Get-Content $log } else { Write-Host "(无日志——启�
 Write-Host "──────────────────────────────"
 if (Test-Path $stderr) { Write-Host "──── stderr ────"; Get-Content $stderr -Tail 20; Write-Host "────────────────" }
 
-Get-Process wancode -EA SilentlyContinue | Stop-Process -Force -Confirm:$false
+Get-Process wancode -EA SilentlyContinue |
+  Where-Object { $_.Path -eq $exe } |
+  Stop-Process -Force -Confirm:$false
 Remove-Item -Recurse -Force $fixture -EA SilentlyContinue
 
 if (-not $done) { Write-Host "[smoke] 超时或未完成"; exit 1 }
