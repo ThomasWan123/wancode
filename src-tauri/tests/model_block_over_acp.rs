@@ -193,11 +193,18 @@ async fn loading_a_legacy_ambiguous_session_returns_a_structured_model_block() {
 ///   current_model_id = "glm-open"（配置键）、catalog_model_id 缺失
 /// 而本分支的约定是 current = "glm-4.6"（上游 slug）+ catalog = "glm-open"。
 ///
-/// 线索：默认模型走 resolve_sampling_config_for_model()，它在 resolve_model_id
-/// 失败时回落到基线 sampling config，而基线的 .model 就是配置里的默认模型 id
-/// ——一个键。于是 initial_persisted_identity 收到的 sampling_model 本身就是键，
-/// 它的 fail-closed 判断随之把 catalog 留空。判断没错，错在上游喂给它的输入。
-/// 步6b 只修好了 new_session 的自定义模型分支，默认模型这条路没走到。
+/// 诊断证据（本测试 --nocapture 实测）：
+///   目录 available = ["glm-open", "glm-coding"]，引擎当前模型 = glm-open
+/// 也就是说**目录是满的、glm-open 就在里面**，resolve_model_id 没有理由失败。
+/// 我最初"回落到基线 sampling config"的解释因此被推翻——真正把配置键写进
+/// current_model_id 的那一处还没有找到，不要从这个错误前提继续往下修。
+///
+/// 下一步该查的方向（按代价从低到高）：
+///   1. persistence::new 之后是否还有别的写入把 current_model_id 覆盖成
+///      运行时 key（"Update model if different" 那段、或某条 CurrentModel 消息）；
+///   2. session_sampling.model 在默认模型分支的实际取值——打点确认它是
+///      glm-4.6 还是 glm-open，据此判断问题在组装还是在覆盖；
+///   3. 步6b 的 initial_persisted_identity 是否真的被这条路径调用到。
 ///
 /// 同进程里 GROK_HOME 是 OnceLock，本测试与上一条不能共存于一次运行——
 /// 修复时需要把两者合并成共用一份夹具，或拆成两个测试二进制。
@@ -267,6 +274,22 @@ async fn a_new_session_persists_slug_and_key_in_their_own_fields() {
     )
     .await
     .expect("new session");
+
+    // ── 诊断：为什么精确键 glm-open 会解析不到？ ─────────────────────
+    // 先取证再修，否则只是治结果。NewSessionResponse.models 就是引擎当时
+    // 对外暴露的目录快照。
+    let avail: Vec<String> = new_resp
+        .models
+        .as_ref()
+        .map(|m| m.available_models.iter().map(|x| x.model_id.0.to_string()).collect())
+        .unwrap_or_default();
+    let current = new_resp
+        .models
+        .as_ref()
+        .map(|m| m.current_model_id.0.to_string())
+        .unwrap_or_else(|| "<none>".into());
+    eprintln!("[诊断] 目录 available = {avail:?}");
+    eprintln!("[诊断] 引擎当前模型 = {current}");
 
     // 直接读落盘产物——字段语义只能在磁盘上验证。
     let dir = xai_grok_shell::session::persistence::session_dir(
