@@ -62,6 +62,9 @@ pub struct AgentState {
 pub struct StartResult {
     pub session_id: String,
     pub models: Vec<String>,
+    /// 引擎实际选中的 catalog key。恢复会话时它可能与前端上一个会话的
+    /// 下拉值不同；不透传会造成界面显示 glm-open、请求实际走 glm-coding。
+    pub current_model_id: Option<String>,
     /// 会话真实 cwd——前端必须用它当工作区标签（#83：标签来自
     /// localStorage 而会话另有其主时，面板显示的是别的仓库）。
     pub cwd: String,
@@ -338,8 +341,16 @@ pub(crate) async fn start_inner(
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
         (resp.session_id, resp.models)
     };
-    let model_ids: Vec<String> = session_models
-        .map(|m| m.available_models.iter().map(|am| am.model_id.0.to_string()).collect())
+    let (model_ids, current_model_id): (Vec<String>, Option<String>) = session_models
+        .map(|m| {
+            (
+                m.available_models
+                    .iter()
+                    .map(|am| am.model_id.0.to_string())
+                    .collect(),
+                Some(m.current_model_id.0.to_string()),
+            )
+        })
         .unwrap_or_default();
 
     *state.handle.lock().await = Some(AgentHandle {
@@ -367,6 +378,7 @@ pub(crate) async fn start_inner(
     Ok(StartResult {
         session_id: session_id.0.to_string(),
         models: model_ids,
+        current_model_id,
         cwd: cwd.to_string_lossy().into_owned(),
         model_block,
     })

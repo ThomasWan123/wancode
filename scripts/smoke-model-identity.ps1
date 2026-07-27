@@ -13,7 +13,7 @@
 param(
     # 只造夹具、不启动 GUI。用于自检夹具本身是否成立。
     [switch]$SetupOnly,
-    # 第 7 项专用：从已有夹具里删掉 glm-coding 段，然后重新启动。
+    # 第 7 项专用：从已有夹具里删掉两个 glm-4.6 条目，然后重新启动。
     # 不重造夹具，所以第 4 项写回的身份还在——这正是第 7 项要的前提。
     [switch]$Step7,
     # 留着上次的夹具继续用（默认每次重造，保证从旧格式记录开始）。
@@ -32,10 +32,17 @@ $configPath = Join-Path $grokHome 'config.toml'
 if ($Step7) {
     if (-not (Test-Path $configPath)) { throw "还没有夹具，先不带 -Step7 跑一遍" }
     $cfg = Get-Content $configPath -Raw
-    # 删掉 glm-coding 整段：模拟"用户把这个模型从配置里去掉了"。
-    $cfg = [Regex]::Replace($cfg, '(?ms)^\[model\.glm-coding\].*?(?=^\[|\z)', '')
+    # 两个同 slug 条目必须都删：只删 glm-coding 时，glm-open 会成为唯一
+    # slug 匹配并按兼容规则安全迁移，那不是 model_unavailable。
+    foreach ($key in 'glm-coding', 'glm-open') {
+        $cfg = [Regex]::Replace(
+            $cfg,
+            "(?ms)^\[model\.$([Regex]::Escape($key))\].*?(?=^\[|\z)",
+            ''
+        )
+    }
     [IO.File]::WriteAllText($configPath, $cfg, [Text.UTF8Encoding]::new($false))
-    Write-Host "已从配置中删除 glm-coding。" -ForegroundColor Green
+    Write-Host "已从配置中删除全部 glm-4.6 条目。" -ForegroundColor Green
     Write-Host "现在恢复那个会话，应当出现『模型已不在配置中』，且能从下拉另选一个解除。" -ForegroundColor Cyan
 }
 elseif (-not $Resume) {
@@ -50,31 +57,91 @@ function Start-MockEndpoint([int]$port, [string]$tag) {
     $job = Start-Job -ArgumentList $port, $tag, $root -ScriptBlock {
         param($port, $tag, $root)
         $log = Join-Path $root "$tag.requests.log"
-        $http = [System.Net.HttpListener]::new()
-        $http.Prefixes.Add("http://127.0.0.1:$port/")
-        $http.Start()
-        while ($http.IsListening) {
-            $ctx = $http.GetContext()
-            $auth = $ctx.Request.Headers['Authorization']
-            Add-Content -Path $log -Value "$(Get-Date -Format o) $($ctx.Request.Url.AbsolutePath) auth=$auth"
-            $body = @(
-                'data: {"id":"smoke","object":"chat.completion.chunk","created":0,',
-                '"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant",',
-                '"content":"[' + $tag + ' 收到请求]"},"finish_reason":"stop"}]}',
-                '', 'data: [DONE]', ''
-            ) -join ''
-            $bytes = [Text.Encoding]::UTF8.GetBytes($body)
-            $ctx.Response.ContentType = 'text/event-stream'
-            $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-            $ctx.Response.Close()
+        $serverLog = Join-Path $root "$tag.server.log"
+        try {
+            # HttpListener 在部分 Windows 环境需要 URL ACL，后台 Job 会直接
+            # 失败而主脚本继续运行，造成“两个端点 0 次”的假验证。TcpListener
+            # 只绑定 loopback，不需要管理员权限。
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+            $listener.Start()
+            while ($true) {
+                # 不永久阻塞在 AcceptTcpClient：Stop-Job 只有在脚本有机会响应
+                # 取消时才能及时退出，否则 SetupOnly/关闭 GUI 会挂在清理阶段。
+                if (-not $listener.Pending()) {
+                    Start-Sleep -Milliseconds 50
+                    continue
+                }
+                $client = $listener.AcceptTcpClient()
+                try {
+                    $stream = $client.GetStream()
+                    $reader = [IO.StreamReader]::new(
+                        $stream, [Text.Encoding]::UTF8, $false, 4096, $true
+                    )
+                    $requestLine = $reader.ReadLine()
+                    # 就绪探针只连端口、不发 HTTP；不计为模型请求。
+                    if ([string]::IsNullOrWhiteSpace($requestLine)) { continue }
+                    $auth = ''
+                    while ($true) {
+                        $line = $reader.ReadLine()
+                        if ([string]::IsNullOrEmpty($line)) { break }
+                        if ($line -match '(?i)^Authorization:\s*(.*)$') { $auth = $Matches[1] }
+                    }
+                    $path = ($requestLine -split ' ')[1]
+                    Add-Content -Path $log -Value "$(Get-Date -Format o) $path auth=$auth"
+                    $body = @(
+                        'data: {"id":"smoke","object":"chat.completion.chunk","created":0,',
+                        '"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant",',
+                        '"content":"[' + $tag + ' 收到请求]"},"finish_reason":"stop"}]}',
+                        "`n`ndata: [DONE]`n`n"
+                    ) -join ''
+                    $bodyBytes = [Text.Encoding]::UTF8.GetBytes($body)
+                    $head = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`n" +
+                        "Content-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+                    $headBytes = [Text.Encoding]::ASCII.GetBytes($head)
+                    $stream.Write($headBytes, 0, $headBytes.Length)
+                    $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+                    $stream.Flush()
+                }
+                finally {
+                    $client.Close()
+                }
+            }
+        }
+        catch {
+            $_ | Out-String | Add-Content -Path $serverLog
+            throw
         }
     }
     return $job
 }
 
-$listeners += Start-MockEndpoint 34101 'OPEN'
-$listeners += Start-MockEndpoint 34102 'CODING'
-Start-Sleep -Milliseconds 600
+$listeners += Start-MockEndpoint 35101 'OPEN'
+$listeners += Start-MockEndpoint 35102 'CODING'
+
+# 启动门：两个端点未同时监听就立即失败，绝不让 GUI 在坏夹具上“通过”。
+$ready = $false
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $ok = $true
+    foreach ($port in 35101, 35102) {
+        $probe = [Net.Sockets.TcpClient]::new()
+        try {
+            $probe.Connect('127.0.0.1', $port)
+        }
+        catch {
+            $ok = $false
+        }
+        finally {
+            $probe.Close()
+        }
+    }
+    if ($ok) { $ready = $true; break }
+    Start-Sleep -Milliseconds 100
+}
+if (-not $ready) {
+    $failures = $listeners | Receive-Job -Keep -ErrorAction SilentlyContinue | Out-String
+    $listeners | ForEach-Object { Stop-Job $_ -EA SilentlyContinue; Remove-Job $_ -Force -EA SilentlyContinue }
+    throw "mock 端点未就绪，冒烟中止。$failures"
+}
 
 # ── 配置：两个条目共享上游 slug glm-4.6，端点与 Key 都不同 ────────────
 # 这正是用户报的那个事故的形状（开放平台 vs Coding Plan）。
@@ -82,7 +149,7 @@ $config = @'
 [model.glm-open]
 name = "模拟·开放平台"
 model = "glm-4.6"
-base_url = "http://127.0.0.1:34101/v1"
+base_url = "http://127.0.0.1:35101/v1"
 api_key = "key-for-open"
 api_backend = "chat_completions"
 context_window = 128000
@@ -90,15 +157,15 @@ context_window = 128000
 [model.glm-coding]
 name = "模拟·Coding Plan"
 model = "glm-4.6"
-base_url = "http://127.0.0.1:34102/v1"
+base_url = "http://127.0.0.1:35102/v1"
 api_key = "key-for-coding"
 api_backend = "chat_completions"
 context_window = 128000
 
-[model.solo]
+[model.grok-build-solo]
 name = "模拟·无歧义模型"
 model = "solo-slug"
-base_url = "http://127.0.0.1:34101/v1"
+base_url = "http://127.0.0.1:35101/v1"
 api_key = "key-for-open"
 api_backend = "chat_completions"
 context_window = 128000
@@ -112,7 +179,10 @@ if (-not $Step7 -and -not $Resume) {
 New-Item -ItemType Directory -Force $workspace | Out-Null
 Set-Content (Join-Path $workspace "README.md") "smoke fixture"
 
-$sessionId = "smoke-legacy-session"
+# 固定 UUID 让隔离夹具更接近桌面端真实产生的会话，也便于重复运行时准确
+# 定位同一条记录。此前“列表必须是 UUID”的猜测已被 ACP/列表集成测试证伪；
+# 旧夹具消失的真正原因是工作区刷新竞态，不再保留那条错误诊断。
+$sessionId = "00000000-0000-7000-8000-000000000186"
 if (-not $Step7 -and -not $Resume) {
 # 会话目录是 sessions/<百分号编码的 cwd>/<id>，不是 sessions/<id>。
 # 摆错位置的话应用根本列不出这个会话——第一次跑就是这么空跑掉的：
@@ -163,7 +233,7 @@ Write-Host "请核对这七项：" -ForegroundColor Cyan
 Write-Host "  0. 应用启动后先『打开工作区』粘贴上面那个 proj 路径——"
 Write-Host "     开错工作区的话，侧栏里根本不会出现下面那个会话。"
 Write-Host "  1. 恢复上面那个旧会话 → 弹出选择器，列出两个候选，各自显示"
-Write-Host "     真实端点（127.0.0.1:34101 与 :34102）。端点为空即为失败。"
+Write-Host "     真实端点（127.0.0.1:35101 与 :35102）。端点为空即为失败。"
 Write-Host "  2. 此时发送按钮不可用。"
 Write-Host "  3. 点『稍后再说』→ 弹窗收起，提示条仍在，发送仍不可用；"
 Write-Host "     点提示条可重新展开。"
@@ -171,8 +241,8 @@ Write-Host "  4. 选『模拟·Coding Plan』→ 发一条消息 → 只有 CODI
 Write-Host "     增加记录，OPEN.requests.log 不变。"
 Write-Host "  5. 切走再恢复同一会话 → 不再询问（身份已写回）。"
 Write-Host "  6. 切到一个新建的普通会话 → 弹窗与提示条完全消失。"
-Write-Host "  7. 关掉应用，跑一次 -Step7（替你删掉 glm-coding），再恢复该会话 →"
-Write-Host "     出现『模型已不在配置中』提示，从下拉另选一个模型可解除。"
+Write-Host "  7. 关掉应用，跑一次 -Step7（删掉全部 glm-4.6 条目），再恢复该会话 →"
+Write-Host "     出现『模型已不在配置中』提示，从下拉另选 grok-build-solo 可解除。"
 Write-Host ""
 
 if ($SetupOnly) {

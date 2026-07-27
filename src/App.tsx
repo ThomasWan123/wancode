@@ -1037,20 +1037,33 @@ function App() {
   const replayCapRef = useRef<number | null>(null);
   const replaySuppressRef = useRef(false);
   const execIdsRef = useRef<Set<string>>(new Set());
+  const sessionRefreshGenerationRef = useRef(0);
 
   async function refreshSessions(ws: string) {
+    const generation = ++sessionRefreshGenerationRef.current;
     try {
-      setSessions(await invoke<SessionEntry[]>("agent_list_sessions", { workspace: ws }));
-      setMcpServers(await invoke<string[]>("agent_list_mcp", { workspace: ws }));
+      const [nextSessions, nextMcpServers] = await Promise.all([
+        invoke<SessionEntry[]>("agent_list_sessions", { workspace: ws }),
+        invoke<string[]>("agent_list_mcp", { workspace: ws }),
+      ]);
+      // 文件夹选择、恢复会话和启动时刷新可能并发。旧工作区的慢响应不得覆盖
+      // 后发的新工作区结果，否则真实旧会话会从侧栏“消失”。
+      if (generation !== sessionRefreshGenerationRef.current) return;
+      setSessions(nextSessions);
+      setMcpServers(nextMcpServers);
     } catch {
       /* workspace may not exist yet */
     }
   }
 
   useEffect(() => {
-    refreshSessions(workspace);
+    // 工作区可能在启动后才由恢复会话/文件夹选择器校正。只在首次挂载刷新会
+    // 留下旧工作区的结果；更隐蔽的是一次较晚返回的旧请求会覆盖正确列表，
+    // 于是磁盘和后端都有旧会话，侧栏却只剩刚创建的那一个。
+    if (workspace) refreshSessions(workspace);
+    // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [workspace]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1345,7 +1358,13 @@ function App() {
     // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
     setGitInfo(null);
     try {
-      const r = await invoke<{ session_id: string; models: string[]; cwd: string; model_block?: unknown }>(
+      const r = await invoke<{
+        session_id: string;
+        models: string[];
+        current_model_id?: string;
+        cwd: string;
+        model_block?: unknown;
+      }>(
         "agent_start",
         {
           workspace: wsPath,
@@ -1362,6 +1381,7 @@ function App() {
         localStorage.setItem("wancode-workspace", r.cwd);
       }
       if (r.models?.length) setModels(r.models);
+      if (r.current_model_id) setModel(r.current_model_id);
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
       // 加载结果一起回来，直接进选择器状态。

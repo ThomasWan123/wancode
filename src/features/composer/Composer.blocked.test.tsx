@@ -131,13 +131,20 @@ describe("模型阻塞的 UI 状态机", () => {
     expect(setModelBlock).toHaveBeenCalledWith(null);
   });
 
-  it("不可用类阻塞有可见说明且不可发送——不能是个点了没反应的按钮", () => {
-    renderComposer({
+  it("不可用类阻塞可显式确认当前模型——只剩一个 option 时也不会死锁", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockResolvedValue(undefined);
+    const { setModelBlock } = renderComposer({
       modelBlock: { kind: "model_unavailable", requested: "gone-model" } as ModelBlock,
+      model: "only-model",
+      models: ["only-model"],
     });
     expect(screen.getByText(t.unavailableTitle)).toBeInTheDocument();
     expect(screen.getByText("gone-model")).toBeInTheDocument();
     expect(sendButton()).toBeDisabled();
+    await user.click(screen.getByText(t.unavailableUseCurrent));
+    expect(invokeMock).toHaveBeenCalledWith("agent_set_model", { model: "only-model" });
+    expect(setModelBlock).toHaveBeenCalledWith(null);
   });
 
   it("读不懂的阻塞同样给出说明并禁用发送", () => {

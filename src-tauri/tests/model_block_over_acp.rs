@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use agent_client_protocol as acp;
 use tokio_util::sync::CancellationToken;
-use xai_acp_lib::acp_send;
+use xai_acp_lib::{AcpAgentTx, acp_send};
 use xai_grok_pager::acp::spawn::spawn_grok_shell;
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
@@ -40,7 +40,71 @@ api_backend = "chat_completions"
 context_window = 128000
 "#;
 
+/// 与 `glm-4.6` 不同家族的唯一剩余模型。恢复旧会话时不能静默切到它；
+/// 必须保留历史身份并把 `model_unavailable` 交给客户端。
+const UNRELATED_ONLY_CONFIG: &str = r#"
+[model.grok-build-solo]
+name = "模拟·无关模型"
+model = "solo-slug"
+base_url = "http://127.0.0.1:34103/v1"
+api_key = "key-for-solo"
+api_backend = "chat_completions"
+context_window = 128000
+"#;
+
 const SESSION_ID: &str = "acp-legacy-session";
+
+fn agent_config_for(cwd: &std::path::Path) -> AgentConfig {
+    let raw_config = xai_grok_shell::config::load_effective_config().unwrap();
+    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config).unwrap();
+    agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
+        raw_config: &raw_config,
+        remote_settings: None,
+        cwd: Some(cwd),
+        is_headless: true,
+        cli_subagents: None,
+        cli_web_search_model: None,
+        cli_session_summary_model: None,
+        cli_experimental_memory: false,
+        cli_no_memory: false,
+        disable_web_search: true,
+        todo_gate: false,
+        laziness_debug_log: None,
+        storage_mode: None,
+    });
+    agent_config.mode = xai_grok_shell::agent::config::AgentMode::Headless;
+    agent_config.default_yolo_mode = false;
+    agent_config
+}
+
+async fn spawn_authenticated(config: AgentConfig, cancel: &CancellationToken) -> AcpAgentTx {
+    let memory_config = config.memory_config.clone();
+    let spawned = spawn_grok_shell(config, cancel, memory_config)
+        .await
+        .expect("引擎应能以隔离配置启动");
+    let acp_tx = spawned.channel.tx;
+    let init_resp: acp::InitializeResponse = acp_send(
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+            .client_capabilities(acp::ClientCapabilities::new().terminal(false)),
+        &acp_tx,
+    )
+    .await
+    .expect("initialize");
+    let method_id = init_resp
+        .auth_methods
+        .iter()
+        .find(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login())
+        .map(|m| m.id().clone())
+        .expect("配置里有 api_key，应当存在非交互认证方式");
+    let _: acp::AuthenticateResponse = acp_send(
+        acp::AuthenticateRequest::new(method_id)
+            .meta(serde_json::json!({"headless": true}).as_object().cloned()),
+        &acp_tx,
+    )
+    .await
+    .expect("authenticate");
+    acp_tx
+}
 
 /// 落一份 v0.18.6 之前形状的会话记录：只有 slug，没有 catalog_model_id。
 ///
@@ -62,7 +126,7 @@ async fn write_legacy_session(grok_home: &std::path::Path, cwd: &std::path::Path
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn loading_a_legacy_ambiguous_session_returns_a_structured_model_block() {
+async fn acp_load_block_and_new_session_identity_are_preserved() {
     let tmp = tempfile::tempdir().unwrap();
     let grok_home = tmp.path().join(".grok");
     let cwd = tmp.path().join("proj");
@@ -79,55 +143,20 @@ async fn loading_a_legacy_ambiguous_session_returns_a_structured_model_block() {
     }
     write_legacy_session(&grok_home, &cwd).await;
 
+    // 桌面端侧栏调用的就是这条合并列表。先锁住“真实落盘的旧会话能被
+    // 当前工作区发现”，否则后续 GUI 冒烟可能只是打开了一个根本不在
+    // 列表里的夹具，点击流程全部空跑。
+    let listed =
+        xai_grok_shell::session::merge::fetch_merged(None, Some(&cwd.to_string_lossy()), None, 30)
+            .await;
+    assert!(
+        listed.iter().any(|s| s.session_id == SESSION_ID),
+        "旧格式会话必须出现在桌面端使用的工作区列表中：{listed:?}"
+    );
+
     // ── 与 agent.rs::start_session 同一套启动序列 ───────────────────
-    let raw_config = xai_grok_shell::config::load_effective_config().unwrap();
-    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config).unwrap();
-    agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
-        raw_config: &raw_config,
-        remote_settings: None,
-        cwd: Some(&cwd),
-        is_headless: true,
-        cli_subagents: None,
-        cli_web_search_model: None,
-        cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
-        disable_web_search: true,
-        todo_gate: false,
-        laziness_debug_log: None,
-        storage_mode: None,
-    });
-    agent_config.mode = xai_grok_shell::agent::config::AgentMode::Headless;
-    agent_config.default_yolo_mode = false;
-
     let cancel = CancellationToken::new();
-    let memory_config = agent_config.memory_config.clone();
-    let spawned = spawn_grok_shell(agent_config, &cancel, memory_config)
-        .await
-        .expect("引擎应能以隔离配置启动");
-    let acp_tx = spawned.channel.tx;
-
-    let init_resp: acp::InitializeResponse = acp_send(
-        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-            .client_capabilities(acp::ClientCapabilities::new().terminal(false)),
-        &acp_tx,
-    )
-    .await
-    .expect("initialize");
-
-    let method_id = init_resp
-        .auth_methods
-        .iter()
-        .find(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login())
-        .map(|m| m.id().clone())
-        .expect("配置里有 api_key，应当存在非交互认证方式");
-    let _: acp::AuthenticateResponse = acp_send(
-        acp::AuthenticateRequest::new(method_id)
-            .meta(serde_json::json!({"headless": true}).as_object().cloned()),
-        &acp_tx,
-    )
-    .await
-    .expect("authenticate");
+    let acp_tx = spawn_authenticated(agent_config_for(&cwd), &cancel).await;
 
     // ── 恢复那份旧记录 ──────────────────────────────────────────────
     let resp: acp::LoadSessionResponse = acp_send(
@@ -178,96 +207,47 @@ async fn loading_a_legacy_ambiguous_session_returns_a_structured_model_block() {
         .collect();
     assert!(ids.contains(&"glm-open") && ids.contains(&"glm-coding"), "{ids:?}");
 
-    cancel.cancel();
-}
-
-/// 冒烟里观察到的现象：新建会话落盘为 `current_model_id = glm-open`（配置键）
-/// 且没有 `catalog_model_id`——这是 v0.18.6 之前的字段语义，本分支应当写成
-/// `current = glm-4.6`（上游 slug）+ `catalog = glm-open`（配置键）。
-///
-/// 与其对着一份 summary.json 推测，把它变成可复现的断言。
-/// 现状：**失败**，记录一个已确认的未修 bug。暂时 ignore 是为了不让 CI 变红
-/// 掩盖其它回归，不是为了把它藏起来——它必须在合并前修掉。
-///
-/// 现象（本机冒烟 + 本测试两次独立复现）：默认模型新建的会话落盘为
-///   current_model_id = "glm-open"（配置键）、catalog_model_id 缺失
-/// 而本分支的约定是 current = "glm-4.6"（上游 slug）+ catalog = "glm-open"。
-///
-/// 诊断证据（本测试 --nocapture 实测）：
-///   目录 available = ["glm-open", "glm-coding"]，引擎当前模型 = glm-open
-/// 也就是说**目录是满的、glm-open 就在里面**，resolve_model_id 没有理由失败。
-/// 我最初"回落到基线 sampling config"的解释因此被推翻——真正把配置键写进
-/// current_model_id 的那一处还没有找到，不要从这个错误前提继续往下修。
-///
-/// 下一步该查的方向（按代价从低到高）：
-///   1. persistence::new 之后是否还有别的写入把 current_model_id 覆盖成
-///      运行时 key（"Update model if different" 那段、或某条 CurrentModel 消息）；
-///   2. session_sampling.model 在默认模型分支的实际取值——打点确认它是
-///      glm-4.6 还是 glm-open，据此判断问题在组装还是在覆盖；
-///   3. 步6b 的 initial_persisted_identity 是否真的被这条路径调用到。
-///
-/// 同进程里 GROK_HOME 是 OnceLock，本测试与上一条不能共存于一次运行——
-/// 修复时需要把两者合并成共用一份夹具，或拆成两个测试二进制。
-#[ignore = "已确认的未修 bug：默认模型新建会话把配置键写进了 current_model_id"]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_new_session_persists_slug_and_key_in_their_own_fields() {
-    let tmp = tempfile::tempdir().unwrap();
-    let grok_home = tmp.path().join(".grok");
-    let cwd = tmp.path().join("proj2");
-    std::fs::create_dir_all(&grok_home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::write(grok_home.join("config.toml"), CONFIG).unwrap();
-    unsafe {
-        std::env::set_var("GROK_HOME", &grok_home);
-    }
-
-    let raw_config = xai_grok_shell::config::load_effective_config().unwrap();
-    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config).unwrap();
-    agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
-        raw_config: &raw_config,
-        remote_settings: None,
-        cwd: Some(&cwd),
-        is_headless: true,
-        cli_subagents: None,
-        cli_web_search_model: None,
-        cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
-        disable_web_search: true,
-        todo_gate: false,
-        laziness_debug_log: None,
-        storage_mode: None,
-    });
-    agent_config.mode = xai_grok_shell::agent::config::AgentMode::Headless;
-
-    let cancel = CancellationToken::new();
-    let memory_config = agent_config.memory_config.clone();
-    let spawned = spawn_grok_shell(agent_config, &cancel, memory_config)
-        .await
-        .expect("引擎启动");
-    let acp_tx = spawned.channel.tx;
-
-    let init_resp: acp::InitializeResponse = acp_send(
-        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-            .client_capabilities(acp::ClientCapabilities::new().terminal(false)),
+    // 用户从歧义选择器选定 Coding Plan 后，同一会话再次恢复必须把
+    // canonical key 放进 LoadSessionResponse.models。否则真实采样已经走
+    // glm-coding，桌面下拉却仍显示启动默认的 glm-open。
+    let _: acp::SetSessionModelResponse = acp_send(
+        acp::SetSessionModelRequest::new(
+            acp::SessionId::new(SESSION_ID),
+            acp::ModelId::new("glm-coding"),
+        ),
         &acp_tx,
     )
     .await
-    .expect("initialize");
-    let method_id = init_resp
-        .auth_methods
-        .iter()
-        .find(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login())
-        .map(|m| m.id().clone())
-        .expect("非交互认证方式");
-    let _: acp::AuthenticateResponse = acp_send(
-        acp::AuthenticateRequest::new(method_id)
-            .meta(serde_json::json!({"headless": true}).as_object().cloned()),
+    .expect("选择精确 catalog key");
+    let restored: acp::LoadSessionResponse = acp_send(
+        acp::LoadSessionRequest::new(
+            acp::SessionId::new(SESSION_ID),
+            PathBuf::from(cwd.to_string_lossy().to_string()),
+        ),
         &acp_tx,
     )
     .await
-    .expect("authenticate");
+    .expect("写回身份后再次恢复");
+    assert!(
+        restored
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("x.ai/modelBlock"))
+            .is_none(),
+        "精确身份写回后不应再次歧义"
+    );
+    assert_eq!(
+        restored
+            .models
+            .as_ref()
+            .map(|m| m.current_model_id.0.as_ref()),
+        Some("glm-coding"),
+        "恢复响应必须与真实采样路由使用同一个 canonical key"
+    );
 
+    // ── 同一隔离引擎里再建一个默认模型会话 ─────────────────────────
+    // `GROK_HOME` 是进程级 OnceLock，因此把 legacy 恢复与默认首写放在同
+    // 一个测试/夹具中，既避免并发污染，也让 CI 真正执行这条回归而非 ignore。
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(PathBuf::from(cwd.to_string_lossy().to_string())),
         &acp_tx,
@@ -275,23 +255,8 @@ async fn a_new_session_persists_slug_and_key_in_their_own_fields() {
     .await
     .expect("new session");
 
-    // ── 诊断：为什么精确键 glm-open 会解析不到？ ─────────────────────
-    // 先取证再修，否则只是治结果。NewSessionResponse.models 就是引擎当时
-    // 对外暴露的目录快照。
-    let avail: Vec<String> = new_resp
-        .models
-        .as_ref()
-        .map(|m| m.available_models.iter().map(|x| x.model_id.0.to_string()).collect())
-        .unwrap_or_default();
-    let current = new_resp
-        .models
-        .as_ref()
-        .map(|m| m.current_model_id.0.to_string())
-        .unwrap_or_else(|| "<none>".into());
-    eprintln!("[诊断] 目录 available = {avail:?}");
-    eprintln!("[诊断] 引擎当前模型 = {current}");
-
-    // 直接读落盘产物——字段语义只能在磁盘上验证。
+    // 直接读落盘产物。这里曾先正确写入 slug+key，随后 session actor 的
+    // CurrentModel 初始化消息又用 runtime key 覆盖 current 并清掉 catalog。
     let dir = xai_grok_shell::session::persistence::session_dir(
         &xai_grok_shell::session::info::Info {
             id: new_resp.session_id.clone(),
@@ -303,12 +268,87 @@ async fn a_new_session_persists_slug_and_key_in_their_own_fields() {
 
     assert_eq!(
         json["current_model_id"], "glm-4.6",
-        "current_model_id 必须是上游 slug；写成配置键会让旧版本与同步端把它         当成上游模型名。实际落盘：{raw}"
+        "current_model_id 必须是上游 slug；实际落盘：{raw}"
     );
     assert_eq!(
-        json["catalog_model_id"], "glm-open",
-        "首写就该带上配置键，否则崩溃窗口还在。实际落盘：{raw}"
+        json["catalog_model_id"], "glm-coding",
+        "新会话应原子写入当时的 canonical key，否则崩溃窗口还在。实际落盘：{raw}"
     );
 
     cancel.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 真正复现桌面重启：第一套引擎完全退出，再从同一磁盘记录启动一套
+    // 全新的引擎。热恢复正确而冷恢复回到默认模型，界面仍会撒谎。
+    let cold_cancel = CancellationToken::new();
+    let cold_tx = spawn_authenticated(agent_config_for(&cwd), &cold_cancel).await;
+    let cold_restored: acp::LoadSessionResponse = acp_send(
+        acp::LoadSessionRequest::new(
+            acp::SessionId::new(SESSION_ID),
+            PathBuf::from(cwd.to_string_lossy().to_string()),
+        ),
+        &cold_tx,
+    )
+    .await
+    .expect("全新引擎冷恢复");
+    assert_eq!(
+        cold_restored
+            .models
+            .as_ref()
+            .map(|m| m.current_model_id.0.as_ref()),
+        Some("glm-coding"),
+        "冷恢复响应必须返回已持久化的 canonical key"
+    );
+    cold_cancel.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // ── 原模型被删除且只剩不同家族模型 ─────────────────────────────
+    // 此时不能把唯一剩余条目当作“方便的默认值”静默写回。历史仍可读，
+    // 发送保持阻塞，直到用户明确从下拉选择另一个模型。
+    std::fs::write(grok_home.join("config.toml"), UNRELATED_ONLY_CONFIG).unwrap();
+    let unavailable_cancel = CancellationToken::new();
+    let unavailable_tx =
+        spawn_authenticated(agent_config_for(&cwd), &unavailable_cancel).await;
+    let unavailable: acp::LoadSessionResponse = acp_send(
+        acp::LoadSessionRequest::new(
+            acp::SessionId::new(SESSION_ID),
+            PathBuf::from(cwd.to_string_lossy().to_string()),
+        ),
+        &unavailable_tx,
+    )
+    .await
+    .expect("原模型已删除时历史仍应可读");
+
+    let unavailable_block = unavailable
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("x.ai/modelBlock"))
+        .expect("不得静默切到无关 fallback；必须返回 model_unavailable");
+    assert_eq!(
+        unavailable_block.get("kind").and_then(|k| k.as_str()),
+        Some("model_unavailable")
+    );
+    assert_eq!(
+        unavailable_block.get("requested").and_then(|r| r.as_str()),
+        Some("glm-4.6")
+    );
+
+    let legacy_dir = xai_grok_shell::session::persistence::session_dir(
+        &xai_grok_shell::session::info::Info {
+            id: acp::SessionId::new(SESSION_ID),
+            cwd: cwd.to_string_lossy().into_owned(),
+        },
+    );
+    let after_load =
+        std::fs::read_to_string(legacy_dir.join("summary.json")).expect("旧会话仍应存在");
+    let after_load_json: serde_json::Value = serde_json::from_str(&after_load).unwrap();
+    assert_eq!(
+        after_load_json["current_model_id"], "glm-4.6",
+        "阻塞恢复不得把无关 fallback 的 slug 写进历史身份：{after_load}"
+    );
+    assert_eq!(
+        after_load_json["catalog_model_id"], "glm-coding",
+        "阻塞恢复不得把无关 fallback 的 key 写进历史身份：{after_load}"
+    );
+    unavailable_cancel.cancel();
 }

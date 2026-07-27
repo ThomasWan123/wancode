@@ -395,6 +395,19 @@ export function Composer(props: Record<string, any>) {
                   <div className="ma-hint">
                     <code>{shownNotice.subject}</code> — {shownNotice.hint}
                   </div>
+                  {block?.kind === "model_unavailable" && sessionId && models.includes(model) && (
+                    <button
+                      className="ma-item"
+                      onClick={() => {
+                        // 只剩一个模型时，下拉已经显示它，再选择同一 value 不会
+                        // 触发 onChange。显式确认按钮仍走同一条严格切换事务，
+                        // 成功后才清 block，避免用户被永久困在不可发送状态。
+                        void switchModel(model, model);
+                      }}
+                    >
+                      {t.unavailableUseCurrent}
+                    </button>
+                  )}
                   <button className="ma-cancel" onClick={() => setModelBlockOpen?.(false)}>
                     {t.ambiguousDismiss}
                   </button>
