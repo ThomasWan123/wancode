@@ -170,6 +170,24 @@ describe("模型阻塞的 UI 状态机", () => {
     expect(options[1].textContent).toContain("coding.bigmodel.cn");
   });
 
+  it("热加载的新模型只在 models 里、不在 modelOptions 里——仍必须出现在下拉", () => {
+    // 复核 P1 的形状：modelOptions 是会话启动时的快照，热加载新模型后
+    // 引擎只更新 models。只认结构化列表 = 新模型保存后要重启才可见。
+    const { container } = renderComposer({
+      modelBlock: null,
+      models: ["glm-open", "glm-coding", "fresh-model"],
+      modelOptions: [
+        { id: "glm-open", name: "GLM-4.6", endpointLabel: "open.bigmodel.cn" },
+        { id: "glm-coding", name: "GLM-4.6", endpointLabel: "coding.bigmodel.cn" },
+      ],
+    });
+    const options = Array.from(
+      container.querySelectorAll(".composer-model option"),
+    ) as HTMLOptionElement[];
+    expect(options.map((o) => o.value)).toEqual(["glm-open", "glm-coding", "fresh-model"]);
+    expect(options[2].textContent).toBe("fresh-model");
+  });
+
   it("无结构化选项时回退到裸 id 列表，行为不变", () => {
     const { container } = renderComposer({ modelBlock: null, modelOptions: [] });
     const options = Array.from(
