@@ -30,7 +30,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -381,13 +381,18 @@ export function Composer(props: Record<string, any>) {
                   if (sessionId) void switchModel(m, previous);
                 }}
               >
-                {(models.length ? models : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]).map(
-                  (m: any) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ),
-                )}
+                {(modelOptions?.length
+                  ? modelOptions
+                  : (models.length
+                      ? models
+                      : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]
+                    ).map((m: string) => ({ id: m, name: m, endpointLabel: "" }))
+                ).map((o: { id: string; name: string; endpointLabel: string }) => (
+                  <option key={o.id} value={o.id}>
+                    {/* value 永远是 catalog key；同名模型靠端点区分 */}
+                    {o.endpointLabel ? `${o.name} · ${o.endpointLabel}` : o.name}
+                  </option>
+                ))}
               </select>
               {shownNotice && (
                 <div className="model-ambiguity" role="dialog" aria-label={shownNotice.title}>

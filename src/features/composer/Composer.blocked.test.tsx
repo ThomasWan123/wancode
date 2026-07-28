@@ -153,6 +153,32 @@ describe("模型阻塞的 UI 状态机", () => {
     expect(sendButton()).toBeDisabled();
   });
 
+  it("结构化下拉：value 永远是 catalog key，同名模型靠端点区分", () => {
+    const { container } = renderComposer({
+      modelBlock: null,
+      modelOptions: [
+        { id: "glm-open", name: "GLM-4.6", endpointLabel: "open.bigmodel.cn" },
+        { id: "glm-coding", name: "GLM-4.6", endpointLabel: "coding.bigmodel.cn" },
+      ],
+    });
+    const options = Array.from(
+      container.querySelectorAll(".composer-model option"),
+    ) as HTMLOptionElement[];
+    expect(options.map((o) => o.value)).toEqual(["glm-open", "glm-coding"]);
+    // 两个条目 name 相同——用户能分辨的唯一依据是端点。
+    expect(options[0].textContent).toContain("open.bigmodel.cn");
+    expect(options[1].textContent).toContain("coding.bigmodel.cn");
+  });
+
+  it("无结构化选项时回退到裸 id 列表，行为不变", () => {
+    const { container } = renderComposer({ modelBlock: null, modelOptions: [] });
+    const options = Array.from(
+      container.querySelectorAll(".composer-model option"),
+    ) as HTMLOptionElement[];
+    expect(options.map((o) => o.value)).toEqual(["glm-open", "glm-coding"]);
+    expect(options[0].textContent).toBe("glm-open");
+  });
+
   it("无阻塞时发送可用，且没有任何阻塞 UI", () => {
     renderComposer({ modelBlock: null });
     expect(sendButton()).toBeEnabled();
