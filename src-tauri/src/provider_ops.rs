@@ -2378,3 +2378,93 @@ mod subagent_write_chain_tests {
         assert!(json.get("catalog_model_id").is_none(), "key 被 Clear 抹掉");
     }
 }
+
+/// v0.18.7-A 复核阻塞项（RED→GREEN）：显式覆盖的**运行时**解析必须严格。
+///
+/// 上一版只修了持久化层（重复 slug 不落盘），运行时仍经 find_model_by_id
+/// first-match 先猜一次——请求已经发去被猜中的端点，"不写盘"只是不留证据。
+/// resolve_override_ungated：精确 key 胜出；全目录唯一 slug 归一化；
+/// 重复 slug 报歧义（调用方拒绝 spawn）；未知单独成类（沿用回退到继承）。
+#[cfg(test)]
+mod subagent_override_resolution_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::{resolve_override_ungated, ModelSelectionError};
+
+    fn entry(slug: &str, base: &str, selectable: bool) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base.to_owned();
+        info.user_selectable = selectable;
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn catalog(order: &[(&str, &str, &str)]) -> IndexMap<String, ModelEntry> {
+        let mut m = IndexMap::new();
+        for (k, slug, base) in order {
+            m.insert((*k).to_owned(), entry(slug, base, true));
+        }
+        m
+    }
+
+    const DUP: &[(&str, &str, &str)] = &[
+        ("glm-open", "glm-4.6", "https://open/v1"),
+        ("glm-coding", "glm-4.6", "https://coding/v1"),
+    ];
+
+    /// 重复 slug：明确失败，候选齐全——这是"拒绝 spawn、零请求"的数据面。
+    #[test]
+    fn duplicate_slug_is_an_error_not_a_first_match() {
+        let m = catalog(DUP);
+        match resolve_override_ungated(&m, "glm-4.6") {
+            Err(ModelSelectionError::Ambiguous { candidates, .. }) => {
+                let ids: Vec<_> = candidates.iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, vec!["glm-open", "glm-coding"]);
+            }
+            other => panic!("必须报歧义而非 first-match，实际 {other:?}"),
+        }
+    }
+
+    /// 精确 key：正常解析，携带 canonical key 与它自己的 entry。
+    #[test]
+    fn exact_key_resolves_with_its_own_entry() {
+        let m = catalog(DUP);
+        let sel = resolve_override_ungated(&m, "glm-coding").unwrap();
+        assert_eq!(*sel.catalog_key(), acp::ModelId::new("glm-coding"));
+        assert_eq!(sel.entry().info.base_url, "https://coding/v1");
+    }
+
+    /// 目录顺序反转：精确 key 的结果不变——first-match 才怕顺序。
+    #[test]
+    fn exact_key_is_order_independent() {
+        let rev: Vec<_> = DUP.iter().rev().cloned().collect();
+        let m = catalog(&rev);
+        let sel = resolve_override_ungated(&m, "glm-coding").unwrap();
+        assert_eq!(sel.entry().info.base_url, "https://coding/v1");
+    }
+
+    /// 唯一 slug 归一化；隐藏模型精确 key 照常（ungated 记录事实）。
+    #[test]
+    fn unique_slug_normalizes_and_hidden_key_resolves() {
+        let mut m = catalog(&[("solo", "deepseek-chat", "https://ds/v1")]);
+        m.insert("hidden".to_owned(), entry("internal", "https://i/v1", false));
+        assert_eq!(
+            *resolve_override_ungated(&m, "deepseek-chat").unwrap().catalog_key(),
+            acp::ModelId::new("solo")
+        );
+        assert_eq!(
+            *resolve_override_ungated(&m, "hidden").unwrap().catalog_key(),
+            acp::ModelId::new("hidden")
+        );
+    }
+
+    /// 未知与歧义是两类错误，不得混用。
+    #[test]
+    fn unknown_is_distinct_from_ambiguous() {
+        let m = catalog(DUP);
+        assert!(matches!(
+            resolve_override_ungated(&m, "never"),
+            Err(ModelSelectionError::Unknown(_))
+        ));
+    }
+}
