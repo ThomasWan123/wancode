@@ -4113,10 +4113,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..8d8ea32 100644
+index a1c9b68..cb8052f 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1628,25 +1628,640 @@ pub(crate) fn resolve_catalog_key(
+@@ -1628,25 +1628,641 @@ pub(crate) fn resolve_catalog_key(
          .map(|(key, _)| acp::ModelId::new(key.clone()))
  }
  
@@ -4389,11 +4389,12 @@ index a1c9b68..8d8ea32 100644
 +/// name that will actually go over the wire. No `available` gating: subagents
 +/// legitimately run hidden models, and this function records fact, not choice.
 +///
-+/// A duplicate slug writes no key. At runtime one entry did win (first-match
-+/// inside `resolve_model_override_to_config`), but that choice does not travel
-+/// here on a typed path — re-deriving it from strings would be the second
-+/// lookup this whole effort exists to forbid. Empty is recoverable (restore
-+/// asks the user); a laundered guess is not.
++/// A duplicate slug writes no key. Explicit overrides can no longer reach
++/// here ambiguous — `resolve_override_ungated` rejects them before spawn — so
++/// this branch covers residual paths only (e.g. a parent-fallback whose
++/// sampling model happens to be a duplicated slug). Re-deriving a winner from
++/// strings would be the second lookup this effort forbids; empty is
++/// recoverable (restore asks the user), a laundered guess is not.
 +pub fn subagent_persisted_identity(
 +    models: &IndexMap<String, ModelEntry>,
 +    effective_model_id: &acp::ModelId,
@@ -4771,7 +4772,7 @@ index a1c9b68..8d8ea32 100644
  }
  
  /// A "campaign-only" preferred flip: the default changed and either side's value
-@@ -3517,77 +4132,6 @@ mod tests {
+@@ -3517,77 +4133,6 @@ mod tests {
          assert_eq!(key.0.as_ref(), "user-grok-build");
      }
  
