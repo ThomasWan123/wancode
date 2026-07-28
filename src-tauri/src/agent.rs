@@ -77,6 +77,17 @@ pub struct StartResult {
     /// resolvable by the user, so it has to travel with the load result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_block: Option<serde_json::Value>,
+    /// Structured dropdown options: value is ALWAYS the catalog key; display
+    /// name + sanitized endpoint host come along so two same-named models are
+    /// distinguishable in the UI (v0.18.7-B).
+    pub model_options: Vec<ModelOption>,
+}
+
+#[derive(serde::Serialize, Clone, Default)]
+pub struct ModelOption {
+    pub id: String,
+    pub name: String,
+    pub endpoint_label: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -341,7 +352,11 @@ pub(crate) async fn start_inner(
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
         (resp.session_id, resp.models)
     };
-    let (model_ids, current_model_id): (Vec<String>, Option<String>) = session_models
+    let (model_ids, current_model_id, model_options): (
+        Vec<String>,
+        Option<String>,
+        Vec<ModelOption>,
+    ) = session_models
         .map(|m| {
             (
                 m.available_models
@@ -349,6 +364,20 @@ pub(crate) async fn start_inner(
                     .map(|am| am.model_id.0.to_string())
                     .collect(),
                 Some(m.current_model_id.0.to_string()),
+                m.available_models
+                    .iter()
+                    .map(|am| ModelOption {
+                        id: am.model_id.0.to_string(),
+                        name: am.name.clone(),
+                        endpoint_label: am
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.get("endpointLabel"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                    .collect(),
             )
         })
         .unwrap_or_default();
@@ -381,6 +410,7 @@ pub(crate) async fn start_inner(
         current_model_id,
         cwd: cwd.to_string_lossy().into_owned(),
         model_block,
+        model_options,
     })
 }
 

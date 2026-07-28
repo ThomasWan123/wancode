@@ -2470,3 +2470,39 @@ mod subagent_override_resolution_tests {
         ));
     }
 }
+
+/// v0.18.7-B（RED）：可选模型列表必须携带脱敏端点标签。
+///
+/// 歧义选择器已经证明：同名模型靠端点区分，端点不显示选择器就没用。
+/// 主下拉同理——option value 永远是 catalog key，显示层给 name + host。
+#[cfg(test)]
+mod model_option_meta_tests {
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{to_acp_model_info, ModelEntry, ModelInfo};
+
+    #[test]
+    fn available_model_meta_carries_sanitized_endpoint_label() {
+        let mut m = IndexMap::new();
+        let mut info = ModelInfo::fallback("glm-4.6");
+        // 凭据、路径、查询都必须被剥掉——这是要进 UI 和日志的字段。
+        info.base_url = "https://user:s3cret@open.bigmodel.cn:8443/api/coding/v4?k=v".to_owned();
+        info.name = Some("GLM Coding Plan".to_owned());
+        m.insert(
+            "glm-coding".to_owned(),
+            ModelEntry { info, api_key: None, env_key: None, api_base_url: None },
+        );
+        let out = to_acp_model_info(&m);
+        let mi = out.values().next().unwrap();
+        assert_eq!(mi.name, "GLM Coding Plan");
+        let label = mi
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("endpointLabel"))
+            .and_then(|v| v.as_str())
+            .expect("meta 必须带 endpointLabel");
+        assert_eq!(label, "open.bigmodel.cn:8443");
+        for leak in ["s3cret", "user:", "/api", "k=v"] {
+            assert!(!label.contains(leak), "端点标签泄漏 {leak}: {label}");
+        }
+    }
+}

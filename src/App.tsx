@@ -18,6 +18,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
+import { parseModelOptions, type ModelOption } from "./modelOption";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
@@ -236,6 +237,8 @@ function App() {
   const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
+  // 结构化下拉选项（v0.18.7-B）：value=catalog key，显示 name+端点。
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   // 引擎判定"这个会话现在不能发送"时的载荷。用联合类型而非 any——
   // 新增 kind 时编译器会指出缺失的 UI 分支（见 modelBlock.ts 注释）。
   const [modelBlock, setModelBlock] = useState<ModelBlock | null>(null);
@@ -1374,7 +1377,7 @@ function App() {
         models: string[];
         current_model_id?: string;
         cwd: string;
-        model_block?: unknown;
+        model_block?: unknown; model_options?: unknown;
       }>(
         "agent_start",
         {
@@ -1392,6 +1395,7 @@ function App() {
         localStorage.setItem("wancode-workspace", r.cwd);
       }
       if (r.models?.length) setModels(r.models);
+      setModelOptions(parseModelOptions(r.model_options));
       if (r.current_model_id) setModel(r.current_model_id);
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
@@ -2156,7 +2160,7 @@ function App() {
 
       <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
 
-      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
         <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />
