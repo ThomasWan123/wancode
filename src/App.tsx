@@ -18,6 +18,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
+import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
@@ -930,25 +931,35 @@ function App() {
     }
   }
 
+  // #121：流程细节与"为什么这么设计"见 src/update.ts / update.test.ts。
   async function runUpdate() {
-    setUpdateMsg(t.checkingUpdate);
-    try {
-      const update = await checkUpdate();
-      if (!update) {
-        setUpdateMsg(t.upToDate(version));
-        return;
-      }
-      setUpdateMsg(t.updateAvailable(update.version));
-      await update.downloadAndInstall();
-      setUpdateMsg(t.updateInstalling);
-      await relaunch();
-    } catch (e) {
-      setUpdateMsg(t.updateFailed + String(e));
-    }
+    await runUpdateFlow({
+      check: checkUpdate as any,
+      relaunch,
+      currentVersion: version,
+      setMsg: setUpdateMsg,
+      storage: localStorage,
+      t,
+    });
   }
 
   useEffect(() => {
-    getVersion().then(setVersion).catch(() => setVersion(""));
+    getVersion()
+      .then((v) => {
+        setVersion(v);
+        // 启动对账上一次升级：成功报成功；版本没动但标记在，说明安装器
+        // 没跑成（#121 用户无从得知的那种失败），开口告诉用户并引导重试。
+        const verdict = checkPostUpdate({
+          check: checkUpdate as any,
+          relaunch,
+          currentVersion: v,
+          setMsg: setUpdateMsg,
+          storage: localStorage,
+          t,
+        });
+        if (verdict) setUpdateMsg(verdict);
+      })
+      .catch(() => setVersion(""));
   }, []);
 
   async function refreshCtx() {
