@@ -4113,10 +4113,10 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..334c75e 100644
+index a1c9b68..8d8ea32 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1628,25 +1628,588 @@ pub(crate) fn resolve_catalog_key(
+@@ -1628,25 +1628,640 @@ pub(crate) fn resolve_catalog_key(
          .map(|(key, _)| acp::ModelId::new(key.clone()))
  }
  
@@ -4318,6 +4318,63 @@ index a1c9b68..334c75e 100644
 +    available.contains_key(&resolved).then_some(resolved)
 +}
 +
++/// Strict, catalog-wide resolution for a subagent's **explicit** model
++/// override (`[subagents.models]` pin / `AgentDefinition.model` / runtime
++/// override / resume pin).
++///
++/// Ungated on `available` — subagents legitimately run hidden models — but
++/// strict on identity: an exact config key wins; a slug unique across the
++/// whole catalog normalizes to its key; a duplicate slug is an error the
++/// caller must surface, NOT a first-match guess. The pre-review code guessed
++/// here (`find_model_by_id` first-match), which meant a `[subagents.models]
++/// explore = "glm-4.6"` pin silently routed to whichever entry came first in
++/// the catalog — the request went to a guessed endpoint before persistence
++/// ever got a say. Refusing to spawn is recoverable; a request sent to the
++/// wrong provider is not.
++pub fn resolve_override_ungated(
++    models: &IndexMap<String, ModelEntry>,
++    requested: &str,
++) -> Result<ResolvedModelSelection, ModelSelectionError> {
++    if let Some(entry) = models.get(requested) {
++        return Ok(ResolvedModelSelection {
++            catalog_key: acp::ModelId::new(requested.to_owned()),
++            entry: entry.clone(),
++        });
+     }
+-    let id_str = id.0.as_ref();
+-    if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
+-        available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
+-    }) {
+-        return Some(acp::ModelId::new(key.clone()));
++    let matches: Vec<(&String, &ModelEntry)> = models
++        .iter()
++        .filter(|(_, e)| e.info.model == requested)
++        .collect();
++    match matches.len() {
++        0 => Err(ModelSelectionError::Unknown(requested.to_owned())),
++        1 => Ok(ResolvedModelSelection {
++            catalog_key: acp::ModelId::new(matches[0].0.clone()),
++            entry: matches[0].1.clone(),
++        }),
++        _ => Err(ModelSelectionError::Ambiguous {
++            requested: requested.to_owned(),
++            candidates: matches
++                .iter()
++                .map(|(key, entry)| ModelCandidate {
++                    id: (*key).clone(),
++                    name: entry
++                        .info
++                        .name
++                        .clone()
++                        .unwrap_or_else(|| entry.info.model.clone()),
++                    endpoint_label: endpoint_authority_label(&entry.info.base_url),
++                    selectable: entry.info.user_selectable,
++                })
++                .collect(),
++        }),
++    }
++}
++
 +/// The identity pair for a subagent session's first Summary write.
 +///
 +/// Invariant (Codex, v0.18.7-A): persist the canonical catalog key of the
@@ -4348,12 +4405,7 @@ index a1c9b68..334c75e 100644
 +            return (current, Some(effective_model_id.clone()));
 +        }
 +        return (current, None);
-     }
--    let id_str = id.0.as_ref();
--    if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
--        available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
--    }) {
--        return Some(acp::ModelId::new(key.clone()));
++    }
 +    let mut matches = models.iter().filter(|(_, e)| e.info.model == sampling_model);
 +    match (matches.next(), matches.next()) {
 +        (Some((key, _)), None) if effective_model_id.0.as_ref() == sampling_model => {
@@ -4719,7 +4771,7 @@ index a1c9b68..334c75e 100644
  }
  
  /// A "campaign-only" preferred flip: the default changed and either side's value
-@@ -3517,77 +4080,6 @@ mod tests {
+@@ -3517,77 +4132,6 @@ mod tests {
          assert_eq!(key.0.as_ref(), "user-grok-build");
      }
  
@@ -5537,10 +5589,45 @@ index 1afd3a2..fd04cf1 100644
      /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
      subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index fde3dea..ec2de04 100644
+index fde3dea..1953ad2 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-@@ -689,10 +689,23 @@ pub(crate) async fn handle_subagent_request(
+@@ -420,13 +420,23 @@ pub(crate) async fn handle_subagent_request(
+     if request.fork_context {
+         effective_runtime.model = Some(ctx.model_id.0.to_string());
+     }
+-    let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
++    let (mut effective_sampling_config, mut effective_model_id) =
++        match resolve_effective_model_config(
+             effective_runtime.model.as_deref(),
+             &request.subagent_type,
+             &definition.model,
+             &ctx,
+         )
+-        .await;
++        .await
++        {
++            Ok(resolved) => resolved,
++            // Ambiguous explicit override: refuse to spawn. Zero requests go
++            // out — a guessed endpoint cannot be un-requested afterwards.
++            Err(msg) => {
++                send_failure(request, &msg);
++                return;
++            }
++        };
+     let subagent_max_turns = resolve_subagent_max_turns(
+         definition.max_turns,
+         ctx.parent_max_turns,
+@@ -452,7 +462,7 @@ pub(crate) async fn handle_subagent_request(
+         && let Some(ref source_model) = source.model_id
+         && effective_model_id.0.as_ref() != source_model.as_str()
+     {
+-        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
++        if let Ok(resolved) = resolve_model_override_to_config(source_model, &ctx) {
+             tracing::info!(
+                 subagent_id = % request.id, resolved_model = % effective_model_id.0,
+                 source_model = source_model, "Pinning resumed child to source model"
+@@ -689,10 +699,23 @@ pub(crate) async fn handle_subagent_request(
              return;
          }
      };
@@ -5565,7 +5652,7 @@ index fde3dea..ec2de04 100644
              sampling_client,
              effective_sampling_config.model.clone(),
          )
-@@ -1037,7 +1050,15 @@ pub(crate) async fn handle_subagent_request(
+@@ -1037,7 +1060,15 @@ pub(crate) async fn handle_subagent_request(
      let _ = persistence
          .tx
          .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -5582,6 +5669,163 @@ index fde3dea..ec2de04 100644
              agent_name: Some(definition.name.clone()),
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });
+diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs
+index 8ba5abf..1a19381 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs
+@@ -776,12 +776,15 @@ async fn resolve_subagent_sampling_config(
+     agent_name: &str,
+     agent_model: &xai_grok_agent::config::ModelOverride,
+     ctx: &SubagentSpawnContext,
+-) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
++) -> Result<(xai_grok_sampler::SamplerConfig, acp::ModelId), String> {
+     use xai_grok_agent::config::ModelOverride;
+     let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
++    // Unknown falls through to inherit (long-standing behavior, distinct from
++    // ambiguity); a duplicate slug ABORTS the spawn — running on a first-match
++    // guess already sent traffic to a possibly-wrong endpoint once.
+     let try_pin = |model_id: &str, source: &'static str, unknown_msg: &'static str| {
+         match resolve_model_override_to_config(model_id, ctx) {
+-            Some((config, canonical_id)) => {
++            Ok((config, canonical_id)) => {
+                 log_subagent_model_resolution(
+                     agent_name,
+                     source,
+@@ -789,12 +792,16 @@ async fn resolve_subagent_sampling_config(
+                     &canonical_id,
+                     &parent_config,
+                 );
+-                Some((config, canonical_id))
++                Ok(Some((config, canonical_id)))
+             }
+-            None => {
++            Err(crate::agent::models::ModelSelectionError::Unknown(_)) => {
+                 tracing::warn!(agent = agent_name, model_id, "{unknown_msg}");
+-                None
++                Ok(None)
+             }
++            Err(crate::agent::models::ModelSelectionError::Ambiguous {
++                requested,
++                candidates,
++            }) => Err(ambiguous_override_message(&requested, &candidates)),
+         }
+     };
+     if let Some(model_id) = ctx.subagent_model_overrides.get(agent_name)
+@@ -802,18 +809,18 @@ async fn resolve_subagent_sampling_config(
+             model_id,
+             "config_override",
+             "Subagent model override references unknown model, falling through to inherit",
+-        )
++        )?
+     {
+-        return resolved;
++        return Ok(resolved);
+     }
+     if let ModelOverride::Override(model_id) = agent_model
+         && let Some(resolved) = try_pin(
+             model_id,
+             "agent_definition",
+             "Agent definition model references unknown model, falling through to inherit",
+-        )
++        )?
+     {
+-        return resolved;
++        return Ok(resolved);
+     }
+     log_subagent_model_resolution(
+         agent_name,
+@@ -822,7 +829,7 @@ async fn resolve_subagent_sampling_config(
+         &parent_mid,
+         &parent_config,
+     );
+-    (parent_config, parent_mid)
++    Ok((parent_config, parent_mid))
+ }
+ /// Resolve a subagent's effective sampling config + model id, honoring the
+ /// model-resolution precedence (Key Decision #16).
+@@ -842,15 +849,23 @@ async fn resolve_effective_model_config(
+     subagent_type: &str,
+     definition_model: &xai_grok_agent::config::ModelOverride,
+     ctx: &SubagentSpawnContext,
+-) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
++) -> Result<(xai_grok_sampler::SamplerConfig, acp::ModelId), String> {
+     if let Some(model_id) = runtime_override_model {
+-        if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
+-            return resolved;
++        match resolve_model_override_to_config(model_id, ctx) {
++            Ok(resolved) => return Ok(resolved),
++            Err(crate::agent::models::ModelSelectionError::Unknown(_)) => {
++                tracing::warn!(
++                    model_id,
++                    "Runtime model override references unknown model, falling through"
++                );
++            }
++            Err(crate::agent::models::ModelSelectionError::Ambiguous {
++                requested,
++                candidates,
++            }) => {
++                return Err(ambiguous_override_message(&requested, &candidates));
++            }
+         }
+-        tracing::warn!(
+-            model_id,
+-            "Runtime model override references unknown model, falling through"
+-        );
+     }
+     resolve_subagent_sampling_config(subagent_type, definition_model, ctx).await
+ }
+@@ -1006,14 +1021,17 @@ fn subagent_auth_type(
+ fn resolve_model_override_to_config(
+     model_id: &str,
+     ctx: &SubagentSpawnContext,
+-) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
++) -> Result<
++    (xai_grok_sampler::SamplerConfig, acp::ModelId),
++    crate::agent::models::ModelSelectionError,
++> {
+     use crate::agent::config::{resolve_credentials, sampling_config_for_model};
+-    let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
+-    let canonical_model_id = if ctx.available_models.contains_key(model_id) {
+-        acp::ModelId::new(model_id)
+-    } else {
+-        acp::ModelId::new(entry.info().model.clone())
+-    };
++    // Strict, catalog-wide (v0.18.7-A review): first-match on a duplicate slug
++    // sent the request to a guessed endpoint before persistence could refuse
++    // to record it. Ambiguity is now the CALLER problem — refuse to spawn.
++    let selection =
++        crate::agent::models::resolve_override_ungated(&ctx.available_models, model_id)?;
++    let (canonical_model_id, entry) = selection.into_parts();
+     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
+     let has_session_key = session_key.is_some();
+     let mut credentials = resolve_credentials(&entry, session_key);
+@@ -1039,7 +1057,25 @@ fn resolve_model_override_to_config(
+             "auth_method_id" : ctx.auth_method_id.0.as_ref(), }
+         )),
+     );
+-    Some((config, canonical_model_id))
++    Ok((config, canonical_model_id))
++}
++/// Human-readable refusal for an ambiguous explicit override. Listing the
++/// candidates with their endpoints is the actionable part: the fix is always
++/// "pin the config key instead of the shared model name".
++pub(crate) fn ambiguous_override_message(
++    requested: &str,
++    candidates: &[crate::agent::models::ModelCandidate],
++) -> String {
++    let listed = candidates
++        .iter()
++        .map(|c| format!("{} ({})", c.id, c.endpoint_label))
++        .collect::<Vec<_>>()
++        .join(", ");
++    format!(
++        "Subagent model '{requested}' matches more than one configured model: \
++         {listed}. Use the exact config key in [subagents.models] or the agent \
++         definition."
++    )
+ }
+ /// Leading items to preserve across compaction on resume: the System head only, so the
+ /// resumed body (the child's own work) stays compactable. Returns 0 when there's no
 diff --git a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs b/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
 index 2ddc52c..255fc15 100644
 --- a/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
