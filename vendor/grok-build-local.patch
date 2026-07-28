@@ -5537,7 +5537,7 @@ index 1afd3a2..fd04cf1 100644
      /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
      subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index fde3dea..04cb522 100644
+index fde3dea..ec2de04 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 @@ -689,10 +689,23 @@ pub(crate) async fn handle_subagent_request(
@@ -5565,12 +5565,20 @@ index fde3dea..04cb522 100644
              sampling_client,
              effective_sampling_config.model.clone(),
          )
-@@ -1038,6 +1051,8 @@ pub(crate) async fn handle_subagent_request(
+@@ -1037,7 +1050,15 @@ pub(crate) async fn handle_subagent_request(
+     let _ = persistence
          .tx
          .send(crate::session::persistence::PersistenceMsg::CurrentModel {
-             model_id: effective_model_id.clone(),
-+            // 同创建期：子 Agent 的 effective id 未必是 catalog key。
-+            catalog_model_id: crate::agent::models::CatalogModelPatch::Clear,
+-            model_id: effective_model_id.clone(),
++            // 与首写严格同一对绑定（v0.18.7-A P0 复盘）：此前这里发
++            // effective_model_id + Clear，把 new_with_explicit_dir 刚写对的
++            // (slug, key) 覆盖回 (key, None)——首写修得再对，一条后续消息
++            // 就全部作废。身份只算一次，之后原样复用，不给第二次机会算错。
++            model_id: subagent_first_write_current.clone(),
++            catalog_model_id: match subagent_first_write_catalog.clone() {
++                Some(key) => crate::agent::models::CatalogModelPatch::Set(key),
++                None => crate::agent::models::CatalogModelPatch::Clear,
++            },
              agent_name: Some(definition.name.clone()),
              reasoning_effort: Some(effective_sampling_config.reasoning_effort),
          });

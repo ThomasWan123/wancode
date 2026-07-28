@@ -2301,3 +2301,80 @@ mod subagent_identity_tests {
         );
     }
 }
+
+/// v0.18.7-A P0 复盘（Codex）：只测纯函数测不出"首写对、后续消息又写回错"
+/// ——那是事务链问题。本模块用**生产存储适配器**跑完整链：首写 → 后续
+/// CurrentModel 等价写入 → 读回磁盘上的最终 Summary。
+#[cfg(test)]
+mod subagent_write_chain_tests {
+    use agent_client_protocol as acp;
+    use xai_grok_shell::agent::models::CatalogModelPatch;
+    use xai_grok_shell::session::info::Info;
+    use xai_grok_shell::session::storage::jsonl::JsonlStorageAdapter;
+    use xai_grok_shell::session::storage::StorageAdapter;
+
+    async fn chain(
+        first: (&str, Option<&str>),
+        second: (&str, CatalogModelPatch),
+    ) -> serde_json::Value {
+        let dir = std::env::temp_dir().join(format!(
+            "wancode-subchain-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
+        let info = Info {
+            id: acp::SessionId::new("sub-chain"),
+            cwd: dir.to_string_lossy().into_owned(),
+        };
+        adapter
+            .init_session_with_catalog(
+                &info,
+                acp::ModelId::new(first.0),
+                first.1.map(acp::ModelId::new),
+            )
+            .await
+            .unwrap();
+        adapter
+            .update_current_model_and_agent(
+                &info,
+                &acp::ModelId::new(second.0),
+                Some("explore"),
+                None,
+                &second.1,
+            )
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(dir.join("summary.json")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    /// 修复后的消息形态：后续写入复用首写同一对 → 最终落盘身份保持不变。
+    #[tokio::test]
+    async fn followup_reusing_the_same_pair_preserves_identity() {
+        let json = chain(
+            ("glm-4.6", Some("glm-coding")),
+            ("glm-4.6", CatalogModelPatch::Set(acp::ModelId::new("glm-coding"))),
+        )
+        .await;
+        assert_eq!(json["current_model_id"], "glm-4.6");
+        assert_eq!(json["catalog_model_id"], "glm-coding");
+    }
+
+    /// 修复前的消息形态（effective_id=父 key + Clear）：证明它确实把正确
+    /// 身份覆盖回错误形态——这就是 Codex 抓到的 P0，留档为回归警示。
+    #[tokio::test]
+    async fn the_old_message_shape_really_did_corrupt_the_record() {
+        let json = chain(
+            ("glm-4.6", Some("glm-coding")),
+            ("glm-coding", CatalogModelPatch::Clear),
+        )
+        .await;
+        assert_eq!(json["current_model_id"], "glm-coding", "current 被写成 key");
+        assert!(json.get("catalog_model_id").is_none(), "key 被 Clear 抹掉");
+    }
+}
