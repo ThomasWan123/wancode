@@ -2257,9 +2257,9 @@ mod subagent_identity_tests {
         );
     }
 
-    /// 重复 slug：不猜。运行时确实有一个 entry 在跑（find_model_by_id 的
-    /// first-match），但那个选择没有沿类型链传到这里——重新按字符串查一遍
-    /// 目录来"推断"它，正是历轮反复禁止的二次解析。宁可留空，恢复时问用户。
+    /// 重复 slug：不猜。374e1e1 起显式覆盖在运行时就被严格解析拒绝
+    /// （resolve_override_ungated），这条兜的是残余路径（如父回退时
+    /// sampling.model 恰为重复 slug）：留空，恢复时问用户。
     #[test]
     fn duplicate_slug_writes_no_key() {
         let m = catalog();
@@ -2412,7 +2412,9 @@ mod subagent_override_resolution_tests {
         ("glm-coding", "glm-4.6", "https://coding/v1"),
     ];
 
-    /// 重复 slug：明确失败，候选齐全——这是"拒绝 spawn、零请求"的数据面。
+    /// 重复 slug：明确失败，候选齐全。注意证据范围：本条证明的是解析器
+    /// 拒绝；"零请求出门"由生产控制流保证（handle_request 收 Err 即
+    /// send_failure 返回），本测试并未直接启动 handler 统计 HTTP 计数。
     #[test]
     fn duplicate_slug_is_an_error_not_a_first_match() {
         let m = catalog(DUP);
