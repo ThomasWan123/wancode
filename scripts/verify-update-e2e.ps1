@@ -325,10 +325,12 @@ if ($pyCmd) { $PythonExe = $pyCmd.Source }
 function Verify-Minisign {
     param([string]$Name, [string]$PubB64, [string]$SigFile, [string]$File)
     if (-not $PythonExe) {
-        $hash = (Get-FileHash -Algorithm SHA256 $File).Hash
-        $sigExists = Test-Path $SigFile
-        Step ("$Name minisign signature (DEGRADED: python unavailable, sha256+sig-existence only)") $sigExists ("sha256=$hash sig-file-present=$sigExists")
-        return [bool]$sigExists
+        # Fail closed (Codex review): "sha256 computed but compared to nothing
+        # + .sig merely exists" is not verification, and returning $true here
+        # let an installer run UNVERIFIED. No python -> no signature check ->
+        # no install. Period.
+        Step ("$Name minisign signature") $false 'python unavailable - refusing to verify-by-existence; install blocked'
+        return $false
     }
     $out = cmd /c "`"$PythonExe`" `"$MinisignPyPath`" `"$PubB64`" `"$SigFile`" `"$File`" 2>&1"
     $ok = ($LASTEXITCODE -eq 0)
@@ -378,6 +380,12 @@ $e2 = $LASTEXITCODE
 $script:PreUninstText = Get-RegText $UninstKey
 $script:PreManuText   = Get-RegText $ManuKey
 Step 'Preflight: registry snapshot (Uninstall\wancode + Software\wanwe\wancode)' (($e1 -eq 0) -and ($e2 -eq 0)) ("export exit codes: $e1,$e2")
+if (($e1 -ne 0) -or ($e2 -ne 0)) {
+    # Fail closed (Codex review): the installer WILL rewrite these keys; if the
+    # snapshot doesn't exist there is nothing to restore from afterwards.
+    # Running on would trade a skipped test for corrupted real-install state.
+    throw "registry snapshot failed (export codes $e1,$e2) - aborting BEFORE any installer runs"
+}
 
 $script:DesktopLnk   = Join-Path ([Environment]::GetFolderPath('Desktop')) 'wancode.lnk'
 $script:StartMenuLnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\wancode\wancode.lnk'
