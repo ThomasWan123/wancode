@@ -2190,3 +2190,114 @@ mod candidate_wire_shape_tests {
         assert_eq!(back, original);
     }
 }
+
+/// v0.18.7-A（RED）：子代理首写身份 —— 持久化"实际使用"的那一对。
+///
+/// Codex 定的不变量：持久化子代理**最终实际使用**的 canonical catalog key；
+/// 仅真继承父模型时继承父 key；显式覆盖严格解析；重复 slug 不猜；未知清空。
+/// 反例是"子代理用了 B，磁盘却写父会话的 A"——那是新的错配，不是继承。
+///
+/// 现场（handle_request.rs）：子代理解析完毕后手里是
+/// (effective_model_id, effective_sampling_config.model)。继承路径的
+/// effective_model_id 是父会话 handle 的 canonical key；显式覆盖路径经
+/// resolve_model_override_to_config，精确 key 保留、唯一 slug 时返回的是
+/// slug 本身。首写身份必须从这一对出发计算，不引入第二次目录查询链。
+#[cfg(test)]
+mod subagent_identity_tests {
+    use agent_client_protocol as acp;
+    use indexmap::IndexMap;
+    use xai_grok_shell::agent::config::{ModelEntry, ModelInfo};
+    use xai_grok_shell::agent::models::subagent_persisted_identity;
+
+    fn entry(slug: &str, base: &str, selectable: bool) -> ModelEntry {
+        let mut info = ModelInfo::fallback(slug);
+        info.base_url = base.to_owned();
+        info.user_selectable = selectable;
+        ModelEntry { info, api_key: None, env_key: None, api_base_url: None }
+    }
+
+    fn catalog() -> IndexMap<String, ModelEntry> {
+        let mut m = IndexMap::new();
+        m.insert("glm-open".to_owned(), entry("glm-4.6", "https://open/v1", true));
+        m.insert("glm-coding".to_owned(), entry("glm-4.6", "https://coding/v1", true));
+        m.insert("solo".to_owned(), entry("deepseek-chat", "https://ds/v1", true));
+        m.insert("hidden".to_owned(), entry("internal-slug", "https://i/v1", false));
+        m
+    }
+
+    /// 继承：effective_id 是父会话的 canonical key（v0.18.6 起 handle 存 key），
+    /// 首写 = (父的 slug, Some(父的 key))——两字段各归其位。
+    #[test]
+    fn inheriting_the_parent_key_persists_slug_and_key() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("glm-coding"), "glm-4.6"),
+            (acp::ModelId::new("glm-4.6"), Some(acp::ModelId::new("glm-coding")))
+        );
+    }
+
+    /// 显式精确 key 覆盖：写它自己，不是父 key。
+    #[test]
+    fn explicit_key_override_persists_its_own_key() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("solo"), "deepseek-chat"),
+            (acp::ModelId::new("deepseek-chat"), Some(acp::ModelId::new("solo")))
+        );
+    }
+
+    /// 唯一 slug 覆盖（resolve_model_override_to_config 对非精确 key 返回的
+    /// 就是 slug 本身）：归一化成它的 key。
+    #[test]
+    fn unique_slug_override_normalizes_to_its_key() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("deepseek-chat"), "deepseek-chat"),
+            (acp::ModelId::new("deepseek-chat"), Some(acp::ModelId::new("solo")))
+        );
+    }
+
+    /// 重复 slug：不猜。运行时确实有一个 entry 在跑（find_model_by_id 的
+    /// first-match），但那个选择没有沿类型链传到这里——重新按字符串查一遍
+    /// 目录来"推断"它，正是历轮反复禁止的二次解析。宁可留空，恢复时问用户。
+    #[test]
+    fn duplicate_slug_writes_no_key() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("glm-4.6"), "glm-4.6"),
+            (acp::ModelId::new("glm-4.6"), None)
+        );
+    }
+
+    /// 隐藏模型的精确 key：照写。子代理跑内部模型是合法路径，
+    /// selectable gate 不适用于"记录事实"。
+    #[test]
+    fn hidden_model_exact_key_still_persists() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("hidden"), "internal-slug"),
+            (acp::ModelId::new("internal-slug"), Some(acp::ModelId::new("hidden")))
+        );
+    }
+
+    /// key 存在但 slug 与将写入的 sampling model 不一致：fail-closed 留空
+    /// ——与 initial_persisted_identity 的成对校验同一条原则。
+    #[test]
+    fn key_slug_mismatch_fails_closed() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("glm-coding"), "deepseek-chat"),
+            (acp::ModelId::new("deepseek-chat"), None)
+        );
+    }
+
+    /// 目录完全不认识：current 保留将实际发送的名字，key 留空。
+    #[test]
+    fn unknown_everything_writes_no_key() {
+        let m = catalog();
+        assert_eq!(
+            subagent_persisted_identity(&m, &acp::ModelId::new("ghost"), "ghost-slug"),
+            (acp::ModelId::new("ghost-slug"), None)
+        );
+    }
+}

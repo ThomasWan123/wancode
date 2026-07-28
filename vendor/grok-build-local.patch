@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 695ef59..58794ec 100644
+index 695ef59..70836af 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -88,7 +88,7 @@ version = "0.26.0"
@@ -3168,7 +3168,7 @@ index 695ef59..58794ec 100644
  
 +[[package]]
 +name = "wancode"
-+version = "0.18.5"
++version = "0.18.6"
 +dependencies = [
 + "agent-client-protocol",
 + "anyhow",
@@ -4113,13 +4113,18 @@ index 2d4043a..11d9372 100644
          use_concise,
          apply_prompt_override,
 diff --git a/crates/codegen/xai-grok-shell/src/agent/models.rs b/crates/codegen/xai-grok-shell/src/agent/models.rs
-index a1c9b68..f623c25 100644
+index a1c9b68..334c75e 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/models.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/models.rs
-@@ -1649,6 +1649,549 @@ pub(crate) fn selectable_catalog_key_for_persisted(
-     resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
+@@ -1628,25 +1628,588 @@ pub(crate) fn resolve_catalog_key(
+         .map(|(key, _)| acp::ModelId::new(key.clone()))
  }
  
+-/// Catalog key for a persisted session model id, restricted to **selectable**
+-/// entries. A selectable exact-key match wins (as in [`resolve_catalog_key`]);
+-/// otherwise the last selectable entry whose routing slug matches `id`, so a
+-/// non-selectable exact-key entry never shadows a selectable slug match.
+-pub(crate) fn selectable_catalog_key_for_persisted(
 +/// One selectable catalog entry offered to the user when a legacy persisted
 +/// slug is ambiguous. `endpoint_label` is the **host only** — never the full
 +/// URL, query string, or any credential.
@@ -4157,7 +4162,8 @@ index a1c9b68..f623c25 100644
 +/// proxies) are legitimate, so a slug alone may not identify an entry. When it
 +/// doesn't, this never guesses — it reports the candidates and lets the user
 +/// choose. That guess is exactly what routed a restored session to the wrong
-+/// endpoint before (`.rev()` last-wins in `selectable_catalog_key_for_persisted`).
++/// endpoint before (a `.rev()` last-wins scan in the since-deleted
++/// `selectable_catalog_key_for_persisted`).
 +#[derive(Debug, Clone, PartialEq, Eq)]
 +pub enum PersistedModelResolution {
 +    /// `catalog_model_id` was present and still selectable — restore verbatim.
@@ -4201,8 +4207,9 @@ index a1c9b68..f623c25 100644
 +/// literally keyed `glm-4.6` silently win over a same-slug proxy entry, which
 +/// is the ambiguity this function exists to surface.
 +pub fn resolve_persisted_model(
-+    models: &IndexMap<String, ModelEntry>,
-+    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
+     models: &IndexMap<String, ModelEntry>,
+     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
+-    id: &acp::ModelId,
 +    catalog_model_id: Option<&str>,
 +    legacy_model_id: &str,
 +) -> PersistedModelResolution {
@@ -4297,7 +4304,9 @@ index a1c9b68..f623c25 100644
 +    models: &IndexMap<String, ModelEntry>,
 +    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
 +    block: &ModelSessionBlock,
-+) -> Option<acp::ModelId> {
+ ) -> Option<acp::ModelId> {
+-    if available.contains_key(id) {
+-        return Some(id.clone());
 +    let resolved = match resolve_persisted_model(models, available, None, block.persisted_id()) {
 +        PersistedModelResolution::Exact(id) | PersistedModelResolution::Migrated(id) => id,
 +        // Still ambiguous, or still gone. Either way there is nothing to
@@ -4307,6 +4316,51 @@ index a1c9b68..f623c25 100644
 +        }
 +    };
 +    available.contains_key(&resolved).then_some(resolved)
++}
++
++/// The identity pair for a subagent session's first Summary write.
++///
++/// Invariant (Codex, v0.18.7-A): persist the canonical catalog key of the
++/// model the child **actually uses** — the parent's key only when the child
++/// genuinely inherits the parent's model, never as a default. Recording the
++/// parent's key while the child runs something else would be a brand-new
++/// mismatch, not inheritance.
++///
++/// Inputs are the pair the spawn path already holds: `effective_model_id`
++/// (the parent handle's canonical key on the inherit path; the exact key or
++/// the bare slug on the override path) and the sampling config's model — the
++/// name that will actually go over the wire. No `available` gating: subagents
++/// legitimately run hidden models, and this function records fact, not choice.
++///
++/// A duplicate slug writes no key. At runtime one entry did win (first-match
++/// inside `resolve_model_override_to_config`), but that choice does not travel
++/// here on a typed path — re-deriving it from strings would be the second
++/// lookup this whole effort exists to forbid. Empty is recoverable (restore
++/// asks the user); a laundered guess is not.
++pub fn subagent_persisted_identity(
++    models: &IndexMap<String, ModelEntry>,
++    effective_model_id: &acp::ModelId,
++    sampling_model: &str,
++) -> (acp::ModelId, Option<acp::ModelId>) {
++    let current = acp::ModelId::new(sampling_model.to_owned());
++    if let Some(entry) = models.get(effective_model_id.0.as_ref()) {
++        if entry.info.model == sampling_model {
++            return (current, Some(effective_model_id.clone()));
++        }
++        return (current, None);
+     }
+-    let id_str = id.0.as_ref();
+-    if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
+-        available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
+-    }) {
+-        return Some(acp::ModelId::new(key.clone()));
++    let mut matches = models.iter().filter(|(_, e)| e.info.model == sampling_model);
++    match (matches.next(), matches.next()) {
++        (Some((key, _)), None) if effective_model_id.0.as_ref() == sampling_model => {
++            (current, Some(acp::ModelId::new(key.clone())))
++        }
++        _ => (current, None),
++    }
 +}
 +
 +/// The identity a fork inherits when the caller supplies no model override.
@@ -4660,12 +4714,89 @@ index a1c9b68..f623c25 100644
 +        CatalogModelPatch::Preserve => existing.cloned(),
 +        CatalogModelPatch::Set(id) => Some(id.clone()),
 +        CatalogModelPatch::Clear => None,
-+    }
-+}
-+
+     }
+-    resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
+ }
+ 
  /// A "campaign-only" preferred flip: the default changed and either side's value
- /// is an active campaign default, i.e. the change is attributable to a campaign
- /// overlay appearing/disappearing rather than a user/CLI/env edit.
+@@ -3517,77 +4080,6 @@ mod tests {
+         assert_eq!(key.0.as_ref(), "user-grok-build");
+     }
+ 
+-    #[test]
+-    fn selectable_catalog_key_for_persisted_none_when_resolved_not_available() {
+-        let mut models = IndexMap::new();
+-        models.insert(
+-            "enterprise-grok-build".to_string(),
+-            make_model_entry("grok-4.5"),
+-        );
+-
+-        let available: IndexMap<_, _> = IndexMap::new();
+-        let persisted = acp::ModelId::new("grok-4.5");
+-        assert!(selectable_catalog_key_for_persisted(&models, &available, &persisted).is_none());
+-    }
+-
+-    #[test]
+-    fn selectable_prefers_available_identity_over_non_selectable_exact_key() {
+-        let mut models = IndexMap::new();
+-        models.insert("grok-build".to_string(), make_model_entry("grok-build"));
+-        models.insert(
+-            "enterprise-grok-build".to_string(),
+-            make_model_entry("grok-build"),
+-        );
+-        models.insert("grok-4.3".to_string(), make_model_entry("grok-4.3"));
+-
+-        let available = test_available_keys(&["enterprise-grok-build", "grok-4.3"]);
+-
+-        let persisted = acp::ModelId::new("grok-build");
+-        assert_eq!(
+-            resolve_catalog_key(&models, &persisted)
+-                .expect("exact key exists")
+-                .0
+-                .as_ref(),
+-            "grok-build"
+-        );
+-        let key = selectable_catalog_key_for_persisted(&models, &available, &persisted)
+-            .expect("must resolve to selectable section");
+-        assert_eq!(key.0.as_ref(), "enterprise-grok-build");
+-    }
+-
+-    #[test]
+-    fn selectable_matches_routing_slug_when_no_exact_key() {
+-        let mut models = IndexMap::new();
+-        models.insert(
+-            "enterprise-grok-build".to_string(),
+-            make_model_entry("grok-build"),
+-        );
+-        models.insert("grok-4.3".to_string(), make_model_entry("grok-4.3"));
+-
+-        let available = test_available_keys(&["enterprise-grok-build", "grok-4.3"]);
+-
+-        let persisted = acp::ModelId::new("grok-build");
+-        let key = selectable_catalog_key_for_persisted(&models, &available, &persisted)
+-            .expect("slug must resolve to selectable key");
+-        assert_eq!(key.0.as_ref(), "enterprise-grok-build");
+-    }
+-
+-    /// A persisted *selectable* catalog key binds to itself even when a later
+-    /// selectable section's routing slug equals that key (exact key wins).
+-    #[test]
+-    fn selectable_prefers_exact_key_over_later_slug_match() {
+-        let mut models = IndexMap::new();
+-        models.insert("grok-build".to_string(), make_model_entry("grok-4.5"));
+-        models.insert("other".to_string(), make_model_entry("grok-build"));
+-
+-        let available = test_available_keys(&["grok-build", "other"]);
+-
+-        let persisted = acp::ModelId::new("grok-build");
+-        let key = selectable_catalog_key_for_persisted(&models, &available, &persisted)
+-            .expect("exact selectable key must win");
+-        assert_eq!(key.0.as_ref(), "grok-build");
+-    }
+-
+     fn test_available_keys(keys: &[&str]) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+         keys.iter()
+             .map(|k| {
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 index 78a8612..592c7f8 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
@@ -5406,20 +5537,35 @@ index 1afd3a2..fd04cf1 100644
      /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
      subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index fde3dea..d2a622c 100644
+index fde3dea..04cb522 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-@@ -693,6 +693,9 @@ pub(crate) async fn handle_subagent_request(
+@@ -689,10 +689,23 @@ pub(crate) async fn handle_subagent_request(
+             return;
+         }
+     };
++    let (subagent_first_write_current, subagent_first_write_catalog) =
++        crate::agent::models::subagent_persisted_identity(
++            &ctx.available_models,
++            &effective_model_id,
++            &effective_sampling_config.model,
++        );
+     let persistence = match session::persistence::new_with_explicit_dir(
              &child_session_info,
              child_session_dir.clone(),
-             effective_model_id.clone(),
-+            // Subagent identity inheritance is the fork unit's scope; an
-+            // unknown key stays empty rather than guessed (see step 1c).
-+            None,
+-            effective_model_id.clone(),
++            // Both halves from what the child ACTUALLY uses (v0.18.7-A):
++            // current = the wire name from the sampling config, catalog = the
++            // canonical key only when the pair is consistent. Passing
++            // `effective_model_id` as current was the same field-semantics slip
++            // step 6b fixed for new sessions — on the inherit path that value
++            // is the parent's catalog KEY, not an upstream model name.
++            subagent_first_write_current.clone(),
++            subagent_first_write_catalog.clone(),
              sampling_client,
              effective_sampling_config.model.clone(),
          )
-@@ -1038,6 +1041,8 @@ pub(crate) async fn handle_subagent_request(
+@@ -1038,6 +1051,8 @@ pub(crate) async fn handle_subagent_request(
          .tx
          .send(crate::session::persistence::PersistenceMsg::CurrentModel {
              model_id: effective_model_id.clone(),
