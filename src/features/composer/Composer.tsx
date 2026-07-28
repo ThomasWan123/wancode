@@ -381,13 +381,21 @@ export function Composer(props: Record<string, any>) {
                   if (sessionId) void switchModel(m, previous);
                 }}
               >
-                {(modelOptions?.length
-                  ? modelOptions
-                  : (models.length
-                      ? models
-                      : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]
-                    ).map((m: string) => ({ id: m, name: m, endpointLabel: "" }))
-                ).map((o: { id: string; name: string; endpointLabel: string }) => (
+                {(() => {
+                  // 按 id 合并两个来源（复核 P1）：modelOptions 只在会话启动时
+                  // 拿到一次，而热加载新模型后引擎推的是 models 裸 id 列表。
+                  // 只认结构化列表会把 v0.18.5 修过的"保存新模型必须重启"
+                  // 请回来——结构化条目优先，models 里缺失的 key 以裸 key 补齐。
+                  const structured = modelOptions?.length ? modelOptions : [];
+                  const known = new Set(structured.map((o: { id: string }) => o.id));
+                  const bare = (models.length || structured.length
+                    ? models
+                    : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]
+                  )
+                    .filter((m: string) => !known.has(m))
+                    .map((m: string) => ({ id: m, name: m, endpointLabel: "" }));
+                  return [...structured, ...bare];
+                })().map((o: { id: string; name: string; endpointLabel: string }) => (
                   <option key={o.id} value={o.id}>
                     {/* value 永远是 catalog key；同名模型靠端点区分 */}
                     {o.endpointLabel ? `${o.name} · ${o.endpointLabel}` : o.name}
