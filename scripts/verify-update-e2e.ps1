@@ -44,8 +44,9 @@ $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------- constants --
 $RepoSlug     = 'ThomasWan123/wancode'
-$OldVersion   = '0.18.5'
-$NewVersion   = '0.18.6'
+# 版本对可传参：发布门每次验"上一版 -> 本版"。无参默认最近一对。
+$OldVersion   = if ($env:WUE_OLD) { $env:WUE_OLD } else { '0.18.5' }
+$NewVersion   = if ($env:WUE_NEW) { $env:WUE_NEW } else { '0.18.6' }
 $GhProxy      = 'https://gh-proxy.com/'
 $RealDir      = Join-Path $env:LOCALAPPDATA 'wancode'
 $RealExe      = Join-Path $RealDir 'wancode.exe'
@@ -178,7 +179,10 @@ function Final-Audit {
     Step 'Real Software\wanwe\wancode key restored bit-identical' ($manuNow -eq $script:PreManuText) ''
 
     $dv = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\wancode' -ErrorAction SilentlyContinue).DisplayVersion
-    Step ("Real install DisplayVersion still " + $NewVersion) ($dv -eq $NewVersion) ("DisplayVersion=" + $dv)
+    # 断言的是"与跑前一致"，不是等于 $NewVersion——本 E2E 从不升级真实安装，
+    # 真实安装的版本是什么就该保持什么。旧断言硬编码 NewVersion，首轮里真实
+    # 安装恰好等于 NewVersion（0.18.6），巧合掩盖了错误；0.18.7 一发布立刻假红。
+    Step ("Real install DisplayVersion unchanged (" + $script:PreRealDisplayVersion + ")") ($dv -eq $script:PreRealDisplayVersion) ("DisplayVersion=" + $dv)
 
     $dt = Get-LnkTarget $script:DesktopLnk
     $st = Get-LnkTarget $script:StartMenuLnk
@@ -345,7 +349,7 @@ function Verify-Minisign {
 try {
 
 # ============================================================== STEP 0: config
-Write-Host '=== wancode 0.18.5 -> 0.18.6 auto-update E2E verification (isolated) ==='
+Write-Host "=== wancode $OldVersion -> $NewVersion auto-update E2E verification (isolated) ==="
 Write-Host ("WorkDir  : " + $WorkDir)
 Write-Host ("IsoDir   : " + $IsoDir)
 Write-Host ("RealDir  : " + $RealDir)
@@ -380,6 +384,7 @@ $e2 = $LASTEXITCODE
 $script:PreUninstText = Get-RegText $UninstKey
 $script:PreManuText   = Get-RegText $ManuKey
 Step 'Preflight: registry snapshot (Uninstall\wancode + Software\wanwe\wancode)' (($e1 -eq 0) -and ($e2 -eq 0)) ("export exit codes: $e1,$e2")
+$script:PreRealDisplayVersion = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\wancode' -EA SilentlyContinue).DisplayVersion
 if (($e1 -ne 0) -or ($e2 -ne 0)) {
     # Fail closed (Codex review): the installer WILL rewrite these keys; if the
     # snapshot doesn't exist there is nothing to restore from afterwards.

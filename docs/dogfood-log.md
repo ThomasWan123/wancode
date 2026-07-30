@@ -40,3 +40,19 @@
 验证期结论：两周报 7 个真实问题（图片 400、链接覆盖、历史图片、队列按钮、
 模型不显示+端点串台、恢复覆盖、更新无反馈），全部当天定位；前 6 个已修复
 发版，第 7 个立项 v0.18.7。优先级最高的下一项 = #121 更新链路 UX。
+
+## 2026-07-30 v0.18.7 发布
+
+| 发布门项 | 结果 |
+|---|---|
+| #122 正式 S2（智谱 Coding Plan 原配置） | ✅ smoke 6/6，S2-reply EndTurn 落盘 |
+| DeepSeek 通用链路预检（前一日） | ✅ 6/6 |
+| release 构建 + 补签 + latest.json | ✅（release.ps1 在 powershell 5.1 下必死：EAP=Stop + 原生 stderr 包装，改 bash 直跑；脚本待加 5.1 检测） |
+| GitHub release v0.18.7 四资产 | ✅ setup/msi/.sig/latest.json |
+| latest.json 线上回读 | ✅ version=0.18.7、镜像 URL |
+| 镜像字节 | ✅ 首字节 MZ，本地=官方 sha256 一致 |
+| 0.18.6→0.18.7 隔离升级 E2E | ✅ 26/26 OVERALL PASS（含双版本 minisign 验签、/R 拉起、注册表逐字节恢复、真实安装未动） |
+
+E2E 首跑暴露脚本断言 bug：真实安装版本硬编码 ==NewVersion（首轮 0.18.6 恰好
+相等被巧合掩盖），已改为"与跑前快照一致"；期间脚本 fail-safe 兜底正确触发
+（异常→安全中止→注册表恢复）。版本对已参数化（WUE_OLD/WUE_NEW）。
