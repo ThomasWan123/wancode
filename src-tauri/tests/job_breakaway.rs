@@ -4,8 +4,9 @@
 //! **普通方式**起孙进程 → 关 Job → 孙进程死。这就是 2026-07-30 真机验收
 //! 抓到的事故：插件 ShellExecuteW 起的安装器随应用退出被瞬杀。
 //!
-//! 场景 B（修复验证）：Job 加 BREAKAWAY_OK，helper 改用生产函数
-//! `updater_launch::win::spawn_breakaway` → 关 Job → 孙进程**存活**。
+//! 场景 B（修复验证）：Job 加 BREAKAWAY_OK，helper 改走生产入口
+//! `updater_launch::win::spawn_breakaway_verified`（spawn + 原始句柄存活
+//! 确认）→ 关 Job → 孙进程**存活**。
 //!
 //! harness=false：helper 模式需要本 exe 自我重入（breakaway 必须由 Job 内
 //! 的进程发起，只有我们自己的代码能带 CREATE_BREAKAWAY_FROM_JOB 标志）。
@@ -62,12 +63,14 @@ fn helper(mode: &str, dir: PathBuf) {
         std::thread::sleep(Duration::from_millis(25));
     }
     let pid = match mode {
-        "breakaway" => wancode_lib::updater_launch::win::spawn_breakaway(
+        // 走生产真实使用的 verified 入口（spawn + 原始句柄存活确认），
+        // 把这条链整段锁进测试。孙进程 ping 常驻 60s，300ms 存活检查必过。
+        "breakaway" => wancode_lib::updater_launch::win::spawn_breakaway_verified(
             std::path::Path::new(GRANDCHILD),
             &GRANDCHILD_ARGS,
+            300,
         )
-        .expect("spawn_breakaway")
-        .pid(),
+        .expect("spawn_breakaway_verified"),
         _ => std::process::Command::new(GRANDCHILD)
             .args(GRANDCHILD_ARGS)
             .spawn()

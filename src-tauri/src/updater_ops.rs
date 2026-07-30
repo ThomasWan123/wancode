@@ -70,17 +70,14 @@ pub async fn updater_download(
         .await
         .map_err(|e| format!("下载失败: {e}"))?;
 
-    // 落盘到带随机后缀的临时目录（复核要求：路径不可预测），文件名带
-    // 版本便于事后取证（这次破案就靠 %TEMP% 里那个完整的安装器）。
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "wancode-updater-{version}-{nonce:08x}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    // 落盘到真随机后缀的临时目录（tempfile 的 CSPRNG 命名 + 独占创建），
+    // keep() 解除自动删除——目录要活到 install，且事后可取证（这次破案
+    // 就靠 %TEMP% 里那个完整的安装器）。
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("wancode-updater-{version}-"))
+        .tempdir()
+        .map_err(|e| format!("创建临时目录失败: {e}"))?
+        .keep();
     let path = dir.join(format!("wancode-{version}-installer.exe"));
     std::fs::write(&path, &bytes).map_err(|e| format!("写入安装器失败: {e}"))?;
 
