@@ -40,8 +40,20 @@ pub async fn updater_download(
     app: AppHandle,
     state: State<'_, PendingUpdate>,
 ) -> Result<Option<String>, String> {
-    let updater = app
-        .updater_builder()
+    #[allow(unused_mut)]
+    let mut builder = app.updater_builder();
+    // 编译期测试开关（见 Cargo.toml [features]）：只存在于验收用的
+    // 0.18.7-test 构建，正式包没有这段代码。
+    #[cfg(feature = "updater-test-endpoint")]
+    {
+        builder = builder
+            .endpoints(vec![tauri::Url::parse(
+                "https://github.com/ThomasWan123/wancode/releases/download/v0.18.8-rc.1/latest-test.json",
+            )
+            .map_err(|e| format!("测试更新源 URL 解析失败: {e}"))?])
+            .map_err(|e| format!("设置测试更新源失败: {e}"))?;
+    }
+    let updater = builder
         .build()
         .map_err(|e| format!("updater 初始化失败: {e}"))?;
     let Some(update) = updater.check().await.map_err(|e| format!("检查更新失败: {e}"))? else {
