@@ -20,6 +20,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 仅供 #129 更新验收：0.18.7-test 隔离构建用它把更新源指向 prerelease 的
+# latest-test.json。正式构建绝不启用——生产包不含任何更新地址覆盖能力
+# （编译期开关，非环境变量，无法在用户机器上被打开）。
+updater-test-endpoint = []
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -28,6 +34,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 toml_edit = "0.22"
 keyring = { version = "3", features = ["windows-native"] }
+sha2 = "0.10"
+tempfile = "3"
 reqwest = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -60,3 +68,9 @@ windows-sys = { version = "0.59", features = [
 # tests/model_block_over_acp.rs：用隔离的 $GROK_HOME 起真实引擎，验证
 # load_session 会经 ACP meta 交回 x.ai/modelBlock。
 tempfile = { workspace = true }
+
+# #129：Job/breakaway 集成测试需要自我重入 helper 模式，标准 harness 无法
+# 承载（helper 分支必须在 main 里分流），故关 harness 自写 main。
+[[test]]
+name = "job_breakaway"
+harness = false

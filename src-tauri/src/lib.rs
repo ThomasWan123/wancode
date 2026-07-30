@@ -7,6 +7,8 @@ mod engine_ops;
 mod review_ops;
 mod autotest;
 mod provider_ops;
+pub mod updater_launch;
+mod updater_ops;
 
 use xai_grok_paths::AbsPathBuf;
 
@@ -52,7 +54,8 @@ fn setup_job_object() {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     unsafe {
@@ -62,8 +65,12 @@ fn setup_job_object() {
             return;
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        // BREAKAWAY_OK 只"允许"显式脱离（#129：更新安装器必须活过应用退出），
+        // 不是 SILENT——AI 起的子进程仍然全部留在 Job 里被治理。脱离必须由
+        // 创建方显式传 CREATE_BREAKAWAY_FROM_JOB（见 updater_launch）。
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         // 8GB/进程：主进程与 webview 也在 Job 里，上限要给它们留足余量
         info.ProcessMemoryLimit = 8 * 1024 * 1024 * 1024;
         if SetInformationJobObject(
@@ -117,6 +124,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(agent::AgentState::default())
+        .manage(updater_ops::PendingUpdate::default())
         .setup(|app| {
             if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
                 let handle = app.handle().clone();
@@ -127,6 +135,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updater_ops::updater_download,
+            updater_ops::updater_install,
             read_file,
             agent::agent_start,
             agent::agent_prompt,
