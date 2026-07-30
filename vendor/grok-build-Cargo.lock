@@ -13415,7 +13415,7 @@ dependencies = [
 
 [[package]]
 name = "wancode"
-version = "0.18.6"
+version = "0.18.7"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -13431,6 +13431,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml_edit 0.22.27",
