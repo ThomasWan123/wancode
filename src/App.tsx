@@ -19,7 +19,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
-import { checkPostUpdate, runUpdateFlow, UPDATE_MARKER_KEY } from "./update";
+import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
@@ -960,17 +960,7 @@ function App() {
             version: found,
             // 下载已在 updater_download 内完成，这里无事可做。
             download: async () => {},
-            install: async () => {
-              try {
-                await invoke("updater_install", { version: found });
-              } catch (err) {
-                // runUpdateFlow 在 install 前已写升级标记；此刻应用没退出、
-                // 版本没变，标记留着会让下次启动的对账误报"上次更新未完成"
-                // ——与用户当场看到的这条错误自相矛盾。失败即清。
-                localStorage.removeItem(UPDATE_MARKER_KEY);
-                throw err;
-              }
-            },
+            install: () => invoke("updater_install", { version: found }) as Promise<void>,
           } as any;
         } finally {
           unlisten();

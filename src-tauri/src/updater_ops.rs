@@ -11,10 +11,26 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::UpdaterExt;
 
-/// download 与 install 两条命令之间暂存的安装器路径。
-/// 版本一并存下：install 时校验前端所见与实际下载的是同一个版本。
+/// download 与 install 两条命令之间暂存的安装器。
+#[derive(Clone)]
+pub struct StagedInstaller {
+    /// install 时校验前端所见与实际下载的是同一个版本。
+    pub version: String,
+    pub path: PathBuf,
+    /// 验签通过的那份字节的 sha256——启动前重新哈希文件比对，把
+    /// "minisign 验过的字节"与"最终执行的文件"绑死（防落盘后被换）。
+    pub sha256: String,
+}
+
 #[derive(Default)]
-pub struct PendingUpdate(pub Mutex<Option<(String, PathBuf)>>);
+pub struct PendingUpdate(pub Mutex<Option<StagedInstaller>>);
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
+}
 
 /// 检查并下载更新（插件验签），落盘为临时 exe，进度经 `updater://progress`
 /// 事件发给前端（payload：0-100 或 -1 表示未知总长）。
@@ -54,14 +70,25 @@ pub async fn updater_download(
         .await
         .map_err(|e| format!("下载失败: {e}"))?;
 
-    // 落盘到独立临时目录。文件名带版本，便于事后取证（这次破案就靠
-    // %TEMP% 里那个完整的安装器）。
-    let dir = std::env::temp_dir().join(format!("wancode-updater-{version}"));
+    // 落盘到带随机后缀的临时目录（复核要求：路径不可预测），文件名带
+    // 版本便于事后取证（这次破案就靠 %TEMP% 里那个完整的安装器）。
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "wancode-updater-{version}-{nonce:08x}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
     let path = dir.join(format!("wancode-{version}-installer.exe"));
     std::fs::write(&path, &bytes).map_err(|e| format!("写入安装器失败: {e}"))?;
 
-    *state.0.lock().unwrap() = Some((version.clone(), path));
+    *state.0.lock().unwrap() = Some(StagedInstaller {
+        version: version.clone(),
+        path,
+        sha256: sha256_hex(&bytes),
+    });
     Ok(Some(version))
 }
 
@@ -75,27 +102,43 @@ pub async fn updater_install(
     state: State<'_, PendingUpdate>,
     version: String,
 ) -> Result<(), String> {
-    let (staged_version, path) = state
+    let staged = state
         .0
         .lock()
         .unwrap()
         .clone()
         .ok_or("没有已下载的更新——请先检查更新")?;
-    if staged_version != version {
+    if staged.version != version {
         return Err(format!(
-            "版本不一致：前端请求 {version}，已下载 {staged_version}"
+            "版本不一致：前端请求 {version}，已下载 {}",
+            staged.version
         ));
     }
 
+    // 启动前把待执行文件重新哈希，与下载时验签通过的那份字节比对。
+    let on_disk = std::fs::read(&staged.path).map_err(|e| format!("读取已下载安装器失败: {e}"))?;
+    if sha256_hex(&on_disk) != staged.sha256 {
+        return Err("已下载安装器与验签内容不一致（文件已被改动），已拒绝执行；请重新检查更新".into());
+    }
+    let path = staged.path;
+
     #[cfg(windows)]
     {
-        // 参数与 tauri-plugin-updater 2.10.1 完全一致（E2E 已验证该组合）。
-        let pid = crate::updater_launch::win::spawn_breakaway_verified(
-            &path,
-            &["/P", "/R", "/UPDATE"],
-            1200,
-        )
-        .map_err(|e| format!("安装器启动失败（应用未退出，可重试或手动安装）: {e}"))?;
+        // 完整复刻 tauri-plugin-updater 2.10.1 的 NSIS 参数：
+        //   /P /R（passive 模式）+ /UPDATE + /ARGS <转义后的当前启动参数>
+        // /ARGS 用于 /R 重启应用时恢复启动上下文，插件无条件附带。
+        use std::ffi::OsString;
+        let current_args: Vec<String> = std::env::args_os()
+            .skip(1)
+            .collect::<Vec<OsString>>()
+            .iter()
+            .map(|a| crate::updater_launch::win::escape_nsis_current_exe_arg(a))
+            .collect();
+        let mut args: Vec<&str> = vec!["/P", "/R", "/UPDATE", "/ARGS"];
+        args.extend(current_args.iter().map(String::as_str));
+
+        let pid = crate::updater_launch::win::spawn_breakaway_verified(&path, &args, 1200)
+            .map_err(|e| format!("安装器启动失败（应用未退出，可重试或手动安装）: {e}"))?;
         tracing::info!(pid, path = %path.display(), "updater: installer launched outside job, exiting app");
         app.exit(0);
         Ok(())

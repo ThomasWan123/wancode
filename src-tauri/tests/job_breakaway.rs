@@ -66,7 +66,8 @@ fn helper(mode: &str, dir: PathBuf) {
             std::path::Path::new(GRANDCHILD),
             &GRANDCHILD_ARGS,
         )
-        .expect("spawn_breakaway"),
+        .expect("spawn_breakaway")
+        .pid(),
         _ => std::process::Command::new(GRANDCHILD)
             .args(GRANDCHILD_ARGS)
             .spawn()
