@@ -17,6 +17,13 @@ param(
   [string]$Mirror = "https://gh-proxy.com/"
 )
 $ErrorActionPreference = "Stop"
+
+# PowerShell 5.1 明确拒绝（2026-07-30 实锤）：EAP=Stop 下 5.1 会把原生命令
+# （tauri CLI/node）的普通 stderr 信息行包装成终止错误，build 一开口就死。
+# pwsh 7 不包装。别删这个门闩——它替代的是"每次发版踩一遍再想起来"。
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "release.ps1 需要 PowerShell 7+（pwsh）。当前 $($PSVersionTable.PSVersion)。安装：winget install Microsoft.PowerShell；或按脚本步骤在 bash 中分步执行（build→signer sign→latest.json）。"
+}
 $key = "$env:USERPROFILE\.tauri\wancode_updater.key"
 $root = Split-Path $PSScriptRoot -Parent
 # 引擎在仓库兄弟目录（见 vendor/grok-build.lock），产物落引擎 workspace 的 target
