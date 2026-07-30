@@ -935,9 +935,37 @@ function App() {
   }
 
   // #121：流程细节与"为什么这么设计"见 src/update.ts / update.test.ts。
+  // #129（Windows）：download/install 改走自有 Rust 命令——插件的 install()
+  // 用 ShellExecuteW 拉安装器（无法脱离 Job Object）且 exit(0) 前不查启动
+  // 结果，安装器随应用退出被进程树治理瞬杀（v0.17.0 起应用内更新全坏的
+  // 根因）。updater_download 仍由插件验签下载；updater_install 用
+  // CREATE_BREAKAWAY_FROM_JOB 拉起并确认存活后才退出，起不来则 Err 留在
+  // 应用内显示。runUpdateFlow 的状态机（进度/标记/告知/对账）原样复用。
   async function runUpdate() {
     await runUpdateFlow({
-      check: checkUpdate as any,
+      check: async () => {
+        // 下载进度：Rust 侧边下边发 updater://progress（{version,pct}），
+        // 这里直连 setUpdateMsg——验收第 2 项"下载过程有可见反馈"。
+        const unlisten = await listen<{ version: string; pct: number }>(
+          "updater://progress",
+          (e) => {
+            const pct = e.payload.pct;
+            setUpdateMsg(t.updateDownloading(e.payload.version, pct < 0 ? 0 : pct));
+          },
+        );
+        try {
+          const found = await invoke<string | null>("updater_download");
+          if (!found) return null;
+          return {
+            version: found,
+            // 下载已在 updater_download 内完成，这里无事可做。
+            download: async () => {},
+            install: () => invoke("updater_install", { version: found }) as Promise<void>,
+          } as any;
+        } finally {
+          unlisten();
+        }
+      },
       relaunch,
       currentVersion: version,
       setMsg: setUpdateMsg,

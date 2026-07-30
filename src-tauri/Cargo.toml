@@ -60,3 +60,9 @@ windows-sys = { version = "0.59", features = [
 # tests/model_block_over_acp.rs：用隔离的 $GROK_HOME 起真实引擎，验证
 # load_session 会经 ACP meta 交回 x.ai/modelBlock。
 tempfile = { workspace = true }
+
+# #129：Job/breakaway 集成测试需要自我重入 helper 模式，标准 harness 无法
+# 承载（helper 分支必须在 main 里分流），故关 harness 自写 main。
+[[test]]
+name = "job_breakaway"
+harness = false
