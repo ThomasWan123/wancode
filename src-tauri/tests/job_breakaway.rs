@@ -10,7 +10,14 @@
 //!
 //! harness=false：helper 模式需要本 exe 自我重入（breakaway 必须由 Job 内
 //! 的进程发起，只有我们自己的代码能带 CREATE_BREAKAWAY_FROM_JOB 标志）。
+//!
+//! 不链接 wancode_lib，而是 #[path] 直接把同一份源文件编进本 crate：引擎
+//! workspace 的 dev profile 是 panic=abort，而 cargo 强制测试目标 unwind，
+//! 链 lib 会因 panic 策略不兼容在 CI 上编译失败——测的仍是逐字同一实现。
 #![cfg(windows)]
+
+#[path = "../src/updater_launch.rs"]
+mod updater_launch;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -65,7 +72,7 @@ fn helper(mode: &str, dir: PathBuf) {
     let pid = match mode {
         // 走生产真实使用的 verified 入口（spawn + 原始句柄存活确认），
         // 把这条链整段锁进测试。孙进程 ping 常驻 60s，300ms 存活检查必过。
-        "breakaway" => wancode_lib::updater_launch::win::spawn_breakaway_verified(
+        "breakaway" => updater_launch::win::spawn_breakaway_verified(
             std::path::Path::new(GRANDCHILD),
             &GRANDCHILD_ARGS,
             300,
@@ -139,7 +146,7 @@ fn scenario(name: &str, breakaway_ok: bool, expect_alive: bool) -> u32 {
         }
         assert_ne!(pid, 0, "grandchild pid");
         assert!(
-            wancode_lib::updater_launch::win::process_alive(pid),
+            updater_launch::win::process_alive(pid),
             "孙进程应已在跑"
         );
 
@@ -147,7 +154,7 @@ fn scenario(name: &str, breakaway_ok: bool, expect_alive: bool) -> u32 {
         CloseHandle(job);
         std::thread::sleep(Duration::from_millis(400));
 
-        let alive = wancode_lib::updater_launch::win::process_alive(pid);
+        let alive = updater_launch::win::process_alive(pid);
         // 清理孙进程（若存活）
         if alive {
             let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
