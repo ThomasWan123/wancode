@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::UpdaterExt;
 
 /// download 与 install 两条命令之间暂存的安装器路径。
@@ -104,6 +104,8 @@ pub async fn updater_install(
     {
         let _ = path;
         let _ = app;
-        Err("非 Windows 平台走插件默认安装路径".into())
+        // 当前只发行 Windows 安装包；若未来出 macOS/Linux 包，这里应回落
+        // 插件默认 install()（那些平台没有 Job 问题），而不是报错。
+        Err("in-app update install is Windows-only in this build".into())
     }
 }
