@@ -76,3 +76,13 @@ will appear), then reopen itself."（装前提示）；随后帧序列显示应�
 真实安装未动。四项验收全部具备直接 UI 证据。
 
 结论：#129 修复在真机应用内验证通过。正式 0.18.8 待放行。
+
+## 2026-07-31 v0.18.8 正式发布（#129 收官）
+
+- 构建：main 88c0252，不含 updater-test-endpoint；防串线扫描主 exe 无 latest-test.json / v0.18.8-rc.1 / feature 名残留。
+- 资产 4 项：setup 24735622B（sha256 45d2d44f…）、.sig、msi 46764032B（fc714400…）、latest.json（仅指向 v0.18.8，gh-proxy 镜像 URL）。
+- 发布后验证：官方直链与镜像双下载 sha256 与本地一致；MZ 头正确；minisign（Ed25519+BLAKE2b，本地纯 python）双源 OK，keyid 01b6abd024deb275；.sig 与 latest.json signature 逐字一致。
+- v0.18.8 notes 与 v0.18.7 页面均已写明"本次必须手动安装一次"；v0.18.7 四资产未动。
+- 本机真实安装已手动升级 0.18.8（install exit=0，注册表 0.18.8，config.toml sha 前后一致 B0034454…）。
+- 审计证据保留：rc/0.18.8-rc.1 分支 + v0.18.8-rc.1 prerelease。
+- #129 关闭；#127 解冻排 v0.18.9；#126 待单独设计。
