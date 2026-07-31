@@ -7,6 +7,7 @@ mod engine_ops;
 mod review_ops;
 mod autotest;
 mod provider_ops;
+pub mod model_caps;
 pub mod updater_launch;
 mod updater_ops;
 
