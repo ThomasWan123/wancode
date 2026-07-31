@@ -261,6 +261,7 @@ pub fn run() {
             skills_ops::skills_create,
             skills_ops::skills_open,
             provider_ops::model_list,
+            provider_ops::image_send_check,
             provider_ops::model_caps_diagnostics,
             provider_ops::model_caps_reload,
             provider_ops::model_upsert,

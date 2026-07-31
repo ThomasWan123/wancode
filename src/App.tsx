@@ -19,6 +19,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
+import { parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
@@ -1405,7 +1406,7 @@ function App() {
         models: string[];
         current_model_id?: string;
         cwd: string;
-        model_block?: unknown; model_options?: unknown;
+        model_block?: unknown; model_options?: unknown; caps_config_issue?: unknown;
       }>(
         "agent_start",
         {
@@ -1424,6 +1425,11 @@ function App() {
       }
       if (r.models?.length) setModels(r.models);
       setModelOptions(parseModelOptions(r.model_options));
+      {
+        // #127-3：config.toml 损坏导致的全员能力 unknown 必须有可见原因
+        const ci = parseFileIssue(r.caps_config_issue);
+        if (ci) setError(t.capsConfigIssue(ci.kind, ci.message));
+      }
       if (r.current_model_id) setModel(r.current_model_id);
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
@@ -1784,6 +1790,32 @@ function App() {
       }
     }
     const imgs = pastedImages;
+    // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
+    // Block* 阻断并给出针对性引导；Warn* 二次确认可"仍然尝试"。
+    if (imgs.length > 0) {
+      let kind: ReturnType<typeof parseImageDecision> = null;
+      try {
+        kind = parseImageDecision(await invoke("image_send_check", { mainKey: model || null }));
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+      const blockMsg =
+        kind === "block_no_helper" ? t.imgBlockNoHelper
+        : kind === "block_helper_unavailable" ? t.imgBlockHelperUnavailable
+        : kind === "block_helper_not_vision" ? t.imgBlockHelperNotVision
+        : kind === "block_main_not_vision" ? t.imgBlockMainNotVision
+        : null;
+      if (blockMsg) {
+        setError(blockMsg);
+        return;
+      }
+      const warnMsg =
+        kind === "warn_helper_unknown" ? t.imgWarnHelperUnknown
+        : kind === "warn_main_unknown" ? t.imgWarnMainUnknown
+        : null;
+      if (warnMsg && !window.confirm(warnMsg)) return;
+    }
     setInput("");
     setPastedImages([]);
     sendText(text, imgs);

@@ -299,6 +299,64 @@ pub async fn model_remove(
     Ok(())
 }
 
+/// #127-3 粘图发送前有效路径判定。main_key = 当前主模型 catalog key。
+/// 语义走 model_caps::decide_image_path（PR 1 锁定）：转述开启看辅助
+/// 模型三态，转述关闭才查主模型。helper key 取 config [models].
+/// image_description；未配置 → Missing（引擎的编译默认是 xAI 模型，
+/// 在多 provider 目录中不可路由，如实按未配置引导）。config.toml 损坏
+/// 时返回错误（阻断发送并显示原因——比带着坏数据判定更诚实）。
+#[tauri::command]
+pub async fn image_send_check(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+    main_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use crate::caps_snapshot::{load_config_doc, model_option_caps};
+    use crate::model_caps::{decide_image_path, HelperStatus};
+
+    let transcribe_on = std::env::var("GROK_IMAGE_TRANSCRIBE")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let (doc, config_issue) = load_config_doc(&user_config_path());
+    if let Some(issue) = &config_issue {
+        return Err(format!("配置不可用，无法判定图片路径：{}", issue.message));
+    }
+    let snapshot = caps_state.snapshot();
+
+    let helper_key = doc
+        .get("models")
+        .and_then(|m| m.as_table_like())
+        .and_then(|t| t.get("image_description"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from);
+    let helper_in_catalog = |k: &str| {
+        doc.get("model")
+            .and_then(|m| m.as_table_like())
+            .map(|t| t.get(k).is_some())
+            .unwrap_or(false)
+    };
+    let helper_caps = helper_key
+        .as_deref()
+        .filter(|k| helper_in_catalog(k))
+        .map(|k| model_option_caps(&snapshot, k, &doc).caps);
+    let helper = match (&helper_key, &helper_caps) {
+        (None, _) => HelperStatus::Missing,
+        (Some(_), None) => HelperStatus::Unavailable,
+        (Some(_), Some(c)) => HelperStatus::Resolved(c),
+    };
+    let main_caps = main_key
+        .as_deref()
+        .map(|k| model_option_caps(&snapshot, k, &doc).caps)
+        .unwrap_or_default();
+    let decision = decide_image_path(transcribe_on, helper, &main_caps);
+    Ok(serde_json::json!({
+        "decision": decision,
+        "transcribe_on": transcribe_on,
+        "helper_key": helper_key,
+    }))
+}
+
 /// #127-2 设置页横幅数据：文件级问题 + 全量带归属诊断。
 #[tauri::command]
 pub async fn model_caps_diagnostics(

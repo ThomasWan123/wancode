@@ -248,6 +248,15 @@ ${p}
   updateInstalling: (v: string) =>
     `v${v} 下载完成。应用即将关闭并自动安装（会出现安装进度条），完成后自动重新打开。`,
   updateFailed: "更新失败：",
+  imgViaHelper: (helper: string) => `图片将由视觉辅助模型 ${helper} 转述后发送`,
+  imgBlockNoHelper: "当前未配置视觉辅助模型，图片无法发送。请在设置 → 模型 中配置一个支持视觉的模型作为 image_description。",
+  imgBlockHelperUnavailable: "配置的视觉辅助模型不在模型目录中（可能已被删除），图片无法发送。请到设置 → 模型 修复配置。",
+  imgBlockHelperNotVision: "配置的视觉辅助模型被标记为不支持视觉，图片无法发送。请更换为支持视觉的模型。",
+  imgWarnHelperUnknown: "视觉辅助模型的能力未知，图片可能无法识别。仍然尝试发送？",
+  imgBlockMainNotVision: "当前模型不支持图片输入，且图片转述已关闭。请换用视觉模型或开启图片转述。",
+  imgWarnMainUnknown: "当前模型的视觉能力未知，图片可能无法识别。仍然尝试发送？",
+  capsConfigIssue: (kind: string, msg: string) =>
+    `模型配置${kind === "parse_error" ? "解析失败" : "读取失败"}，模型能力显示为未知：${msg}`,
   updateSucceeded: (v: string) => `已成功升级到 v${v}`,
   updateIncomplete: (v: string) =>
     `上次升级到 v${v} 未完成——安装程序可能未能启动。请在设置里重试"检查更新"，或从官网重新下载安装。`,
@@ -597,6 +606,15 @@ Remove the worktree?`,
   updateInstalling: (v: string) =>
     `v${v} downloaded. The app will close and install automatically (a progress bar will appear), then reopen itself.`,
   updateFailed: "Update failed: ",
+  imgViaHelper: (helper: string) => `Images will be described by vision helper ${helper}`,
+  imgBlockNoHelper: "No vision helper model is configured; images cannot be sent. Set a vision-capable model as image_description in Settings → Models.",
+  imgBlockHelperUnavailable: "The configured vision helper is not in the model catalog (it may have been removed); images cannot be sent. Fix it in Settings → Models.",
+  imgBlockHelperNotVision: "The configured vision helper is marked as not supporting vision; images cannot be sent. Switch to a vision-capable model.",
+  imgWarnHelperUnknown: "The vision helper's capabilities are unknown; images may not be recognized. Send anyway?",
+  imgBlockMainNotVision: "The current model does not accept image input and image transcription is off. Use a vision model or enable transcription.",
+  imgWarnMainUnknown: "The current model's vision capability is unknown; images may not be recognized. Send anyway?",
+  capsConfigIssue: (kind: string, msg: string) =>
+    `Model config ${kind === "parse_error" ? "failed to parse" : "failed to read"}; capabilities shown as unknown: ${msg}`,
   updateSucceeded: (v: string) => `Successfully updated to v${v}`,
   updateIncomplete: (v: string) =>
     `The last update to v${v} did not finish — the installer may have failed to start. Retry "Check for updates" in Settings, or reinstall from the website.`,
