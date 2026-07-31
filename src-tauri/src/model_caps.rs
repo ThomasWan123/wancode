@@ -119,8 +119,28 @@ pub enum CapIssueKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapIssue {
+    /// 诊断归属的模型条目；顶层/父级问题为 None。
+    /// 两个模型同犯一种错时，UI 必须能分别挂到各自条目上。
+    pub catalog_key: Option<String>,
     pub field: String,
     pub kind: CapIssueKind,
+}
+
+impl CapIssue {
+    fn top(field: &str, kind: CapIssueKind) -> CapIssue {
+        CapIssue {
+            catalog_key: None,
+            field: field.into(),
+            kind,
+        }
+    }
+    fn entry(key: &str, field: &str, kind: CapIssueKind) -> CapIssue {
+        CapIssue {
+            catalog_key: Some(key.into()),
+            field: field.into(),
+            kind,
+        }
+    }
 }
 
 const CAP_FIELDS: [&str; 4] = ["text", "tool_use", "vision_input", "reasoning"];
@@ -144,33 +164,27 @@ impl ParsedWanCodeConfig {
         let mut out = ParsedWanCodeConfig::default();
         for (k, _) in doc.iter() {
             if !TOP_LEVEL_FIELDS.contains(&k) {
-                out.issues.push(CapIssue {
-                    field: k.to_string(),
-                    kind: CapIssueKind::UnknownField,
-                });
+                out.issues.push(CapIssue::top(k, CapIssueKind::UnknownField));
             }
         }
         let Some(mc_item) = doc.get("model_capabilities") else {
             return out;
         };
         let Some(mc) = mc_item.as_table_like() else {
-            out.issues.push(CapIssue {
-                field: "model_capabilities".into(),
-                kind: CapIssueKind::NotATable,
-            });
+            out.issues
+                .push(CapIssue::top("model_capabilities", CapIssueKind::NotATable));
             return out;
         };
         for (key, entry_item) in mc.iter() {
             match entry_item.as_table_like() {
                 Some(caps) => {
-                    let (ov, mut issues) = CapOverrides::from_caps_table(caps);
+                    let (ov, mut issues) = from_caps_table(key, caps);
                     out.issues.append(&mut issues);
                     out.overrides.insert(key.to_string(), ov);
                 }
-                None => out.issues.push(CapIssue {
-                    field: key.to_string(),
-                    kind: CapIssueKind::NotATable,
-                }),
+                None => out
+                    .issues
+                    .push(CapIssue::entry(key, key, CapIssueKind::NotATable)),
             }
         }
         out
@@ -182,42 +196,38 @@ impl ParsedWanCodeConfig {
     }
 }
 
-impl CapOverrides {
-    /// 从能力子表本体读取。
-    /// 类型错误 / 未知字段 → 逐条诊断（fail-visible），错误项按未配置解析。
-    pub fn from_caps_table(caps: &dyn toml_edit::TableLike) -> (CapOverrides, Vec<CapIssue>) {
-        let mut issues = Vec::new();
-        let mut get = |k: &str| -> Option<bool> {
-            match caps.get(k) {
-                None => None,
-                Some(v) => match v.as_bool() {
-                    Some(b) => Some(b),
-                    None => {
-                        issues.push(CapIssue {
-                            field: k.into(),
-                            kind: CapIssueKind::WrongType,
-                        });
-                        None
-                    }
-                },
-            }
-        };
-        let ov = CapOverrides {
-            text: get("text"),
-            tool_use: get("tool_use"),
-            vision_input: get("vision_input"),
-            reasoning: get("reasoning"),
-        };
-        for (k, _) in caps.iter() {
-            if !CAP_FIELDS.contains(&k) {
-                issues.push(CapIssue {
-                    field: k.to_string(),
-                    kind: CapIssueKind::UnknownField,
-                });
-            }
+/// 从能力子表本体读取（仅经 ParsedWanCodeConfig::parse 调用——私有，
+/// 保证诊断永远带模型归属，杜绝再产生无归属诊断的入口）。
+/// 类型错误 / 未知字段 → 逐条诊断（fail-visible），错误项按未配置解析。
+fn from_caps_table(
+    catalog_key: &str,
+    caps: &dyn toml_edit::TableLike,
+) -> (CapOverrides, Vec<CapIssue>) {
+    let mut issues = Vec::new();
+    let mut get = |k: &str| -> Option<bool> {
+        match caps.get(k) {
+            None => None,
+            Some(v) => match v.as_bool() {
+                Some(b) => Some(b),
+                None => {
+                    issues.push(CapIssue::entry(catalog_key, k, CapIssueKind::WrongType));
+                    None
+                }
+            },
         }
-        (ov, issues)
+    };
+    let ov = CapOverrides {
+        text: get("text"),
+        tool_use: get("tool_use"),
+        vision_input: get("vision_input"),
+        reasoning: get("reasoning"),
+    };
+    for (k, _) in caps.iter() {
+        if !CAP_FIELDS.contains(&k) {
+            issues.push(CapIssue::entry(catalog_key, k, CapIssueKind::UnknownField));
+        }
     }
+    (ov, issues)
 }
 
 /// WanCode 自有配置文件：与引擎 config.toml 同目录、引擎绝不解析。
@@ -518,19 +528,22 @@ image_description = true
         );
         // 类型错误的项按未配置解析，但诊断在
         assert_eq!(ov.vision_input, None);
-        assert!(issues.contains(&CapIssue {
-            field: "vision_input".into(),
-            kind: CapIssueKind::WrongType
-        }));
-        // 拼错字段与"路由角色混进能力表"都必须点名
-        assert!(issues.contains(&CapIssue {
-            field: "visoin_input".into(),
-            kind: CapIssueKind::UnknownField
-        }));
-        assert!(issues.contains(&CapIssue {
-            field: "image_description".into(),
-            kind: CapIssueKind::UnknownField
-        }));
+        assert!(issues.contains(&CapIssue::entry(
+            "custom",
+            "vision_input",
+            CapIssueKind::WrongType
+        )));
+        // 拼错字段与"路由角色混进能力表"都必须点名且带归属
+        assert!(issues.contains(&CapIssue::entry(
+            "custom",
+            "visoin_input",
+            CapIssueKind::UnknownField
+        )));
+        assert!(issues.contains(&CapIssue::entry(
+            "custom",
+            "image_description",
+            CapIssueKind::UnknownField
+        )));
         // 能力条目不是表
         let (_, issues) = overrides_for(
             r#"
@@ -541,10 +554,7 @@ custom = "all"
         );
         assert_eq!(
             issues,
-            vec![CapIssue {
-                field: "custom".into(),
-                kind: CapIssueKind::NotATable
-            }]
+            vec![CapIssue::entry("custom", "custom", CapIssueKind::NotATable)]
         );
     }
 
@@ -557,10 +567,7 @@ custom = "all"
         assert_eq!(ov, CapOverrides::default());
         assert_eq!(
             issues,
-            vec![CapIssue {
-                field: "model_capabilities".into(),
-                kind: CapIssueKind::NotATable
-            }]
+            vec![CapIssue::top("model_capabilities", CapIssueKind::NotATable)]
         );
         // 条目缺失才是零诊断（文件为空 / 表内无该 key）
         let (_, issues) = overrides_for("", "custom");
@@ -584,10 +591,7 @@ vision_input = true
         assert_eq!(ov, CapOverrides::default(), "拼错的表不得生效");
         assert_eq!(
             issues,
-            vec![CapIssue {
-                field: "model_capabilites".into(),
-                kind: CapIssueKind::UnknownField
-            }]
+            vec![CapIssue::top("model_capabilites", CapIssueKind::UnknownField)]
         );
         // 误把 config.toml 的 [model.X] 粘进 wancode.toml：同样点名
         let (_, issues) = overrides_for(
@@ -599,11 +603,39 @@ base_url = "https://example.com/v1"
         );
         assert_eq!(
             issues,
-            vec![CapIssue {
-                field: "model".into(),
-                kind: CapIssueKind::UnknownField
-            }]
+            vec![CapIssue::top("model", CapIssueKind::UnknownField)]
         );
+    }
+
+    /// 多模型隔离：坏条目不污染好条目，诊断明确指向出错的那一个。
+    #[test]
+    fn bad_entry_is_attributed_and_does_not_pollute_good_entry() {
+        let doc: toml_edit::DocumentMut = r#"
+[model_capabilities.model-a]
+vision_input = true
+
+[model_capabilities.model-b]
+vision_input = "yes"
+tool_use = false
+"#
+        .parse()
+        .unwrap();
+        let parsed = ParsedWanCodeConfig::parse(&doc);
+        // A 有效并保留，不受 B 影响
+        assert_eq!(parsed.for_model("model-a").vision_input, Some(true));
+        // 诊断明确指向 B 的 vision_input，且仅此一条
+        assert_eq!(
+            parsed.issues,
+            vec![CapIssue::entry(
+                "model-b",
+                "vision_input",
+                CapIssueKind::WrongType
+            )]
+        );
+        // B 的错误字段按未配置解析，其余有效字段保留
+        let b = parsed.for_model("model-b");
+        assert_eq!(b.vision_input, None);
+        assert_eq!(b.tool_use, Some(false));
     }
 
     /// 解析器是纯函数：同输入必同输出（含来源）。
