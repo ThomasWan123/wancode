@@ -81,6 +81,9 @@ pub struct StartResult {
     /// name + sanitized endpoint host come along so two same-named models are
     /// distinguishable in the UI (v0.18.7-B).
     pub model_options: Vec<ModelOption>,
+    /// #127-2：config.toml 读取/解析失败时的文件级诊断——能力元数据问题
+    /// 不阻止会话启动，但绝不静默（全员 unknown 必须有可见原因）。
+    pub caps_config_issue: Option<crate::caps_snapshot::FileIssue>,
 }
 
 #[derive(serde::Serialize, Clone, Default)]
@@ -355,13 +358,11 @@ pub(crate) async fn start_inner(
         (resp.session_id, resp.models)
     };
     // #127-2 聊天目录链：同一世代快照 + config 文档，逐 option 出能力。
+    // 配置读取/解析失败不阻止会话启动，但必须作为结构化诊断随
+    // StartResult 返回——禁止 unwrap_or_default 静默降级为全员 unknown。
     let caps_snapshot = app.state::<crate::caps_snapshot::CapsState>().snapshot();
-    let caps_config_doc: toml_edit::DocumentMut = std::fs::read_to_string(
-        crate::config_core::user_config_path(),
-    )
-    .unwrap_or_default()
-    .parse()
-    .unwrap_or_default();
+    let (caps_config_doc, caps_config_issue) =
+        crate::caps_snapshot::load_config_doc(&crate::config_core::user_config_path());
     let (model_ids, current_model_id, model_options): (
         Vec<String>,
         Option<String>,
@@ -430,6 +431,7 @@ pub(crate) async fn start_inner(
         cwd: cwd.to_string_lossy().into_owned(),
         model_block,
         model_options,
+        caps_config_issue,
     })
 }
 

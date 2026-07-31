@@ -125,6 +125,35 @@ impl CapsState {
     }
 }
 
+/// 生产 config.toml 文档加载：聊天链取 slug/base_url 专用。
+/// 缺失 = 空文档零诊断（全新安装的常态）；读取失败 / 解析失败 →
+/// 文件级诊断 + 空文档——所有 option 会落 unknown，但**必须**伴随可见
+/// 诊断，绝不允许 unwrap_or_default 式的静默降级（复核 P1）。
+pub fn load_config_doc(path: &std::path::Path) -> (toml_edit::DocumentMut, Option<FileIssue>) {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
+            Ok(doc) => (doc, None),
+            Err(e) => (
+                toml_edit::DocumentMut::default(),
+                Some(FileIssue {
+                    kind: FileIssueKind::ParseError,
+                    message: format!("config.toml: {e}"),
+                }),
+            ),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (toml_edit::DocumentMut::default(), None)
+        }
+        Err(e) => (
+            toml_edit::DocumentMut::default(),
+            Some(FileIssue {
+                kind: FileIssueKind::ReadError,
+                message: format!("config.toml: {e}"),
+            }),
+        ),
+    }
+}
+
 /// 一个模型在某条 UI 链上的最终能力视图：能力 + 该条目归属的诊断。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ResolvedModelCaps {
@@ -288,6 +317,32 @@ base_url = "{ZHIPU_OPEN}"
         // config.toml 无条目的 key：落 unknown（不猜测）
         let ghost = model_option_caps(&snap, "ghost", &config_doc);
         assert_eq!(ghost.caps.vision_input.state, CapState::Unknown);
+    }
+
+    /// 损坏的 config.toml：聊天链加载必须出文件级诊断——空文档导致的
+    /// 全员 unknown 只有在伴随可见诊断时才合法（复核 P1：禁静默降级）。
+    #[test]
+    fn corrupted_config_doc_yields_visible_issue_not_silent_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[model.broken
+not toml").unwrap();
+        let (doc, issue) = load_config_doc(&path);
+        let issue = issue.expect("解析失败必须出文件级诊断");
+        assert_eq!(issue.kind, FileIssueKind::ParseError);
+        assert!(issue.message.contains("config.toml"));
+        // 空文档下 option 落 unknown——但调用方持有 issue，非静默
+        let snap = CapabilitySnapshot::empty();
+        let r = model_option_caps(&snap, "any", &doc);
+        assert_eq!(r.caps.vision_input.state, CapState::Unknown);
+        // 缺失（全新安装）才是零诊断
+        let (_, issue) = load_config_doc(&dir.path().join("absent.toml"));
+        assert!(issue.is_none());
+        // 读取失败（目录冒充文件）→ ReadError
+        let as_dir = dir.path().join("dir.toml");
+        std::fs::create_dir(&as_dir).unwrap();
+        let (_, issue) = load_config_doc(&as_dir);
+        assert_eq!(issue.map(|i| i.kind), Some(FileIssueKind::ReadError));
     }
 
     /// 热加载：更新 wancode.toml → reload() → 无需重启即得新能力；
