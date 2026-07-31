@@ -68,6 +68,11 @@ E2E 首跑暴露脚本断言 bug：真实安装版本硬编码 ==NewVersion（�
 
 隔离与恢复：/D 隔离安装；注册表快照→导入恢复（DisplayVersion=0.18.7、InstallLocation=真实目录）；真实安装 sha 875F3504… 全程不变；隔离目录与暂存已清理。
 
-诚实备注：全链仅 ~8 秒，未截到下载进度/装前提示的中间帧——该两项的直接证据为机制层（updater://progress 事件接 UI + runUpdateFlow 文案，23 条单测）加本次端到端结果，非界面截图。
+定向补测（同日第二轮，~150ms 连拍 129 帧）：已捕获真实 UI 帧——
+"Downloading v0.18.8-rc.1... 0% / 16%"（下载进度）与 "v0.18.8-rc.1
+downloaded. The app will close and install automatically (a progress bar
+will appear), then reopen itself."（装前提示）；随后帧序列显示应用退出、
+重启回到首页。第二轮同样升级成功（exe=0.18.8-rc.1）、注册表恢复、
+真实安装未动。四项验收全部具备直接 UI 证据。
 
 结论：#129 修复在真机应用内验证通过。正式 0.18.8 待放行。
