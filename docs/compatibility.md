@@ -22,11 +22,11 @@ usage 与错误/限流格式 / 上下文长度与压缩阈值 / system-developer
 辅助模型路由 / 并行工具调用 / 认证方式。历史兼容补丁（object 字段宽容化、
 4v-flash max_tokens、429 文案）均源于此类差异。
 
-## v0.18.8 兼容性治理（范围定义）
+## v0.18.9 兼容性治理（范围定义）
 
 1. 模型能力声明：Text / Tool Use / Vision / Reasoning / Image Description / Context Window
 2. UI 能力徽章；不支持图片的模型在发送前直接提醒（呼应"垫底逻辑"常设要求）
 3. Provider 合规测试套件：基本回复、流式、Tool Calling、错误解析、上下文压缩、多模态、凭据与端点隔离
 4. 本矩阵随每次发布更新
 
-v0.18.7 不扩适配范围，先稳定发布。
+v0.18.8 为更新器 P0 热修专版；治理自 v0.18.9 启动。
