@@ -1,4 +1,4 @@
-//! #127 能力模型与统一解析器（v0.18.9 兼容性治理第 1 步）。
+//! #127 能力模型与统一解析器（v0.18.9 兼容性治理第 1 步，复核修订二版）。
 //!
 //! 三个概念分开，不许混淆（复核定案）：
 //!   - **固有能力**（本模块）：模型自身能做什么——text / tool_use /
@@ -9,11 +9,17 @@
 //!   - **数值配置**：context_window 等已有数值语义，不做成布尔能力。
 //!
 //! 解析优先级：用户显式配置 > 内置能力表 > unknown。
-//! 内置表按**上游 slug + endpoint 类型**匹配——绝不按 catalog key
-//! （key 可被用户任意重命名）。结果附带来源（config / built_in / unknown）。
+//! 内置表是**精确 slug allowlist**（无通配），逐项 Option<bool>：未验证的
+//! 项写 None（落 unknown），绝不把"没测过"写成"不支持"。匹配维度为
+//! provider（按真实 hostname 域名边界判定）+ 上游 slug——绝不按 catalog
+//! key（可被用户任意重命名）。结果附带来源（config / built_in / unknown）。
+//!
+//! 配置解析 fail-visible：类型错误、未知字段返回诊断（CapIssue），
+//! 不静默当作未配置。
 //!
 //! 设置页（provider_ops::model_list）与聊天目录（ACP ModelOption 链）
-//! 必须都经由本解析器取能力，杜绝双列表漂移（v0.18.7-B 的教训）。
+//! 必须都经由本解析器取能力，杜绝双列表漂移（v0.18.7-B 的教训）；
+//! 双真实数据链的一致性门槛在 PR 2 接线时建立。
 
 use serde::Serialize;
 
@@ -30,7 +36,7 @@ pub enum CapState {
 pub enum CapSource {
     /// 用户在 config.toml [model.X.capabilities] 显式声明。
     Config,
-    /// 内置能力表按 slug + endpoint 匹配。
+    /// 内置能力表按 provider + slug 精确匹配。
     BuiltIn,
     /// 无任何依据。
     Unknown,
@@ -47,24 +53,17 @@ impl Cap {
         state: CapState::Unknown,
         source: CapSource::Unknown,
     };
-    fn built_in(supported: bool) -> Cap {
-        Cap {
-            state: if supported {
-                CapState::Supported
-            } else {
-                CapState::Unsupported
+    fn from_opt(v: Option<bool>, source: CapSource) -> Cap {
+        match v {
+            None => Cap::UNKNOWN,
+            Some(true) => Cap {
+                state: CapState::Supported,
+                source,
             },
-            source: CapSource::BuiltIn,
-        }
-    }
-    fn config(supported: bool) -> Cap {
-        Cap {
-            state: if supported {
-                CapState::Supported
-            } else {
-                CapState::Unsupported
+            Some(false) => Cap {
+                state: CapState::Unsupported,
+                source,
             },
-            source: CapSource::Config,
         }
     }
 }
@@ -87,7 +86,7 @@ impl ModelCaps {
     };
 }
 
-/// config.toml [model.X.capabilities] 的原始覆盖（每项可缺省）。
+/// 逐项可缺省的能力声明（内置表条目与用户覆盖共用同一形状）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapOverrides {
     pub text: Option<bool>,
@@ -96,24 +95,81 @@ pub struct CapOverrides {
     pub reasoning: Option<bool>,
 }
 
+/// 配置解析诊断：错误必须可见，不许静默当作未配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapIssueKind {
+    /// 字段值不是布尔（如 vision_input = "true"）。该项按未配置解析，
+    /// 但诊断必须上浮到 UI/日志。
+    WrongType,
+    /// capabilities 子表里出现未知字段（拼错或不属于固有能力，如
+    /// image_description）。
+    UnknownField,
+    /// capabilities 本身不是表。
+    NotATable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapIssue {
+    pub field: String,
+    pub kind: CapIssueKind,
+}
+
+const CAP_FIELDS: [&str; 4] = ["text", "tool_use", "vision_input", "reasoning"];
+
 impl CapOverrides {
-    /// 从模型条目的 toml 表读取 capabilities 子表；子表缺失 → 全 None
-    /// （旧配置零迁移）。非布尔值按缺省处理（宽容读取，写入端另行校验）。
-    pub fn from_toml(item: &dyn toml_edit::TableLike) -> CapOverrides {
-        let Some(caps) = item.get("capabilities").and_then(|v| v.as_table_like()) else {
-            return CapOverrides::default();
+    /// 从模型条目的 toml 表读取 capabilities 子表。
+    /// 子表缺失 → (default, 空诊断)：旧配置零迁移。
+    /// 类型错误 / 未知字段 → 逐条诊断（fail-visible），错误项按未配置解析。
+    pub fn from_toml(item: &dyn toml_edit::TableLike) -> (CapOverrides, Vec<CapIssue>) {
+        let Some(caps_item) = item.get("capabilities") else {
+            return (CapOverrides::default(), Vec::new());
         };
-        let get = |k: &str| caps.get(k).and_then(|v| v.as_bool());
-        CapOverrides {
+        let Some(caps) = caps_item.as_table_like() else {
+            return (
+                CapOverrides::default(),
+                vec![CapIssue {
+                    field: "capabilities".into(),
+                    kind: CapIssueKind::NotATable,
+                }],
+            );
+        };
+        let mut issues = Vec::new();
+        let mut get = |k: &str| -> Option<bool> {
+            match caps.get(k) {
+                None => None,
+                Some(v) => match v.as_bool() {
+                    Some(b) => Some(b),
+                    None => {
+                        issues.push(CapIssue {
+                            field: k.into(),
+                            kind: CapIssueKind::WrongType,
+                        });
+                        None
+                    }
+                },
+            }
+        };
+        let ov = CapOverrides {
             text: get("text"),
             tool_use: get("tool_use"),
             vision_input: get("vision_input"),
             reasoning: get("reasoning"),
+        };
+        for (k, _) in caps.iter() {
+            if !CAP_FIELDS.contains(&k) {
+                issues.push(CapIssue {
+                    field: k.to_string(),
+                    kind: CapIssueKind::UnknownField,
+                });
+            }
         }
+        (ov, issues)
     }
 }
 
-/// endpoint 归类：内置表的匹配维度之一（slug 在不同服务商可能撞名）。
+/// endpoint 归类：按真实 hostname 的域名边界判定，
+/// 杜绝 `notz.ai.evil` / 查询参数携带官方域名的误判。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
     Zhipu,
@@ -121,96 +177,115 @@ enum Provider {
     Other,
 }
 
+fn host_in_domain(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
 fn provider_of(base_url: &str) -> Provider {
-    let u = base_url.to_ascii_lowercase();
-    if u.contains("bigmodel.cn") || u.contains("z.ai") {
+    let Ok(u) = url::Url::parse(base_url) else {
+        return Provider::Other;
+    };
+    let Some(host) = u.host_str() else {
+        return Provider::Other;
+    };
+    let host = host.to_ascii_lowercase();
+    if host_in_domain(&host, "bigmodel.cn") || host_in_domain(&host, "z.ai") {
         Provider::Zhipu
-    } else if u.contains("deepseek.com") {
+    } else if host_in_domain(&host, "deepseek.com") {
         Provider::DeepSeek
     } else {
         Provider::Other
     }
 }
 
-/// 内置能力表：按（provider, 上游 slug）给出已知能力。
-/// 只收录我们真实验证过或官方文档明确的组合；拿不准的一律不进表
-/// （落到 unknown，宁可让 UI 显示"未知"也不虚标）。
-fn built_in_caps(slug: &str, provider: Provider) -> Option<ModelCaps> {
+/// 内置能力表：精确 slug allowlist，逐项 Option<bool>。
+/// 收录纪律：只写有实证（dogfooding/发布门/官方文档明确）的项；
+/// 未验证 → None（unknown），绝不写成 Some(false)。
+fn built_in_caps(slug: &str, provider: Provider) -> CapOverrides {
     let s = slug.to_ascii_lowercase();
-    let known = |tool_use: bool, vision: bool, reasoning: bool| {
-        Some(ModelCaps {
-            text: Cap::built_in(true),
-            tool_use: Cap::built_in(tool_use),
-            vision_input: Cap::built_in(vision),
-            reasoning: Cap::built_in(reasoning),
-        })
-    };
-    match provider {
-        Provider::Zhipu => {
-            // 视觉系列：glm-4v* / glm-*.*v（如 glm-4.5v）
-            if s.starts_with("glm-4v") || (s.starts_with("glm-") && s.ends_with('v')) {
-                // glm-4v-flash 实测：看图可用；作为 agent 主模型工具调用未验证
-                known(false, true, false)
-            } else if s.starts_with("glm-5") || s.starts_with("glm-4") {
-                // 文本编码系列（Coding Plan 主路径 + 开放平台）：
-                // dogfooding 全程 tool calling；不接受图片输入
-                known(true, false, false)
-            } else {
-                None
-            }
-        }
-        Provider::DeepSeek => {
-            if s == "deepseek-chat" {
-                known(true, false, false)
-            } else if s == "deepseek-reasoner" {
-                // R1 系：reasoning_content 流；vision 无；tool calling 随版本
-                // 变化大，不虚标 → 单项留 unknown
-                Some(ModelCaps {
-                    text: Cap::built_in(true),
-                    tool_use: Cap::UNKNOWN,
-                    vision_input: Cap::built_in(false),
-                    reasoning: Cap::built_in(true),
-                })
-            } else {
-                None
-            }
-        }
-        Provider::Other => None,
+    match (provider, s.as_str()) {
+        // 智谱视觉辅助默认模型：看图为 v0.18.1 起发布门验证路径；
+        // 作为 agent 主模型的 tool use / reasoning 未验证 → unknown。
+        (Provider::Zhipu, "glm-4v-flash") => CapOverrides {
+            text: Some(true),
+            vision_input: Some(true),
+            tool_use: None,
+            reasoning: None,
+        },
+        // Coding Plan / 开放平台文本编码系列：dogfooding 全程 tool calling；
+        // 图片输入被端点拒绝（v0.18.1 修视觉路由的起因，实证）。
+        (Provider::Zhipu, "glm-5.2" | "glm-5-turbo" | "glm-4-flash") => CapOverrides {
+            text: Some(true),
+            tool_use: Some(true),
+            vision_input: Some(false),
+            reasoning: None,
+        },
+        // 2026-07-29 smoke 6/6；官方明确非视觉、非 reasoner。
+        (Provider::DeepSeek, "deepseek-chat") => CapOverrides {
+            text: Some(true),
+            tool_use: Some(true),
+            vision_input: Some(false),
+            reasoning: Some(false),
+        },
+        // R1 系：reasoning 官方明确；vision 官方明确无；
+        // tool calling 随版本变化大，未验证 → unknown。
+        (Provider::DeepSeek, "deepseek-reasoner") => CapOverrides {
+            text: Some(true),
+            reasoning: Some(true),
+            vision_input: Some(false),
+            tool_use: None,
+        },
+        _ => CapOverrides::default(),
     }
 }
 
 /// 权威解析器：设置页与聊天目录唯一入口。
 /// catalog key 不参与匹配——key 可重命名，slug + endpoint 才是身份。
 pub fn resolve_caps(slug: &str, base_url: &str, overrides: &CapOverrides) -> ModelCaps {
-    let mut caps = built_in_caps(slug, provider_of(base_url)).unwrap_or(ModelCaps::UNKNOWN);
-    if let Some(v) = overrides.text {
-        caps.text = Cap::config(v);
-    }
-    if let Some(v) = overrides.tool_use {
-        caps.tool_use = Cap::config(v);
-    }
-    if let Some(v) = overrides.vision_input {
-        caps.vision_input = Cap::config(v);
-    }
-    if let Some(v) = overrides.reasoning {
-        caps.reasoning = Cap::config(v);
-    }
+    let built = built_in_caps(slug, provider_of(base_url));
+    let pick = |ov: Option<bool>, bi: Option<bool>| -> Cap {
+        if ov.is_some() {
+            Cap::from_opt(ov, CapSource::Config)
+        } else {
+            Cap::from_opt(bi, CapSource::BuiltIn)
+        }
+    };
+    // from_opt(None, BuiltIn) 落 Cap::UNKNOWN（来源 Unknown），语义正确
+    let mut caps = ModelCaps::UNKNOWN;
+    caps.text = pick(overrides.text, built.text);
+    caps.tool_use = pick(overrides.tool_use, built.tool_use);
+    caps.vision_input = pick(overrides.vision_input, built.vision_input);
+    caps.reasoning = pick(overrides.reasoning, built.reasoning);
     caps
 }
 
 // ── 图片路径决策（纯函数，UI 在后续 PR 接线） ──────────────────────────
+
+/// 视觉辅助模型的解析状态。"配置了"≠"可用"：已删除、无法路由的辅助
+/// 模型必须是 Unavailable，不许拿到 AllowViaDescription。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperStatus<'a> {
+    /// 未配置视觉辅助模型。
+    Missing,
+    /// 配置了但解析失败（条目已删除 / 无法路由 / Key 缺失）。
+    Unavailable,
+    /// 成功解析到目录内可路由的模型，附其能力。
+    Resolved(&'a ModelCaps),
+}
 
 /// 粘图发送前的有效路径判定结果。
 /// 语义（复核定案）：图片可达性取决于**转述链路**优先，而非主模型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImagePathDecision {
-    /// 转述开启且辅助视觉模型有效：放行（即使主模型纯文本）。
+    /// 转述开启且辅助视觉模型已解析且支持视觉：放行（即使主模型纯文本）。
     AllowViaDescription,
     /// 转述关闭、主模型原生支持视觉：放行。
     AllowNativeVision,
-    /// 转述开启但辅助模型缺失：阻断，引导配置视觉辅助模型。
+    /// 转述开启但未配置辅助模型：阻断，引导配置。
     BlockNoHelper,
+    /// 转述开启、辅助模型配置了但解析失败：阻断，引导修复配置。
+    BlockHelperUnavailable,
     /// 转述开启但辅助模型明确不支持视觉：阻断，引导更换。
     BlockHelperNotVision,
     /// 转述开启、辅助模型能力未知：警告 + 可"仍然尝试"。
@@ -222,17 +297,16 @@ pub enum ImagePathDecision {
 }
 
 /// transcribe_on：GROK_IMAGE_TRANSCRIBE 是否启用（当前默认 1，见 lib.rs）。
-/// helper：已配置的视觉辅助模型能力（None = 未配置）。
-/// main：当前主模型能力。
 pub fn decide_image_path(
     transcribe_on: bool,
-    helper: Option<&ModelCaps>,
+    helper: HelperStatus<'_>,
     main: &ModelCaps,
 ) -> ImagePathDecision {
     if transcribe_on {
         match helper {
-            None => ImagePathDecision::BlockNoHelper,
-            Some(h) => match h.vision_input.state {
+            HelperStatus::Missing => ImagePathDecision::BlockNoHelper,
+            HelperStatus::Unavailable => ImagePathDecision::BlockHelperUnavailable,
+            HelperStatus::Resolved(h) => match h.vision_input.state {
                 CapState::Supported => ImagePathDecision::AllowViaDescription,
                 CapState::Unsupported => ImagePathDecision::BlockHelperNotVision,
                 CapState::Unknown => ImagePathDecision::WarnHelperUnknown,
@@ -255,7 +329,7 @@ mod tests {
     const ZHIPU_CODING: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
     const DEEPSEEK: &str = "https://api.deepseek.com";
 
-    fn parse_overrides(toml: &str) -> CapOverrides {
+    fn parse_first_model(toml: &str) -> (CapOverrides, Vec<CapIssue>) {
         let doc: toml_edit::DocumentMut = toml.parse().unwrap();
         let item = doc
             .get("model")
@@ -266,7 +340,7 @@ mod tests {
         CapOverrides::from_toml(item)
     }
 
-    /// RED ①：显式 false 覆盖内置 true——用户比内置表更权威。
+    /// ①：显式 false 覆盖内置 true——用户比内置表更权威。
     #[test]
     fn explicit_false_overrides_built_in_true() {
         let ov = CapOverrides {
@@ -276,21 +350,21 @@ mod tests {
         let caps = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &ov);
         assert_eq!(caps.vision_input.state, CapState::Unsupported);
         assert_eq!(caps.vision_input.source, CapSource::Config);
-        // 未覆盖的项仍来自内置表
+        // 未覆盖的已验证项仍来自内置表
         assert_eq!(caps.text.source, CapSource::BuiltIn);
     }
 
-    /// RED ②：catalog key 重命名不影响内置匹配——身份是 slug + endpoint。
+    /// ②：catalog key 重命名不影响内置匹配——身份是 slug + endpoint。
     /// （解析器签名根本不收 key，此测试锁住"永远不加 key 参数"的契约。）
     #[test]
     fn renamed_catalog_key_still_matches_built_in() {
-        // 模拟用户把 key 改成 "my-eyes"，slug/base_url 不变
         let caps = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &CapOverrides::default());
         assert_eq!(caps.vision_input.state, CapState::Supported);
         assert_eq!(caps.vision_input.source, CapSource::BuiltIn);
     }
 
-    /// RED ③：未知模型保持 unknown——不虚标、不默认支持。
+    /// ③：未知模型保持 unknown——不虚标、不默认支持；
+    /// 撞名 slug + 陌生 endpoint 不得借表。
     #[test]
     fn unknown_model_stays_unknown() {
         let caps = resolve_caps("mystery-1", "https://example.com/v1", &CapOverrides::default());
@@ -298,15 +372,60 @@ mod tests {
             assert_eq!(c.state, CapState::Unknown);
             assert_eq!(c.source, CapSource::Unknown);
         }
-        // 撞名 slug 但陌生 endpoint：同样不得借智谱的表
         let caps = resolve_caps("glm-4v-flash", "https://example.com/v1", &CapOverrides::default());
         assert_eq!(caps.vision_input.state, CapState::Unknown);
     }
 
-    /// RED ④：旧配置（无 capabilities 子表）正常反序列化，全走内置/unknown。
+    /// 内置表纪律：未验证项是 unknown，不是 unsupported。
+    /// （glm-4v-flash 的 tool_use 没测过——绝不许写成"不支持"。）
+    #[test]
+    fn unverified_built_in_items_stay_unknown_not_unsupported() {
+        let caps = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &CapOverrides::default());
+        assert_eq!(caps.tool_use.state, CapState::Unknown);
+        assert_eq!(caps.tool_use.source, CapSource::Unknown);
+        let caps = resolve_caps("deepseek-reasoner", DEEPSEEK, &CapOverrides::default());
+        assert_eq!(caps.tool_use.state, CapState::Unknown);
+        assert_eq!(caps.reasoning.state, CapState::Supported);
+    }
+
+    /// provider 判定按真实 hostname 域名边界：伪造域名、路径/查询串里
+    /// 携带官方域名都不得误判。
+    #[test]
+    fn provider_matching_respects_domain_boundaries() {
+        // 官方（含子域）
+        for u in [
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.z.ai/v1",
+        ] {
+            assert_eq!(
+                resolve_caps("glm-4v-flash", u, &CapOverrides::default())
+                    .vision_input
+                    .state,
+                CapState::Supported,
+                "{u}"
+            );
+        }
+        // 伪造与携带
+        for u in [
+            "https://notz.ai.evil/v1",
+            "https://evil.com/?u=open.bigmodel.cn",
+            "https://fakebigmodel.cn.attacker.io/v4",
+            "not a url",
+        ] {
+            assert_eq!(
+                resolve_caps("glm-4v-flash", u, &CapOverrides::default())
+                    .vision_input
+                    .state,
+                CapState::Unknown,
+                "{u}"
+            );
+        }
+    }
+
+    /// ④：旧配置（无 capabilities 子表）正常解析，零诊断，全走内置/unknown。
     #[test]
     fn legacy_config_without_capabilities_parses() {
-        let ov = parse_overrides(
+        let (ov, issues) = parse_first_model(
             r#"
 [model.glm-4v-flash]
 model = "glm-4v-flash"
@@ -315,15 +434,13 @@ env_key = "ZHIPU_API_KEY"
 "#,
         );
         assert_eq!(ov, CapOverrides::default());
-        let caps = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &ov);
-        assert_eq!(caps.vision_input.state, CapState::Supported);
-        assert_eq!(caps.vision_input.source, CapSource::BuiltIn);
+        assert!(issues.is_empty());
     }
 
     /// 新配置格式解析：capabilities 子表逐项可缺省。
     #[test]
     fn config_capabilities_subtable_parses() {
-        let ov = parse_overrides(
+        let (ov, issues) = parse_first_model(
             r#"
 [model.custom]
 model = "custom-llm"
@@ -334,79 +451,165 @@ vision_input = true
 tool_use = false
 "#,
         );
+        assert!(issues.is_empty());
         assert_eq!(ov.vision_input, Some(true));
         assert_eq!(ov.tool_use, Some(false));
         assert_eq!(ov.text, None);
         let caps = resolve_caps("custom-llm", "https://example.com/v1", &ov);
-        assert_eq!(caps.vision_input.state, CapState::Supported);
         assert_eq!(caps.vision_input.source, CapSource::Config);
         assert_eq!(caps.text.state, CapState::Unknown);
     }
 
-    /// RED ⑤：设置页与聊天目录必须得到完全相同的结果——两条链的适配层
-    /// 都只许传 (slug, base_url, overrides) 进同一个 resolve_caps。
-    /// 此测试锁住解析器为纯函数：同输入必同输出（含来源）。
+    /// fail-visible：类型错误与未知字段必须出诊断，不许静默当作未配置。
     #[test]
-    fn settings_and_chat_chains_get_identical_results() {
+    fn config_errors_produce_visible_diagnostics() {
+        let (ov, issues) = parse_first_model(
+            r#"
+[model.custom]
+model = "custom-llm"
+base_url = "https://example.com/v1"
+
+[model.custom.capabilities]
+vision_input = "true"
+visoin_input = true
+image_description = true
+"#,
+        );
+        // 类型错误的项按未配置解析，但诊断在
+        assert_eq!(ov.vision_input, None);
+        assert!(issues.contains(&CapIssue {
+            field: "vision_input".into(),
+            kind: CapIssueKind::WrongType
+        }));
+        // 拼错字段与"路由角色混进能力表"都必须点名
+        assert!(issues.contains(&CapIssue {
+            field: "visoin_input".into(),
+            kind: CapIssueKind::UnknownField
+        }));
+        assert!(issues.contains(&CapIssue {
+            field: "image_description".into(),
+            kind: CapIssueKind::UnknownField
+        }));
+        // capabilities 不是表
+        let (_, issues) = parse_first_model(
+            r#"
+[model.custom]
+model = "custom-llm"
+capabilities = "all"
+"#,
+        );
+        assert_eq!(
+            issues,
+            vec![CapIssue {
+                field: "capabilities".into(),
+                kind: CapIssueKind::NotATable
+            }]
+        );
+    }
+
+    /// 解析器是纯函数：同输入必同输出（含来源）。
+    /// 注：这只证明确定性；设置页与聊天目录两条**真实数据链**的一致性
+    /// 门槛在 PR 2 接线时建立。
+    #[test]
+    fn resolver_is_pure_and_deterministic() {
         let ov = CapOverrides {
             reasoning: Some(true),
             ..Default::default()
         };
-        let a = resolve_caps("deepseek-chat", DEEPSEEK, &ov); // 设置页链
-        let b = resolve_caps("deepseek-chat", DEEPSEEK, &ov); // 聊天目录链
+        let a = resolve_caps("deepseek-chat", DEEPSEEK, &ov);
+        let b = resolve_caps("deepseek-chat", DEEPSEEK, &ov);
         assert_eq!(a, b);
     }
 
-    /// RED ⑥：文本主模型 + 有效视觉辅助 + 转述开启 → 允许粘图。
+    /// ⑥：文本主模型 + 已解析且支持视觉的辅助 + 转述开启 → 允许粘图。
     /// （这正是产品现状：GLM-5.2 纯文本 + glm-4v-flash 转述。）
     #[test]
-    fn text_main_with_valid_helper_allows_images() {
+    fn text_main_with_resolved_helper_allows_images() {
         let main = resolve_caps("glm-5.2", ZHIPU_CODING, &CapOverrides::default());
         let helper = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &CapOverrides::default());
         assert_eq!(main.vision_input.state, CapState::Unsupported);
         assert_eq!(
-            decide_image_path(true, Some(&helper), &main),
+            decide_image_path(true, HelperStatus::Resolved(&helper), &main),
             ImagePathDecision::AllowViaDescription
         );
     }
 
-    /// RED ⑦：转述开启但辅助模型缺失 → 阻断并引导配置。
+    /// ⑦：辅助模型缺失 → 阻断引导配置；
+    /// 配置了但解析失败（已删除/无法路由）→ 阻断引导修复，绝不放行。
     #[test]
-    fn missing_helper_blocks() {
+    fn missing_or_unavailable_helper_blocks() {
         let main = resolve_caps("glm-5.2", ZHIPU_CODING, &CapOverrides::default());
         assert_eq!(
-            decide_image_path(true, None, &main),
+            decide_image_path(true, HelperStatus::Missing, &main),
             ImagePathDecision::BlockNoHelper
+        );
+        assert_eq!(
+            decide_image_path(true, HelperStatus::Unavailable, &main),
+            ImagePathDecision::BlockHelperUnavailable
         );
     }
 
-    /// RED ⑧：inline 模式（转述关闭）——视觉主模型放行，文本主模型阻断。
+    /// ⑧：inline 模式（转述关闭）——视觉主模型放行，文本主模型阻断。
     #[test]
     fn inline_mode_checks_main_native_vision() {
         let vision_main = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &CapOverrides::default());
         let text_main = resolve_caps("glm-5.2", ZHIPU_CODING, &CapOverrides::default());
         assert_eq!(
-            decide_image_path(false, None, &vision_main),
+            decide_image_path(false, HelperStatus::Missing, &vision_main),
             ImagePathDecision::AllowNativeVision
         );
         assert_eq!(
-            decide_image_path(false, None, &text_main),
+            decide_image_path(false, HelperStatus::Missing, &text_main),
             ImagePathDecision::BlockMainNotVision
         );
     }
 
-    /// 补充：辅助/主模型能力未知 → 警告态（可"仍然尝试"），绝不静默放行或硬阻断。
+    /// 辅助/主模型能力未知 → 警告态（可"仍然尝试"），绝不静默放行或硬阻断。
     #[test]
     fn unknown_caps_yield_warnings_not_silent_paths() {
         let unknown = resolve_caps("mystery-1", "https://example.com/v1", &CapOverrides::default());
         let main = resolve_caps("glm-5.2", ZHIPU_CODING, &CapOverrides::default());
         assert_eq!(
-            decide_image_path(true, Some(&unknown), &main),
+            decide_image_path(true, HelperStatus::Resolved(&unknown), &main),
             ImagePathDecision::WarnHelperUnknown
         );
         assert_eq!(
-            decide_image_path(false, None, &unknown),
+            decide_image_path(false, HelperStatus::Missing, &unknown),
             ImagePathDecision::WarnMainUnknown
+        );
+    }
+
+    /// 真实引擎配置加载：带 capabilities 子表的 [model.*] 经引擎
+    /// `Config::new_from_toml_cfg`（serde_ignored 弹性解析）后，模型必须
+    /// 仍进目录；引擎对该未知字段只出 UnknownField 告警、不丢条目。
+    /// 这证明新增子表与引擎共存，而非仅 toml_edit 能读。
+    #[test]
+    fn engine_config_load_keeps_model_with_capabilities_subtable() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[model.glm-4v-flash]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+env_key = "ZHIPU_API_KEY"
+
+[model.glm-4v-flash.capabilities]
+vision_input = true
+"#,
+        )
+        .expect("toml parse");
+        let cfg = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw)
+            .expect("engine config load");
+        assert!(
+            cfg.config_models.contains_key("glm-4v-flash"),
+            "capabilities 子表不得导致模型条目被丢弃"
+        );
+        // 引擎按设计对未知字段告警（fail-visible 的引擎侧表现）；
+        // 告警针对 capabilities 字段本身，条目保留。
+        assert!(
+            cfg.model_override_warnings
+                .iter()
+                .any(|w| w.model_key.as_deref() == Some("glm-4v-flash")),
+            "引擎应对未知的 capabilities 字段出告警（弹性解析契约）"
         );
     }
 }
