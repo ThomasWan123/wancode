@@ -93,29 +93,40 @@ impl CapabilitySnapshot {
 }
 
 /// 世代持有者：启动加载一次；模型保存/显式刷新时 reload() 原子替换。
-pub struct CapsState(RwLock<Arc<CapabilitySnapshot>>);
+/// 路径构造期注入：生产 init() 用 wancode_config_path()，测试用临时路径
+/// ——热加载测试因此能走**同一个**生产 reload()，不是复制其实现。
+pub struct CapsState {
+    path: std::path::PathBuf,
+    current: RwLock<Arc<CapabilitySnapshot>>,
+}
 
 impl CapsState {
     pub fn init() -> CapsState {
-        CapsState(RwLock::new(Arc::new(CapabilitySnapshot::load(
-            &wancode_config_path(),
-        ))))
+        CapsState::new_with_path(wancode_config_path())
+    }
+
+    pub fn new_with_path(path: std::path::PathBuf) -> CapsState {
+        let first = Arc::new(CapabilitySnapshot::load(&path));
+        CapsState {
+            path,
+            current: RwLock::new(first),
+        }
     }
 
     /// 当前世代（Arc 克隆，读者持有的一代不受后续替换影响）。
     pub fn snapshot(&self) -> Arc<CapabilitySnapshot> {
-        self.0.read().unwrap().clone()
+        self.current.read().unwrap().clone()
     }
 
     /// 重读文件、原子替换为新一代。
     pub fn reload(&self) {
-        let fresh = Arc::new(CapabilitySnapshot::load(&wancode_config_path()));
-        *self.0.write().unwrap() = fresh;
+        let fresh = Arc::new(CapabilitySnapshot::load(&self.path));
+        *self.current.write().unwrap() = fresh;
     }
 }
 
 /// 一个模型在某条 UI 链上的最终能力视图：能力 + 该条目归属的诊断。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ResolvedModelCaps {
     pub caps: ModelCaps,
     pub issues: Vec<CapIssue>,
@@ -145,25 +156,34 @@ pub fn settings_caps_for(
     }
 }
 
-/// 聊天目录链适配器：对整份目录（key, slug, base_url）批量出能力视图，
-/// 供聊天模型下拉一次取全。独立于设置页适配器实现——两条真实链的
-/// 一致性由测试与"共享同一快照"共同保证，而非同一段代码。
-pub fn chat_caps_map(
+/// 聊天目录链适配器：agent_start 对每个 available model 调用，产出
+/// ModelOption.caps。slug/base_url 从 config.toml 的 [model.<key>] 条目
+/// 取（引擎的 catalog key 即 config key）；条目缺失时以 key 当 slug、
+/// 空 base_url 解析（自然落 unknown——fail-visible 而非猜测）。
+/// 独立于设置页适配器实现——两条真实链的一致性由双链测试锁住。
+pub fn model_option_caps(
     snapshot: &CapabilitySnapshot,
-    catalog: &[(String, String, String)],
-) -> std::collections::BTreeMap<String, ResolvedModelCaps> {
-    let mut out = std::collections::BTreeMap::new();
-    for (key, slug, base_url) in catalog {
-        let ov = snapshot.overrides_for(key);
-        out.insert(
-            key.clone(),
-            ResolvedModelCaps {
-                caps: resolve_caps(slug, base_url, &ov),
-                issues: entry_issues(snapshot, key),
-            },
-        );
+    catalog_key: &str,
+    config_doc: &toml_edit::DocumentMut,
+) -> ResolvedModelCaps {
+    let entry = config_doc
+        .get("model")
+        .and_then(|m| m.as_table_like())
+        .and_then(|t| t.get(catalog_key))
+        .and_then(|v| v.as_table_like());
+    let get = |k: &str| {
+        entry
+            .and_then(|t| t.get(k))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    let slug = get("model").unwrap_or_else(|| catalog_key.to_string());
+    let base_url = get("base_url").unwrap_or_default();
+    let ov = snapshot.overrides_for(catalog_key);
+    ResolvedModelCaps {
+        caps: resolve_caps(&slug, &base_url, &ov),
+        issues: entry_issues(snapshot, catalog_key),
     }
-    out
 }
 
 #[cfg(test)]
@@ -210,11 +230,11 @@ mod tests {
         );
     }
 
-    /// 双链一致性门槛：**两个不同适配器**（设置页 settings_caps_for /
-    /// 聊天目录 chat_caps_map）从同一快照对同一 key 必须得到完全相同的
-    /// 能力与诊断归属——含正确条目、覆盖条目、带诊断条目三种形态。
+    /// 双链一致性门槛：**两个生产适配器**——settings_caps_for（model_list
+    /// 在用）与 model_option_caps（agent_start 在用）——从同一快照对同一
+    /// key 必须得到完全相同的能力与诊断归属——含正确、覆盖、带诊断三形态。
     #[test]
-    fn both_adapters_agree_on_caps_and_issue_attribution() {
+    fn both_production_adapters_agree_on_caps_and_issue_attribution() {
         let snap = CapabilitySnapshot::from_text(
             r#"
 [model_capabilities.my-eyes]
@@ -224,33 +244,50 @@ vision_input = false
 vision_input = "yes"
 "#,
         );
-        let catalog: Vec<(String, String, String)> = vec![
-            ("my-eyes".into(), "glm-4v-flash".into(), ZHIPU_OPEN.into()),
-            ("plain".into(), "glm-5.2".into(), ZHIPU_OPEN.into()),
-            ("broken".into(), "glm-4v-flash".into(), ZHIPU_OPEN.into()),
-        ];
-        let chat = chat_caps_map(&snap, &catalog);
-        for (key, slug, base_url) in &catalog {
-            let settings = settings_caps_for(&snap, key, slug, base_url);
+        // ModelOption 链的 slug/base_url 来源：config.toml 文档
+        let config_doc: toml_edit::DocumentMut = format!(
+            r#"
+[model.my-eyes]
+model = "glm-4v-flash"
+base_url = "{ZHIPU_OPEN}"
+
+[model.plain]
+model = "glm-5.2"
+base_url = "{ZHIPU_OPEN}"
+
+[model.broken]
+model = "glm-4v-flash"
+base_url = "{ZHIPU_OPEN}"
+"#
+        )
+        .parse()
+        .unwrap();
+        for (key, slug) in [
+            ("my-eyes", "glm-4v-flash"),
+            ("plain", "glm-5.2"),
+            ("broken", "glm-4v-flash"),
+        ] {
+            let settings = settings_caps_for(&snap, key, slug, ZHIPU_OPEN);
+            let chat = model_option_caps(&snap, key, &config_doc);
             assert_eq!(
-                Some(&settings),
-                chat.get(key),
-                "key={key}: 两条链的能力/诊断必须逐字相同"
+                settings, chat,
+                "key={key}: 两条生产链的能力/诊断必须逐字相同"
             );
         }
         // 语义抽查：覆盖生效（my-eyes 的内置 true 被显式 false 压掉）
-        assert_eq!(
-            chat["my-eyes"].caps.vision_input.state,
-            CapState::Unsupported
-        );
-        assert_eq!(
-            chat["my-eyes"].caps.vision_input.source,
-            CapSource::Config
-        );
+        let eyes = model_option_caps(&snap, "my-eyes", &config_doc);
+        assert_eq!(eyes.caps.vision_input.state, CapState::Unsupported);
+        assert_eq!(eyes.caps.vision_input.source, CapSource::Config);
         // broken 的诊断归属到 broken，plain 零诊断
-        assert_eq!(chat["broken"].issues.len(), 1);
-        assert_eq!(chat["broken"].issues[0].catalog_key.as_deref(), Some("broken"));
-        assert!(chat["plain"].issues.is_empty());
+        let broken = model_option_caps(&snap, "broken", &config_doc);
+        assert_eq!(broken.issues.len(), 1);
+        assert_eq!(broken.issues[0].catalog_key.as_deref(), Some("broken"));
+        assert!(model_option_caps(&snap, "plain", &config_doc)
+            .issues
+            .is_empty());
+        // config.toml 无条目的 key：落 unknown（不猜测）
+        let ghost = model_option_caps(&snap, "ghost", &config_doc);
+        assert_eq!(ghost.caps.vision_input.state, CapState::Unknown);
     }
 
     /// 热加载：更新 wancode.toml → reload() → 无需重启即得新能力；
@@ -260,15 +297,14 @@ vision_input = "yes"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wancode.toml");
 
-        // 世代 1：无文件 → 空
-        let state = CapsState(RwLock::new(Arc::new(CapabilitySnapshot::load(&path))));
+        // 世代 1：无文件 → 空（路径注入，后续 reload 走生产实现）
+        let state = CapsState::new_with_path(path.clone());
         let gen1 = state.snapshot();
         assert_eq!(gen1.overrides_for("m").vision_input, None);
 
-        // 用户写入新配置，reload 换代
+        // 用户写入新配置 → **生产 reload()** 换代
         std::fs::write(&path, "[model_capabilities.m]\nvision_input = true\n").unwrap();
-        let fresh = Arc::new(CapabilitySnapshot::load(&path));
-        *state.0.write().unwrap() = fresh;
+        state.reload();
 
         // 新读者立即看到新能力——无需重启
         let gen2 = state.snapshot();

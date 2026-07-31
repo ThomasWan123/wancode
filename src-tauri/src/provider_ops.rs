@@ -299,38 +299,6 @@ pub async fn model_remove(
     Ok(())
 }
 
-/// #127-2 聊天目录链：对全目录批量出能力视图（key → caps+诊断）。
-/// 与 model_list 是两条独立适配路径，但共享同一世代快照。
-#[tauri::command]
-pub async fn model_caps_map(
-    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
-) -> Result<
-    std::collections::BTreeMap<String, crate::caps_snapshot::ResolvedModelCaps>,
-    String,
-> {
-    let snapshot = caps_state.snapshot();
-    let path = user_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
-    let mut catalog: Vec<(String, String, String)> = Vec::new();
-    if let Some(models) = doc.get("model").and_then(|v| v.as_table()) {
-        for (key, item) in models.iter() {
-            let t = item.as_table_like();
-            let get = |k: &str| {
-                t.and_then(|t| t.get(k))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            };
-            catalog.push((
-                key.to_string(),
-                get("model").unwrap_or_else(|| key.to_string()),
-                get("base_url").unwrap_or_default(),
-            ));
-        }
-    }
-    Ok(crate::caps_snapshot::chat_caps_map(&snapshot, &catalog))
-}
-
 /// #127-2 设置页横幅数据：文件级问题 + 全量带归属诊断。
 #[tauri::command]
 pub async fn model_caps_diagnostics(
