@@ -125,40 +125,64 @@ pub struct CapIssue {
 
 const CAP_FIELDS: [&str; 4] = ["text", "tool_use", "vision_input", "reasoning"];
 
-impl CapOverrides {
-    /// 从 wancode.toml 文档读取某 catalog key 的能力覆盖：
-    /// `[model_capabilities.<catalog_key>]`。
-    /// 各层缺失 → (default, 空诊断)：无覆盖是常态。
-    /// 各层**存在但类型错误** → NotATable 诊断（fail-visible）：
-    /// "父级缺失"与"父级写错"绝不合并成同一个静默 None。
-    pub fn for_model(
-        doc: &toml_edit::DocumentMut,
-        catalog_key: &str,
-    ) -> (CapOverrides, Vec<CapIssue>) {
-        let not_a_table = |field: &str| {
-            (
-                CapOverrides::default(),
-                vec![CapIssue {
-                    field: field.into(),
-                    kind: CapIssueKind::NotATable,
-                }],
-            )
-        };
+/// wancode.toml 的文档级解析快照：一次解析、全量诊断、按 key 查询。
+/// 设置页与聊天链共享同一份快照（PR 2 接线），避免逐模型重复解析。
+///
+/// fail-visible 覆盖整份文档：未知**顶层**字段（如拼错的
+/// `model_capabilites`）出 UnknownField——"拼错"绝不静默等同"没配置"。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedWanCodeConfig {
+    overrides: std::collections::BTreeMap<String, CapOverrides>,
+    pub issues: Vec<CapIssue>,
+}
+
+/// wancode.toml 允许的顶层字段。新增功能字段时在此登记。
+const TOP_LEVEL_FIELDS: [&str; 1] = ["model_capabilities"];
+
+impl ParsedWanCodeConfig {
+    pub fn parse(doc: &toml_edit::DocumentMut) -> ParsedWanCodeConfig {
+        let mut out = ParsedWanCodeConfig::default();
+        for (k, _) in doc.iter() {
+            if !TOP_LEVEL_FIELDS.contains(&k) {
+                out.issues.push(CapIssue {
+                    field: k.to_string(),
+                    kind: CapIssueKind::UnknownField,
+                });
+            }
+        }
         let Some(mc_item) = doc.get("model_capabilities") else {
-            return (CapOverrides::default(), Vec::new());
+            return out;
         };
         let Some(mc) = mc_item.as_table_like() else {
-            return not_a_table("model_capabilities");
+            out.issues.push(CapIssue {
+                field: "model_capabilities".into(),
+                kind: CapIssueKind::NotATable,
+            });
+            return out;
         };
-        let Some(entry_item) = mc.get(catalog_key) else {
-            return (CapOverrides::default(), Vec::new());
-        };
-        match entry_item.as_table_like() {
-            Some(caps) => Self::from_caps_table(caps),
-            None => not_a_table(catalog_key),
+        for (key, entry_item) in mc.iter() {
+            match entry_item.as_table_like() {
+                Some(caps) => {
+                    let (ov, mut issues) = CapOverrides::from_caps_table(caps);
+                    out.issues.append(&mut issues);
+                    out.overrides.insert(key.to_string(), ov);
+                }
+                None => out.issues.push(CapIssue {
+                    field: key.to_string(),
+                    kind: CapIssueKind::NotATable,
+                }),
+            }
         }
+        out
     }
 
+    /// 按 catalog key 查询覆盖；无条目 → 默认（无覆盖是常态）。
+    pub fn for_model(&self, catalog_key: &str) -> CapOverrides {
+        self.overrides.get(catalog_key).copied().unwrap_or_default()
+    }
+}
+
+impl CapOverrides {
     /// 从能力子表本体读取。
     /// 类型错误 / 未知字段 → 逐条诊断（fail-visible），错误项按未配置解析。
     pub fn from_caps_table(caps: &dyn toml_edit::TableLike) -> (CapOverrides, Vec<CapIssue>) {
@@ -365,7 +389,8 @@ mod tests {
 
     fn overrides_for(toml: &str, key: &str) -> (CapOverrides, Vec<CapIssue>) {
         let doc: toml_edit::DocumentMut = toml.parse().unwrap();
-        CapOverrides::for_model(&doc, key)
+        let parsed = ParsedWanCodeConfig::parse(&doc);
+        (parsed.for_model(key), parsed.issues)
     }
 
     /// ①：显式 false 覆盖内置 true——用户比内置表更权威。
@@ -464,10 +489,6 @@ mod tests {
     fn config_capabilities_subtable_parses() {
         let (ov, issues) = overrides_for(
             r#"
-[model.custom]
-model = "custom-llm"
-base_url = "https://example.com/v1"
-
 [model_capabilities.custom]
 vision_input = true
 tool_use = false
@@ -541,9 +562,48 @@ custom = "all"
                 kind: CapIssueKind::NotATable
             }]
         );
-        // 缺失才是零诊断
-        let (_, issues) = overrides_for(r#"other = 1"#, "custom");
+        // 条目缺失才是零诊断（文件为空 / 表内无该 key）
+        let (_, issues) = overrides_for("", "custom");
         assert!(issues.is_empty());
+        let (_, issues) = overrides_for("[model_capabilities]
+", "custom");
+        assert!(issues.is_empty());
+    }
+
+    /// 未知顶层字段（最常见：拼错 model_capabilities）必须 UnknownField
+    /// 告警——绝不静默当成"没有配置"。config.toml 内容误粘进来同理点名。
+    #[test]
+    fn misspelled_top_level_field_is_flagged() {
+        let (ov, issues) = overrides_for(
+            r#"
+[model_capabilites.custom]
+vision_input = true
+"#,
+            "custom",
+        );
+        assert_eq!(ov, CapOverrides::default(), "拼错的表不得生效");
+        assert_eq!(
+            issues,
+            vec![CapIssue {
+                field: "model_capabilites".into(),
+                kind: CapIssueKind::UnknownField
+            }]
+        );
+        // 误把 config.toml 的 [model.X] 粘进 wancode.toml：同样点名
+        let (_, issues) = overrides_for(
+            r#"
+[model.custom]
+base_url = "https://example.com/v1"
+"#,
+            "custom",
+        );
+        assert_eq!(
+            issues,
+            vec![CapIssue {
+                field: "model".into(),
+                kind: CapIssueKind::UnknownField
+            }]
+        );
     }
 
     /// 解析器是纯函数：同输入必同输出（含来源）。
@@ -618,14 +678,13 @@ custom = "all"
         );
     }
 
-    /// 真实引擎配置加载（存储契约的干净性证明）：
-    /// 能力覆盖住独立的 wancode.toml，config.toml 里**不出现任何 WanCode
-    /// 专属数据**——引擎 `Config::new_from_toml_cfg` 加载后模型进目录、
-    /// model_override_warnings 为零，且不存在会触发顶层 unrecognized-key
-    /// 告警的 section（契约上 config.toml 与本功能无交集）。
-    /// 同时 WanCode 解析器从 wancode.toml 读到覆盖。
+    /// 存储契约隔离性：两份**文档**互不掺杂且各自可解析——config.toml
+    /// 与功能引入前逐字相同，经引擎 `Config::new_from_toml_cfg` 后模型进
+    /// 目录、model_override_warnings 为零；wancode.toml 文档由 WanCode
+    /// 解析器独立读取。真实文件 IO（wancode_config_path 落盘/读取）
+    /// 属 PR 2 接线范围。
     #[test]
-    fn engine_config_untouched_and_separate_file_readable() {
+    fn engine_and_wancode_documents_are_isolated() {
         // config.toml：与本功能引入前逐字相同
         let config_toml = r#"
 [model.glm-4v-flash]
@@ -649,8 +708,8 @@ env_key = "ZHIPU_API_KEY"
 vision_input = true
 "#;
         let doc: toml_edit::DocumentMut = wancode_toml.parse().unwrap();
-        let (ov, issues) = CapOverrides::for_model(&doc, "glm-4v-flash");
-        assert!(issues.is_empty());
-        assert_eq!(ov.vision_input, Some(true));
+        let parsed = ParsedWanCodeConfig::parse(&doc);
+        assert!(parsed.issues.is_empty());
+        assert_eq!(parsed.for_model("glm-4v-flash").vision_input, Some(true));
     }
 }
