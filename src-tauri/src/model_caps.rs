@@ -14,6 +14,14 @@
 //! provider（按真实 hostname 域名边界判定）+ 上游 slug——绝不按 catalog
 //! key（可被用户任意重命名）。结果附带来源（config / built_in / unknown）。
 //!
+//! 存储契约（复核定案）：显式覆盖放 WanCode 自有命名空间
+//! `[wancode.model_capabilities.<catalog_key>]`——[model.X] 是引擎的字段
+//! 空间，塞 capabilities 会被其 serde_ignored 记为 UnknownField 并打印
+//! "skipped invalid config"，把正确配置报告成无效。自有命名空间下引擎的
+//! model_override_warnings 保持为零（顶层未知 section 仅一条 tracing 日志，
+//! 不进告警、不影响条目）。显式覆盖本就需要定位具体条目，故按 catalog_key
+//! 寻址；内置识别仍只按 provider + slug，不受 key 重命名影响。
+//!
 //! 配置解析 fail-visible：类型错误、未知字段返回诊断（CapIssue），
 //! 不静默当作未配置。
 //!
@@ -34,7 +42,7 @@ pub enum CapState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapSource {
-    /// 用户在 config.toml [model.X.capabilities] 显式声明。
+    /// 用户在 config.toml [wancode.model_capabilities.<key>] 显式声明。
     Config,
     /// 内置能力表按 provider + slug 精确匹配。
     BuiltIn,
@@ -105,7 +113,7 @@ pub enum CapIssueKind {
     /// capabilities 子表里出现未知字段（拼错或不属于固有能力，如
     /// image_description）。
     UnknownField,
-    /// capabilities 本身不是表。
+    /// 能力条目本身不是表。
     NotATable,
 }
 
@@ -118,22 +126,37 @@ pub struct CapIssue {
 const CAP_FIELDS: [&str; 4] = ["text", "tool_use", "vision_input", "reasoning"];
 
 impl CapOverrides {
-    /// 从模型条目的 toml 表读取 capabilities 子表。
-    /// 子表缺失 → (default, 空诊断)：旧配置零迁移。
+    /// 从整份 config 文档读取某 catalog key 的能力覆盖：
+    /// `[wancode.model_capabilities.<catalog_key>]`。
+    /// 条目缺失 → (default, 空诊断)：旧配置零迁移。
+    pub fn for_model(
+        doc: &toml_edit::DocumentMut,
+        catalog_key: &str,
+    ) -> (CapOverrides, Vec<CapIssue>) {
+        let node = doc
+            .get("wancode")
+            .and_then(|w| w.as_table_like())
+            .and_then(|w| w.get("model_capabilities"))
+            .and_then(|m| m.as_table_like())
+            .and_then(|m| m.get(catalog_key));
+        match node {
+            None => (CapOverrides::default(), Vec::new()),
+            Some(v) => match v.as_table_like() {
+                Some(caps) => Self::from_caps_table(caps),
+                None => (
+                    CapOverrides::default(),
+                    vec![CapIssue {
+                        field: catalog_key.into(),
+                        kind: CapIssueKind::NotATable,
+                    }],
+                ),
+            },
+        }
+    }
+
+    /// 从能力子表本体读取。
     /// 类型错误 / 未知字段 → 逐条诊断（fail-visible），错误项按未配置解析。
-    pub fn from_toml(item: &dyn toml_edit::TableLike) -> (CapOverrides, Vec<CapIssue>) {
-        let Some(caps_item) = item.get("capabilities") else {
-            return (CapOverrides::default(), Vec::new());
-        };
-        let Some(caps) = caps_item.as_table_like() else {
-            return (
-                CapOverrides::default(),
-                vec![CapIssue {
-                    field: "capabilities".into(),
-                    kind: CapIssueKind::NotATable,
-                }],
-            );
-        };
+    pub fn from_caps_table(caps: &dyn toml_edit::TableLike) -> (CapOverrides, Vec<CapIssue>) {
         let mut issues = Vec::new();
         let mut get = |k: &str| -> Option<bool> {
             match caps.get(k) {
@@ -329,15 +352,9 @@ mod tests {
     const ZHIPU_CODING: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
     const DEEPSEEK: &str = "https://api.deepseek.com";
 
-    fn parse_first_model(toml: &str) -> (CapOverrides, Vec<CapIssue>) {
+    fn overrides_for(toml: &str, key: &str) -> (CapOverrides, Vec<CapIssue>) {
         let doc: toml_edit::DocumentMut = toml.parse().unwrap();
-        let item = doc
-            .get("model")
-            .and_then(|m| m.as_table())
-            .and_then(|t| t.iter().next().map(|(_, v)| v))
-            .and_then(|v| v.as_table_like())
-            .unwrap();
-        CapOverrides::from_toml(item)
+        CapOverrides::for_model(&doc, key)
     }
 
     /// ①：显式 false 覆盖内置 true——用户比内置表更权威。
@@ -425,13 +442,14 @@ mod tests {
     /// ④：旧配置（无 capabilities 子表）正常解析，零诊断，全走内置/unknown。
     #[test]
     fn legacy_config_without_capabilities_parses() {
-        let (ov, issues) = parse_first_model(
+        let (ov, issues) = overrides_for(
             r#"
 [model.glm-4v-flash]
 model = "glm-4v-flash"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 env_key = "ZHIPU_API_KEY"
 "#,
+            "glm-4v-flash",
         );
         assert_eq!(ov, CapOverrides::default());
         assert!(issues.is_empty());
@@ -440,16 +458,17 @@ env_key = "ZHIPU_API_KEY"
     /// 新配置格式解析：capabilities 子表逐项可缺省。
     #[test]
     fn config_capabilities_subtable_parses() {
-        let (ov, issues) = parse_first_model(
+        let (ov, issues) = overrides_for(
             r#"
 [model.custom]
 model = "custom-llm"
 base_url = "https://example.com/v1"
 
-[model.custom.capabilities]
+[wancode.model_capabilities.custom]
 vision_input = true
 tool_use = false
 "#,
+            "custom",
         );
         assert!(issues.is_empty());
         assert_eq!(ov.vision_input, Some(true));
@@ -463,17 +482,14 @@ tool_use = false
     /// fail-visible：类型错误与未知字段必须出诊断，不许静默当作未配置。
     #[test]
     fn config_errors_produce_visible_diagnostics() {
-        let (ov, issues) = parse_first_model(
+        let (ov, issues) = overrides_for(
             r#"
-[model.custom]
-model = "custom-llm"
-base_url = "https://example.com/v1"
-
-[model.custom.capabilities]
+[wancode.model_capabilities.custom]
 vision_input = "true"
 visoin_input = true
 image_description = true
 "#,
+            "custom",
         );
         // 类型错误的项按未配置解析，但诊断在
         assert_eq!(ov.vision_input, None);
@@ -490,18 +506,18 @@ image_description = true
             field: "image_description".into(),
             kind: CapIssueKind::UnknownField
         }));
-        // capabilities 不是表
-        let (_, issues) = parse_first_model(
+        // 能力条目不是表
+        let (_, issues) = overrides_for(
             r#"
-[model.custom]
-model = "custom-llm"
-capabilities = "all"
+[wancode.model_capabilities]
+custom = "all"
 "#,
+            "custom",
         );
         assert_eq!(
             issues,
             vec![CapIssue {
-                field: "capabilities".into(),
+                field: "custom".into(),
                 kind: CapIssueKind::NotATable
             }]
         );
@@ -579,37 +595,38 @@ capabilities = "all"
         );
     }
 
-    /// 真实引擎配置加载：带 capabilities 子表的 [model.*] 经引擎
-    /// `Config::new_from_toml_cfg`（serde_ignored 弹性解析）后，模型必须
-    /// 仍进目录；引擎对该未知字段只出 UnknownField 告警、不丢条目。
-    /// 这证明新增子表与引擎共存，而非仅 toml_edit 能读。
+    /// 真实引擎配置加载（存储契约的干净性证明）：
+    /// [model.X] 保持引擎原生字段，能力覆盖放 [wancode.model_capabilities.X]
+    /// —— 经引擎 `Config::new_from_toml_cfg` 后：模型进目录、
+    /// **model_override_warnings 为零**（正确的 WanCode 配置绝不被引擎报告
+    /// 成无效配置），且 WanCode 解析器能读到覆盖。
     #[test]
-    fn engine_config_load_keeps_model_with_capabilities_subtable() {
-        let raw: toml::Value = toml::from_str(
-            r#"
+    fn engine_config_load_clean_with_wancode_namespace() {
+        let text = r#"
 [model.glm-4v-flash]
 model = "glm-4v-flash"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 env_key = "ZHIPU_API_KEY"
 
-[model.glm-4v-flash.capabilities]
+[wancode.model_capabilities.glm-4v-flash]
 vision_input = true
-"#,
-        )
-        .expect("toml parse");
+"#;
+        let raw: toml::Value = toml::from_str(text).expect("toml parse");
         let cfg = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw)
             .expect("engine config load");
         assert!(
             cfg.config_models.contains_key("glm-4v-flash"),
-            "capabilities 子表不得导致模型条目被丢弃"
+            "wancode 命名空间不得影响模型进目录"
         );
-        // 引擎按设计对未知字段告警（fail-visible 的引擎侧表现）；
-        // 告警针对 capabilities 字段本身，条目保留。
         assert!(
+            cfg.model_override_warnings.is_empty(),
+            "正确配置必须零 model_override_warnings，实际: {:?}",
             cfg.model_override_warnings
-                .iter()
-                .any(|w| w.model_key.as_deref() == Some("glm-4v-flash")),
-            "引擎应对未知的 capabilities 字段出告警（弹性解析契约）"
         );
+        // WanCode 解析器读同一份文本得到覆盖
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let (ov, issues) = CapOverrides::for_model(&doc, "glm-4v-flash");
+        assert!(issues.is_empty());
+        assert_eq!(ov.vision_input, Some(true));
     }
 }
