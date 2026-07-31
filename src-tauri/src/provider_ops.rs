@@ -299,6 +299,149 @@ pub async fn model_remove(
     Ok(())
 }
 
+/// #127-3 粘图发送前有效路径判定。main_key = 当前主模型 catalog key。
+/// 语义走 model_caps::decide_image_path（PR 1 锁定）：转述开启看辅助
+/// 模型三态，转述关闭才查主模型。helper key 取 config [models].
+/// image_description；未配置 → Missing（引擎的编译默认是 xAI 模型，
+/// 在多 provider 目录中不可路由，如实按未配置引导）。config.toml 损坏
+/// 时返回错误（阻断发送并显示原因——比带着坏数据判定更诚实）。
+/// 命令层判定实体（transcribe_on 由调用方给定，便于测试三态与开关组合）。
+pub(crate) fn image_send_decision(
+    transcribe_on: bool,
+    doc: &toml_edit::DocumentMut,
+    snapshot: &crate::caps_snapshot::CapabilitySnapshot,
+    main_key: Option<&str>,
+) -> (crate::model_caps::ImagePathDecision, Option<String>) {
+    use crate::caps_snapshot::model_option_caps;
+    use crate::model_caps::{decide_image_path, HelperStatus};
+
+    let helper_key = doc
+        .get("models")
+        .and_then(|m| m.as_table_like())
+        .and_then(|t| t.get("image_description"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from);
+    let helper_in_catalog = |k: &str| {
+        doc.get("model")
+            .and_then(|m| m.as_table_like())
+            .map(|t| t.get(k).is_some())
+            .unwrap_or(false)
+    };
+    let helper_caps = helper_key
+        .as_deref()
+        .filter(|k| helper_in_catalog(k))
+        .map(|k| model_option_caps(snapshot, k, doc).caps);
+    let helper = match (&helper_key, &helper_caps) {
+        (None, _) => HelperStatus::Missing,
+        (Some(_), None) => HelperStatus::Unavailable,
+        (Some(_), Some(c)) => HelperStatus::Resolved(c),
+    };
+    let main_caps = main_key
+        .map(|k| model_option_caps(snapshot, k, doc).caps)
+        .unwrap_or_default();
+    (decide_image_path(transcribe_on, helper, &main_caps), helper_key)
+}
+
+#[tauri::command]
+pub async fn image_send_check(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+    main_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use crate::caps_snapshot::load_config_doc;
+
+    // 开关语义唯一事实源 = 引擎自己的解析函数（=="1" 或 "true"，其余关）。
+    // 此前手写 v != "0" 与引擎分歧（如 "yes"：引擎关、门控开）——绝不
+    // 再维护第二份解析。
+    let transcribe_on = xai_grok_shell::session::image_describe::transcribe_images_enabled();
+    let (doc, config_issue) = load_config_doc(&user_config_path());
+    if let Some(issue) = &config_issue {
+        return Err(format!("配置不可用，无法判定图片路径：{}", issue.message));
+    }
+    let snapshot = caps_state.snapshot();
+    let (decision, helper_key) =
+        image_send_decision(transcribe_on, &doc, &snapshot, main_key.as_deref());
+    Ok(serde_json::json!({
+        "decision": decision,
+        "transcribe_on": transcribe_on,
+        "helper_key": helper_key,
+    }))
+}
+
+#[cfg(test)]
+mod image_gate_tests {
+    use super::image_send_decision;
+    use crate::caps_snapshot::CapabilitySnapshot;
+    use crate::model_caps::ImagePathDecision;
+
+    fn doc(text: &str) -> toml_edit::DocumentMut {
+        text.parse().unwrap()
+    }
+    const CATALOG: &str = r#"
+[models]
+image_description = "glm-4v-flash"
+
+[model.glm-4v-flash]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[model.main-text]
+model = "glm-5.2"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+"#;
+
+    /// 开关解析与引擎单一事实源：引擎函数的三种输入语义直接验证
+    /// （"1"/"true" 开；"0"/"yes"/未设 关）。同进程串行断言避免环境竞态。
+    #[test]
+    fn transcribe_switch_semantics_match_engine() {
+        use xai_grok_shell::session::image_describe::transcribe_images_enabled;
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var("GROK_IMAGE_TRANSCRIBE", v),
+                None => std::env::remove_var("GROK_IMAGE_TRANSCRIBE"),
+            }
+        };
+        let orig = std::env::var("GROK_IMAGE_TRANSCRIBE").ok();
+        set(Some("1"));
+        assert!(transcribe_images_enabled());
+        set(Some("true"));
+        assert!(transcribe_images_enabled());
+        set(Some("0"));
+        assert!(!transcribe_images_enabled());
+        set(Some("yes")); // 手写 !="0" 会在这里与引擎分歧
+        assert!(!transcribe_images_enabled());
+        set(None);
+        assert!(!transcribe_images_enabled());
+        set(orig.as_deref());
+    }
+
+    /// 辅助模型三态：Resolved / Unavailable（配置了但不在目录）/ Missing。
+    #[test]
+    fn helper_tri_state_drives_decision() {
+        let snap = CapabilitySnapshot::empty();
+        // Resolved：glm-4v-flash 在目录且内置 vision=true → 放行
+        let (d, hk) = image_send_decision(true, &doc(CATALOG), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::AllowViaDescription);
+        assert_eq!(hk.as_deref(), Some("glm-4v-flash"));
+        // Unavailable：helper 指向不存在的条目
+        let broken = CATALOG.replace("image_description = \"glm-4v-flash\"",
+                                     "image_description = \"deleted-model\"");
+        let (d, _) = image_send_decision(true, &doc(&broken), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::BlockHelperUnavailable);
+        // Missing：无 [models] 配置
+        let (d, hk) = image_send_decision(true, &doc("[model.main-text]
+model = \"glm-5.2\"
+base_url = \"https://open.bigmodel.cn/api/coding/paas/v4\"
+"), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::BlockNoHelper);
+        assert!(hk.is_none());
+        // 转述关闭：查主模型（glm-5.2 内置 vision=false → 阻断）
+        let (d, _) = image_send_decision(false, &doc(CATALOG), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::BlockMainNotVision);
+    }
+}
+
 /// #127-2 设置页横幅数据：文件级问题 + 全量带归属诊断。
 #[tauri::command]
 pub async fn model_caps_diagnostics(

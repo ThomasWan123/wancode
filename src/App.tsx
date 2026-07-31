@@ -19,6 +19,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
+import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
@@ -452,6 +453,7 @@ function App() {
     configKinds: string[];
   } | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
+  const imageGateRef = useRef(false); // #127-3 图片门控 await 窗口重入护栏
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
     (localStorage.getItem("wancode-perm-mode") as PermMode) || "manual",
@@ -1405,7 +1407,7 @@ function App() {
         models: string[];
         current_model_id?: string;
         cwd: string;
-        model_block?: unknown; model_options?: unknown;
+        model_block?: unknown; model_options?: unknown; caps_config_issue?: unknown;
       }>(
         "agent_start",
         {
@@ -1424,6 +1426,11 @@ function App() {
       }
       if (r.models?.length) setModels(r.models);
       setModelOptions(parseModelOptions(r.model_options));
+      {
+        // #127-3：config.toml 损坏导致的全员能力 unknown 必须有可见原因
+        const ci = parseFileIssue(r.caps_config_issue);
+        if (ci) setError(t.capsConfigIssue(ci.kind, ci.message));
+      }
       if (r.current_model_id) setModel(r.current_model_id);
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
@@ -1784,6 +1791,39 @@ function App() {
       }
     }
     const imgs = pastedImages;
+    // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
+    // Block* 阻断并针对性引导；Warn* 二次确认；未知载荷 fail-closed 阻断。
+    // 判定期间置重入护栏：await 窗口内再按 Enter 不得二次发送。
+    if (imgs.length > 0) {
+      if (imageGateRef.current) return;
+      imageGateRef.current = true;
+      try {
+        let kind: ReturnType<typeof parseImageDecision> = null;
+        try {
+          kind = parseImageDecision(await invoke("image_send_check", { mainKey: model || null }));
+        } catch (e) {
+          setError(String(e));
+          return;
+        }
+        const gate = imageGateAction(kind);
+        if (gate.action === "block") {
+          setError(
+            gate.msg === "noHelper" ? t.imgBlockNoHelper
+            : gate.msg === "helperUnavailable" ? t.imgBlockHelperUnavailable
+            : gate.msg === "helperNotVision" ? t.imgBlockHelperNotVision
+            : gate.msg === "mainNotVision" ? t.imgBlockMainNotVision
+            : t.imgBlockUnknownDecision,
+          );
+          return;
+        }
+        if (gate.action === "confirm") {
+          const msg = gate.msg === "helperUnknown" ? t.imgWarnHelperUnknown : t.imgWarnMainUnknown;
+          if (!window.confirm(msg)) return;
+        }
+      } finally {
+        imageGateRef.current = false;
+      }
+    }
     setInput("");
     setPastedImages([]);
     sendText(text, imgs);

@@ -4,6 +4,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { saveLang, type Lang } from "../../i18n";
 import { IconX, IconPencil } from "../../icons";
 
+import { parseResolvedCaps, type Cap } from "../../caps";
+
+/* #127-3 能力徽章：三态三色。unknown 灰 "?" ——不虚标。 */
+function CapBadge({ label, cap }: { label: string; cap: Cap }) {
+  const cls =
+    cap.state === "supported" ? "cap-ok" : cap.state === "unsupported" ? "cap-no" : "cap-unk";
+  const mark = cap.state === "supported" ? "✓" : cap.state === "unsupported" ? "✕" : "?";
+  return (
+    <span className={`cap-badge ${cls}`} title={`${label}: ${cap.state} (${cap.source})`}>
+      {label}
+      {mark}
+    </span>
+  );
+}
+
 const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: string }> = {
   DeepSeek: { name: "DeepSeek V3", model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
   "智谱 GLM": { name: "智谱 GLM-4-Flash", model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
@@ -133,6 +148,21 @@ export function SettingsModal(props: Record<string, any>) {
                       <span className="mcp-detail">
                         {m.model} · {m.base_url}
                       </span>
+                      {(() => {
+                        const rc = parseResolvedCaps(m.caps);
+                        return (
+                          <span className="mcp-detail">
+                            <CapBadge label="Tools" cap={rc.caps.toolUse} />{" "}
+                            <CapBadge label="Vision" cap={rc.caps.visionInput} />{" "}
+                            <CapBadge label="Reasoning" cap={rc.caps.reasoning} />
+                            {rc.issues.length > 0 && (
+                              <span className="key-warn">
+                                {" "}⚠ {rc.issues.map((i) => `${i.field}:${i.kind}`).join(", ")}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                     </div>
                     <button
                       className="ghost small"

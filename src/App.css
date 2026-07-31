@@ -2922,3 +2922,16 @@ button.ghost.small {
   border: 1px solid var(--warn, #b26b00); border-radius: 999px;
   background: transparent; white-space: nowrap;
 }
+
+/* #127-3 能力徽章 */
+.cap-badge {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 2px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.cap-badge.cap-ok { background: color-mix(in srgb, #22c55e 18%, transparent); color: #16a34a; }
+.cap-badge.cap-no { background: color-mix(in srgb, #ef4444 15%, transparent); color: #dc2626; }
+.cap-badge.cap-unk { background: color-mix(in srgb, #9ca3af 20%, transparent); color: #6b7280; }
