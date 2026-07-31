@@ -86,6 +86,13 @@ jobs:
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
           cargo test -p xai-grok-shell --test model_endpoint_routing
+      # #127-4 D3 落点：上下文压缩由引擎 crate 单测覆盖（合规矩阵引用此步）。
+      - name: 引擎压缩单测（xai-grok-compaction）
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          Set-Location $engine
+          cargo test -p xai-grok-compaction
       # 磁盘上的旧会话记录 → 歧义 → 用户选定 → 真实 HTTP。不含 GUI 那一段。
       - name: 引擎身份链集成测试（旧记录 → 歧义 → 选定 → 正确端点）
         shell: pwsh

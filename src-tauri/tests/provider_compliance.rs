@@ -12,8 +12,9 @@
 //! **串行**重写其中的 config.toml（引擎在 spawn 时读盘）。
 //!
 //! 工具调用（B 组）与多模态（D1）在 4b；凭据端点隔离已由引擎 Gate 1
-//! 测试覆盖（CI "Gate 1 引擎侧路由证据"步），不重做；上下文压缩的 ACP
-//! 级重演成本高且引擎侧已有压缩测试，本套件不含（复核可翻）。
+//! 测试覆盖（CI "Gate 1 引擎侧路由证据"步），不重做；上下文压缩由
+//! 引擎 xai-grok-compaction crate 的单测覆盖（128 条，CI "引擎压缩
+//! 单测"步），不做 ACP 级重演——矩阵标"引擎层覆盖"而非"通过"。
 //!
 //! 末尾输出结构化摘要行（COMPLIANCE_SUMMARY <json>）供矩阵回填（PR 5）。
 
@@ -123,7 +124,23 @@ async fn handler(State(probe): State<Probe>, headers: HeaderMap) -> Response {
         .into_response()
     };
     match probe.scenario {
-        Scenario::Standard | Scenario::NoUsage => sse(vec![
+        // Standard 与 NoUsage 的线上载荷必须真实不同（复核：同证据不同名
+        // 即假覆盖）：Standard 按真实 provider 形状带 usage 终块。
+        Scenario::Standard => sse(vec![
+            chunk(serde_json::json!({"role": "assistant", "content": "COMPLIANCE-"}), None),
+            chunk(serde_json::json!({"content": "OK"}), Some("stop")),
+            serde_json::json!({
+                "id": "chatcmpl-compliance",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "compliance-model",
+                "choices": [],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+            })
+            .to_string(),
+            "[DONE]".into(),
+        ]),
+        Scenario::NoUsage => sse(vec![
             chunk(serde_json::json!({"role": "assistant", "content": "COMPLIANCE-"}), None),
             chunk(serde_json::json!({"content": "OK"}), Some("stop")),
             "[DONE]".into(),
@@ -179,6 +196,9 @@ base_url = "{base_url}"
 api_key = "{API_KEY}"
 api_backend = "chat_completions"
 context_window = 128000
+# 5xx 重试预算收敛（默认 15 次指数退避会超出测试窗口；重试行为本身
+# 以 mock hits >= 2 断言）
+max_retries = 1
 "#
     );
     std::fs::write(grok_home.join("config.toml"), config).unwrap();
@@ -365,7 +385,14 @@ async fn provider_compliance_transport_and_errors() {
                     transcript.contains("COMPLIANCE-OK"),
                     "正文必须送达：{transcript}"
                 );
-                // 思考内容不得混进正文块（agent_message_chunk）
+                // 正向：reasoning 必须保留进思考通知（agent_thought_chunk，
+                // 本机探针实证引擎会发该块）
+                assert!(
+                    transcript.contains(r#""sessionUpdate":"agent_thought_chunk""#)
+                        && transcript.contains("thinking hard"),
+                    "reasoning_content 必须以 agent_thought_chunk 送达：{transcript}"
+                );
+                // 反向：思考内容不得混进正文块（agent_message_chunk）
                 for update in transcript.split('}') {
                     if update.contains("agent_message_chunk") {
                         assert!(
@@ -376,17 +403,41 @@ async fn provider_compliance_transport_and_errors() {
                 }
             }
             Scenario::Err401 | Scenario::Err429 | Scenario::Err500Html => {
-                // 错误必须可见（Err 或 transcript 内含错误信息），且绝不泄 Key
-                let combined = format!(
-                    "{transcript} {}",
-                    result.as_ref().err().cloned().unwrap_or_default()
-                );
+                // 错误必须以 Err 收束；悬挂超时是独立文案，绝不与"错误可见"
+                // 混同——上一版的假覆盖正在此处（500 实为重试预算未耗尽）。
+                let err = result
+                    .as_ref()
+                    .err()
+                    .unwrap_or_else(|| panic!("{scenario:?}: 回合必须以错误收束"))
+                    .clone();
                 assert!(
-                    result.is_err() || combined.to_lowercase().contains("error"),
-                    "{scenario:?}: 错误必须浮出可见，result={result:?} transcript={transcript}"
+                    !err.contains("未收束"),
+                    "{scenario:?}: 不许把悬挂超时当作错误可见：{err}"
                 );
+                // 逐情景区分性断言（形状取自引擎实际输出）
+                match scenario {
+                    Scenario::Err401 => assert!(
+                        err.contains("401") && err.contains("Invalid API key provided"),
+                        "401 必须携带状态与供应商 message：{err}"
+                    ),
+                    Scenario::Err429 => assert!(
+                        err.contains("Rate limited") && err.contains("429"),
+                        "429 必须归类为限流：{err}"
+                    ),
+                    Scenario::Err500Html => {
+                        assert!(err.contains("500"), "5xx 必须携带状态：{err}");
+                        // 非 JSON 体不得导致崩溃/悬挂；且 5xx 走了重试
+                        // （max_retries=1 → 恰好 2 次请求）
+                        assert!(
+                            mock.probe.hits.load(Ordering::SeqCst) >= 2,
+                            "5xx 必须触发重试（hits={}）",
+                            mock.probe.hits.load(Ordering::SeqCst)
+                        );
+                    }
+                    _ => unreachable!(),
+                }
                 assert!(
-                    !combined.contains(API_KEY),
+                    !format!("{transcript} {err}").contains(API_KEY),
                     "{scenario:?}: 错误信息绝不许包含 API Key"
                 );
             }
