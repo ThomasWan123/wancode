@@ -255,6 +255,7 @@ ${p}
   imgWarnHelperUnknown: "视觉辅助模型的能力未知，图片可能无法识别。仍然尝试发送？",
   imgBlockMainNotVision: "当前模型不支持图片输入，且图片转述已关闭。请换用视觉模型或开启图片转述。",
   imgWarnMainUnknown: "当前模型的视觉能力未知，图片可能无法识别。仍然尝试发送？",
+  imgBlockUnknownDecision: "无法确认图片发送路径（判定结果异常），已阻止发送。请重试或检查模型配置。",
   capsConfigIssue: (kind: string, msg: string) =>
     `模型配置${kind === "parse_error" ? "解析失败" : "读取失败"}，模型能力显示为未知：${msg}`,
   updateSucceeded: (v: string) => `已成功升级到 v${v}`,
@@ -613,6 +614,7 @@ Remove the worktree?`,
   imgWarnHelperUnknown: "The vision helper's capabilities are unknown; images may not be recognized. Send anyway?",
   imgBlockMainNotVision: "The current model does not accept image input and image transcription is off. Use a vision model or enable transcription.",
   imgWarnMainUnknown: "The current model's vision capability is unknown; images may not be recognized. Send anyway?",
+  imgBlockUnknownDecision: "Could not determine the image path (unexpected decision payload); send blocked. Retry or check model config.",
   capsConfigIssue: (kind: string, msg: string) =>
     `Model config ${kind === "parse_error" ? "failed to parse" : "failed to read"}; capabilities shown as unknown: ${msg}`,
   updateSucceeded: (v: string) => `Successfully updated to v${v}`,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  imageGateAction,
   parseFileIssue,
   parseImageDecision,
   parseResolvedCaps,
@@ -48,5 +49,28 @@ describe("caps 边界收窄（真实 snake_case wire 形状）", () => {
     expect(parseImageDecision({ decision: { kind: "block_no_helper" } })).toBe("block_no_helper");
     expect(parseImageDecision({ decision: { kind: "surprise" } })).toBeNull();
     expect(parseImageDecision({})).toBeNull();
+  });
+
+  it("门控动作映射：Block 与未知载荷零发送（fail-closed），Warn 走确认", () => {
+    // Block 四型 → block
+    for (const k of [
+      "block_no_helper",
+      "block_helper_unavailable",
+      "block_helper_not_vision",
+      "block_main_not_vision",
+    ] as const) {
+      expect(imageGateAction(k).action).toBe("block");
+    }
+    // 未知/null 载荷 → block（绝不放行）
+    expect(imageGateAction(null)).toEqual({ action: "block", msg: "unknownDecision" });
+    // Warn → confirm（取消即零发送由 App 分支保证：confirm=false 直接 return）
+    expect(imageGateAction("warn_helper_unknown")).toEqual({
+      action: "confirm",
+      msg: "helperUnknown",
+    });
+    expect(imageGateAction("warn_main_unknown").action).toBe("confirm");
+    // Allow 两型
+    expect(imageGateAction("allow_via_description").action).toBe("allow");
+    expect(imageGateAction("allow_native_vision").action).toBe("allow");
   });
 });

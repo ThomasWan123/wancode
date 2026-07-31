@@ -82,3 +82,31 @@ export function parseImageDecision(raw: unknown): ImageDecisionKind | null {
   const k = (raw as any)?.decision?.kind;
   return kinds.includes(k) ? k : null;
 }
+
+export type GateAction =
+  | { action: "allow" }
+  | { action: "block"; msg: "noHelper" | "helperUnavailable" | "helperNotVision" | "mainNotVision" | "unknownDecision" }
+  | { action: "confirm"; msg: "helperUnknown" | "mainUnknown" };
+
+/** 决策 → 前端动作。**fail-closed**：null/未知载荷一律 block，绝不放行。 */
+export function imageGateAction(kind: ImageDecisionKind | null): GateAction {
+  switch (kind) {
+    case "allow_via_description":
+    case "allow_native_vision":
+      return { action: "allow" };
+    case "block_no_helper":
+      return { action: "block", msg: "noHelper" };
+    case "block_helper_unavailable":
+      return { action: "block", msg: "helperUnavailable" };
+    case "block_helper_not_vision":
+      return { action: "block", msg: "helperNotVision" };
+    case "block_main_not_vision":
+      return { action: "block", msg: "mainNotVision" };
+    case "warn_helper_unknown":
+      return { action: "confirm", msg: "helperUnknown" };
+    case "warn_main_unknown":
+      return { action: "confirm", msg: "mainUnknown" };
+    default:
+      return { action: "block", msg: "unknownDecision" };
+  }
+}

@@ -19,7 +19,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
-import { parseFileIssue, parseImageDecision } from "./caps";
+import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
@@ -453,6 +453,7 @@ function App() {
     configKinds: string[];
   } | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
+  const imageGateRef = useRef(false); // #127-3 图片门控 await 窗口重入护栏
   const [pastedImages, setPastedImages] = useState<{ data: string; mime: string; preview: string }[]>([]);
   const [permMode, setPermMode] = useState<PermMode>(
     (localStorage.getItem("wancode-perm-mode") as PermMode) || "manual",
@@ -1791,30 +1792,37 @@ function App() {
     }
     const imgs = pastedImages;
     // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
-    // Block* 阻断并给出针对性引导；Warn* 二次确认可"仍然尝试"。
+    // Block* 阻断并针对性引导；Warn* 二次确认；未知载荷 fail-closed 阻断。
+    // 判定期间置重入护栏：await 窗口内再按 Enter 不得二次发送。
     if (imgs.length > 0) {
-      let kind: ReturnType<typeof parseImageDecision> = null;
+      if (imageGateRef.current) return;
+      imageGateRef.current = true;
       try {
-        kind = parseImageDecision(await invoke("image_send_check", { mainKey: model || null }));
-      } catch (e) {
-        setError(String(e));
-        return;
+        let kind: ReturnType<typeof parseImageDecision> = null;
+        try {
+          kind = parseImageDecision(await invoke("image_send_check", { mainKey: model || null }));
+        } catch (e) {
+          setError(String(e));
+          return;
+        }
+        const gate = imageGateAction(kind);
+        if (gate.action === "block") {
+          setError(
+            gate.msg === "noHelper" ? t.imgBlockNoHelper
+            : gate.msg === "helperUnavailable" ? t.imgBlockHelperUnavailable
+            : gate.msg === "helperNotVision" ? t.imgBlockHelperNotVision
+            : gate.msg === "mainNotVision" ? t.imgBlockMainNotVision
+            : t.imgBlockUnknownDecision,
+          );
+          return;
+        }
+        if (gate.action === "confirm") {
+          const msg = gate.msg === "helperUnknown" ? t.imgWarnHelperUnknown : t.imgWarnMainUnknown;
+          if (!window.confirm(msg)) return;
+        }
+      } finally {
+        imageGateRef.current = false;
       }
-      const blockMsg =
-        kind === "block_no_helper" ? t.imgBlockNoHelper
-        : kind === "block_helper_unavailable" ? t.imgBlockHelperUnavailable
-        : kind === "block_helper_not_vision" ? t.imgBlockHelperNotVision
-        : kind === "block_main_not_vision" ? t.imgBlockMainNotVision
-        : null;
-      if (blockMsg) {
-        setError(blockMsg);
-        return;
-      }
-      const warnMsg =
-        kind === "warn_helper_unknown" ? t.imgWarnHelperUnknown
-        : kind === "warn_main_unknown" ? t.imgWarnMainUnknown
-        : null;
-      if (warnMsg && !window.confirm(warnMsg)) return;
     }
     setInput("");
     setPastedImages([]);
