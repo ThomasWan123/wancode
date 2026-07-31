@@ -14,13 +14,13 @@
 //! provider（按真实 hostname 域名边界判定）+ 上游 slug——绝不按 catalog
 //! key（可被用户任意重命名）。结果附带来源（config / built_in / unknown）。
 //!
-//! 存储契约（复核定案）：显式覆盖放 WanCode 自有命名空间
-//! `[wancode.model_capabilities.<catalog_key>]`——[model.X] 是引擎的字段
-//! 空间，塞 capabilities 会被其 serde_ignored 记为 UnknownField 并打印
-//! "skipped invalid config"，把正确配置报告成无效。自有命名空间下引擎的
-//! model_override_warnings 保持为零（顶层未知 section 仅一条 tracing 日志，
-//! 不进告警、不影响条目）。显式覆盖本就需要定位具体条目，故按 catalog_key
-//! 寻址；内置识别仍只按 provider + slug，不受 key 重命名影响。
+//! 存储契约（复核四版定案）：显式覆盖放**独立文件** `~/.grok/wancode.toml`
+//! 的 `[model_capabilities.<catalog_key>]`。config.toml 的任何位置都不放
+//! WanCode 专属数据——[model.X] 塞子字段会被引擎记 UnknownField，顶层
+//! [wancode] section 也会触发 "config has unrecognized key(s)" 告警：
+//! 引擎不该解析 WanCode 专属数据（先例：~/.grok/hooks/wancode.json）。
+//! 显式覆盖本就需要定位具体条目，故按 catalog_key 寻址；内置识别仍只按
+//! provider + slug，不受 key 重命名影响。
 //!
 //! 配置解析 fail-visible：类型错误、未知字段返回诊断（CapIssue），
 //! 不静默当作未配置。
@@ -42,7 +42,7 @@ pub enum CapState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapSource {
-    /// 用户在 config.toml [wancode.model_capabilities.<key>] 显式声明。
+    /// 用户在 ~/.grok/wancode.toml [model_capabilities.<key>] 显式声明。
     Config,
     /// 内置能力表按 provider + slug 精确匹配。
     BuiltIn,
@@ -126,31 +126,36 @@ pub struct CapIssue {
 const CAP_FIELDS: [&str; 4] = ["text", "tool_use", "vision_input", "reasoning"];
 
 impl CapOverrides {
-    /// 从整份 config 文档读取某 catalog key 的能力覆盖：
-    /// `[wancode.model_capabilities.<catalog_key>]`。
-    /// 条目缺失 → (default, 空诊断)：旧配置零迁移。
+    /// 从 wancode.toml 文档读取某 catalog key 的能力覆盖：
+    /// `[model_capabilities.<catalog_key>]`。
+    /// 各层缺失 → (default, 空诊断)：无覆盖是常态。
+    /// 各层**存在但类型错误** → NotATable 诊断（fail-visible）：
+    /// "父级缺失"与"父级写错"绝不合并成同一个静默 None。
     pub fn for_model(
         doc: &toml_edit::DocumentMut,
         catalog_key: &str,
     ) -> (CapOverrides, Vec<CapIssue>) {
-        let node = doc
-            .get("wancode")
-            .and_then(|w| w.as_table_like())
-            .and_then(|w| w.get("model_capabilities"))
-            .and_then(|m| m.as_table_like())
-            .and_then(|m| m.get(catalog_key));
-        match node {
-            None => (CapOverrides::default(), Vec::new()),
-            Some(v) => match v.as_table_like() {
-                Some(caps) => Self::from_caps_table(caps),
-                None => (
-                    CapOverrides::default(),
-                    vec![CapIssue {
-                        field: catalog_key.into(),
-                        kind: CapIssueKind::NotATable,
-                    }],
-                ),
-            },
+        let not_a_table = |field: &str| {
+            (
+                CapOverrides::default(),
+                vec![CapIssue {
+                    field: field.into(),
+                    kind: CapIssueKind::NotATable,
+                }],
+            )
+        };
+        let Some(mc_item) = doc.get("model_capabilities") else {
+            return (CapOverrides::default(), Vec::new());
+        };
+        let Some(mc) = mc_item.as_table_like() else {
+            return not_a_table("model_capabilities");
+        };
+        let Some(entry_item) = mc.get(catalog_key) else {
+            return (CapOverrides::default(), Vec::new());
+        };
+        match entry_item.as_table_like() {
+            Some(caps) => Self::from_caps_table(caps),
+            None => not_a_table(catalog_key),
         }
     }
 
@@ -189,6 +194,12 @@ impl CapOverrides {
         }
         (ov, issues)
     }
+}
+
+/// WanCode 自有配置文件：与引擎 config.toml 同目录、引擎绝不解析。
+/// （先例：~/.grok/hooks/wancode.json。）
+pub fn wancode_config_path() -> std::path::PathBuf {
+    xai_grok_shell::util::grok_home::grok_home().join("wancode.toml")
 }
 
 /// endpoint 归类：按真实 hostname 的域名边界判定，
@@ -442,15 +453,8 @@ mod tests {
     /// ④：旧配置（无 capabilities 子表）正常解析，零诊断，全走内置/unknown。
     #[test]
     fn legacy_config_without_capabilities_parses() {
-        let (ov, issues) = overrides_for(
-            r#"
-[model.glm-4v-flash]
-model = "glm-4v-flash"
-base_url = "https://open.bigmodel.cn/api/paas/v4"
-env_key = "ZHIPU_API_KEY"
-"#,
-            "glm-4v-flash",
-        );
+        // 老用户没有 wancode.toml——空文档必须零覆盖零诊断
+        let (ov, issues) = overrides_for("", "glm-4v-flash");
         assert_eq!(ov, CapOverrides::default());
         assert!(issues.is_empty());
     }
@@ -464,7 +468,7 @@ env_key = "ZHIPU_API_KEY"
 model = "custom-llm"
 base_url = "https://example.com/v1"
 
-[wancode.model_capabilities.custom]
+[model_capabilities.custom]
 vision_input = true
 tool_use = false
 "#,
@@ -484,7 +488,7 @@ tool_use = false
     fn config_errors_produce_visible_diagnostics() {
         let (ov, issues) = overrides_for(
             r#"
-[wancode.model_capabilities.custom]
+[model_capabilities.custom]
 vision_input = "true"
 visoin_input = true
 image_description = true
@@ -509,7 +513,7 @@ image_description = true
         // 能力条目不是表
         let (_, issues) = overrides_for(
             r#"
-[wancode.model_capabilities]
+[model_capabilities]
 custom = "all"
 "#,
             "custom",
@@ -521,6 +525,25 @@ custom = "all"
                 kind: CapIssueKind::NotATable
             }]
         );
+    }
+
+    /// 父级层级 fail-visible："存在但类型错"必须出 NotATable 诊断，
+    /// 绝不与"缺失"合并成静默零诊断。
+    #[test]
+    fn parent_level_type_errors_are_visible() {
+        // model_capabilities 本身不是表
+        let (ov, issues) = overrides_for(r#"model_capabilities = "bad""#, "custom");
+        assert_eq!(ov, CapOverrides::default());
+        assert_eq!(
+            issues,
+            vec![CapIssue {
+                field: "model_capabilities".into(),
+                kind: CapIssueKind::NotATable
+            }]
+        );
+        // 缺失才是零诊断
+        let (_, issues) = overrides_for(r#"other = 1"#, "custom");
+        assert!(issues.is_empty());
     }
 
     /// 解析器是纯函数：同输入必同输出（含来源）。
@@ -596,35 +619,36 @@ custom = "all"
     }
 
     /// 真实引擎配置加载（存储契约的干净性证明）：
-    /// [model.X] 保持引擎原生字段，能力覆盖放 [wancode.model_capabilities.X]
-    /// —— 经引擎 `Config::new_from_toml_cfg` 后：模型进目录、
-    /// **model_override_warnings 为零**（正确的 WanCode 配置绝不被引擎报告
-    /// 成无效配置），且 WanCode 解析器能读到覆盖。
+    /// 能力覆盖住独立的 wancode.toml，config.toml 里**不出现任何 WanCode
+    /// 专属数据**——引擎 `Config::new_from_toml_cfg` 加载后模型进目录、
+    /// model_override_warnings 为零，且不存在会触发顶层 unrecognized-key
+    /// 告警的 section（契约上 config.toml 与本功能无交集）。
+    /// 同时 WanCode 解析器从 wancode.toml 读到覆盖。
     #[test]
-    fn engine_config_load_clean_with_wancode_namespace() {
-        let text = r#"
+    fn engine_config_untouched_and_separate_file_readable() {
+        // config.toml：与本功能引入前逐字相同
+        let config_toml = r#"
 [model.glm-4v-flash]
 model = "glm-4v-flash"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 env_key = "ZHIPU_API_KEY"
-
-[wancode.model_capabilities.glm-4v-flash]
-vision_input = true
 "#;
-        let raw: toml::Value = toml::from_str(text).expect("toml parse");
+        let raw: toml::Value = toml::from_str(config_toml).expect("toml parse");
         let cfg = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw)
             .expect("engine config load");
-        assert!(
-            cfg.config_models.contains_key("glm-4v-flash"),
-            "wancode 命名空间不得影响模型进目录"
-        );
+        assert!(cfg.config_models.contains_key("glm-4v-flash"));
         assert!(
             cfg.model_override_warnings.is_empty(),
-            "正确配置必须零 model_override_warnings，实际: {:?}",
+            "实际: {:?}",
             cfg.model_override_warnings
         );
-        // WanCode 解析器读同一份文本得到覆盖
-        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+
+        // wancode.toml：独立文件，引擎从不解析
+        let wancode_toml = r#"
+[model_capabilities.glm-4v-flash]
+vision_input = true
+"#;
+        let doc: toml_edit::DocumentMut = wancode_toml.parse().unwrap();
         let (ov, issues) = CapOverrides::for_model(&doc, "glm-4v-flash");
         assert!(issues.is_empty());
         assert_eq!(ov.vision_input, Some(true));
