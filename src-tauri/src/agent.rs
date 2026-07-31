@@ -81,6 +81,9 @@ pub struct StartResult {
     /// name + sanitized endpoint host come along so two same-named models are
     /// distinguishable in the UI (v0.18.7-B).
     pub model_options: Vec<ModelOption>,
+    /// #127-2：config.toml 读取/解析失败时的文件级诊断——能力元数据问题
+    /// 不阻止会话启动，但绝不静默（全员 unknown 必须有可见原因）。
+    pub caps_config_issue: Option<crate::caps_snapshot::FileIssue>,
 }
 
 #[derive(serde::Serialize, Clone, Default)]
@@ -88,6 +91,8 @@ pub struct ModelOption {
     pub id: String,
     pub name: String,
     pub endpoint_label: String,
+    /// #127-2：能力 + 归属诊断（聊天目录链适配器产出；前端徽章在 PR 3）。
+    pub caps: crate::caps_snapshot::ResolvedModelCaps,
 }
 
 #[derive(Serialize, Clone)]
@@ -352,6 +357,12 @@ pub(crate) async fn start_inner(
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
         (resp.session_id, resp.models)
     };
+    // #127-2 聊天目录链：同一世代快照 + config 文档，逐 option 出能力。
+    // 配置读取/解析失败不阻止会话启动，但必须作为结构化诊断随
+    // StartResult 返回——禁止 unwrap_or_default 静默降级为全员 unknown。
+    let caps_snapshot = app.state::<crate::caps_snapshot::CapsState>().snapshot();
+    let (caps_config_doc, caps_config_issue) =
+        crate::caps_snapshot::load_config_doc(&crate::config_core::user_config_path());
     let (model_ids, current_model_id, model_options): (
         Vec<String>,
         Option<String>,
@@ -366,16 +377,25 @@ pub(crate) async fn start_inner(
                 Some(m.current_model_id.0.to_string()),
                 m.available_models
                     .iter()
-                    .map(|am| ModelOption {
-                        id: am.model_id.0.to_string(),
-                        name: am.name.clone(),
-                        endpoint_label: am
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.get("endpointLabel"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
+                    .map(|am| {
+                        let id = am.model_id.0.to_string();
+                        let caps = crate::caps_snapshot::model_option_caps(
+                            &caps_snapshot,
+                            &id,
+                            &caps_config_doc,
+                        );
+                        ModelOption {
+                            name: am.name.clone(),
+                            endpoint_label: am
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("endpointLabel"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            caps,
+                            id,
+                        }
                     })
                     .collect(),
             )
@@ -411,6 +431,7 @@ pub(crate) async fn start_inner(
         cwd: cwd.to_string_lossy().into_owned(),
         model_block,
         model_options,
+        caps_config_issue,
     })
 }
 

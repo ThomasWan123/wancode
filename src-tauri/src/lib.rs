@@ -7,6 +7,7 @@ mod engine_ops;
 mod review_ops;
 mod autotest;
 mod provider_ops;
+pub mod caps_snapshot;
 pub mod model_caps;
 pub mod updater_launch;
 mod updater_ops;
@@ -125,6 +126,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(agent::AgentState::default())
+        .manage(caps_snapshot::CapsState::init())
         .manage(updater_ops::PendingUpdate::default())
         .setup(|app| {
             if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
@@ -259,6 +261,8 @@ pub fn run() {
             skills_ops::skills_create,
             skills_ops::skills_open,
             provider_ops::model_list,
+            provider_ops::model_caps_diagnostics,
+            provider_ops::model_caps_reload,
             provider_ops::model_upsert,
             provider_ops::model_remove,
             provider_ops::provider_quick_setup,

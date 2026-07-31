@@ -56,6 +56,18 @@ pub struct Cap {
     pub source: CapSource,
 }
 
+impl Default for Cap {
+    fn default() -> Cap {
+        Cap::UNKNOWN
+    }
+}
+
+impl Default for ModelCaps {
+    fn default() -> ModelCaps {
+        ModelCaps::UNKNOWN
+    }
+}
+
 impl Cap {
     const UNKNOWN: Cap = Cap {
         state: CapState::Unknown,

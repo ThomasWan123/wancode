@@ -32,11 +32,17 @@ pub struct ModelEntry {
     pub has_key: bool,
     /// True if this model's key lives in the WanCode keyring (editable here).
     pub managed: bool,
+    /// #127-2：能力 + 该条目归属的诊断（设置页链适配器产出）。
+    pub caps: crate::caps_snapshot::ResolvedModelCaps,
 }
 
 /// List model presets from config.toml.
 #[tauri::command]
-pub async fn model_list() -> Result<Vec<ModelEntry>, String> {
+pub async fn model_list(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+) -> Result<Vec<ModelEntry>, String> {
+    // 整个列表用同一世代的快照（列表内一致性）
+    let snapshot = caps_state.snapshot();
     let path = user_config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
@@ -63,13 +69,17 @@ pub async fn model_list() -> Result<Vec<ModelEntry>, String> {
                     .unwrap_or(false)
                     || get("api_key").is_some()
             };
+            let model_slug = get("model").unwrap_or_else(|| key.to_string());
+            let base_url = get("base_url").unwrap_or_default();
+            let caps = crate::caps_snapshot::settings_caps_for(&snapshot, key, &model_slug, &base_url);
             out.push(ModelEntry {
                 name: get("name").unwrap_or_else(|| key.to_string()),
-                model: get("model").unwrap_or_else(|| key.to_string()),
-                base_url: get("base_url").unwrap_or_default(),
+                model: model_slug,
+                base_url,
                 env_key,
                 has_key,
                 managed,
+                caps,
                 key: key.to_string(),
             });
         }
@@ -80,6 +90,7 @@ pub async fn model_list() -> Result<Vec<ModelEntry>, String> {
 /// Add/update a model preset; stores the API key in the system keyring.
 #[tauri::command]
 pub async fn model_upsert(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
     key: String,
     name: String,
     model: String,
@@ -111,7 +122,10 @@ pub async fn model_upsert(
     entry["api_backend"] = toml_edit::value("chat_completions");
     entry["context_window"] = toml_edit::value(128000i64);
     models.insert(&key, toml_edit::Item::Table(entry));
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+    // 配置世代切换：能力快照原子换新（#127-2）
+    caps_state.reload();
+    Ok(())
 }
 
 /// One-click provider setup for novice users: pick a preset, paste ONE key.
@@ -124,10 +138,13 @@ pub async fn model_upsert(
 /// (开放平台)、"deepseek".
 #[tauri::command]
 pub async fn provider_quick_setup(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
     preset: String,
     api_key: String,
 ) -> Result<serde_json::Value, String> {
-    provider_quick_setup_impl(preset, api_key, None, user_config_path()).await
+    let out = provider_quick_setup_impl(preset, api_key, None, user_config_path()).await?;
+    caps_state.reload();
+    Ok(out)
 }
 
 /// 可注入版本（G2 单测用）：base_url_override 换掉预设端点、config_path
@@ -230,7 +247,10 @@ pub(crate) async fn provider_quick_setup_impl(
 
 /// Remove a model preset and its keyring entry.
 #[tauri::command]
-pub async fn model_remove(key: String) -> Result<(), String> {
+pub async fn model_remove(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+    key: String,
+) -> Result<(), String> {
     let _ = keyring::Entry::new(KEYRING_SERVICE, &key).and_then(|e| e.delete_credential());
     let path = user_config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -273,7 +293,31 @@ pub async fn model_remove(key: String) -> Result<(), String> {
             }
         }
     }
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+    // 配置世代切换：能力快照原子换新（#127-2）
+    caps_state.reload();
+    Ok(())
+}
+
+/// #127-2 设置页横幅数据：文件级问题 + 全量带归属诊断。
+#[tauri::command]
+pub async fn model_caps_diagnostics(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+) -> Result<serde_json::Value, String> {
+    let snapshot = caps_state.snapshot();
+    Ok(serde_json::json!({
+        "fileIssue": snapshot.file_issue,
+        "issues": snapshot.issues(),
+    }))
+}
+
+/// #127-2 显式刷新：重读 wancode.toml，原子换代（热加载，无需重启）。
+#[tauri::command]
+pub async fn model_caps_reload(
+    caps_state: tauri::State<'_, crate::caps_snapshot::CapsState>,
+) -> Result<(), String> {
+    caps_state.reload();
+    Ok(())
 }
 
 /// Test a provider: minimal chat completion against base_url. Returns the
