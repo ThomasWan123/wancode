@@ -144,10 +144,16 @@ async fn handler(
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
     let n = probe.hits.fetch_add(1, Ordering::SeqCst);
-    probe.bodies.lock().unwrap().push(body);
+    probe.bodies.lock().unwrap().push(body.clone());
+    // 分支按**请求内容**而非 hits 计数：辅助请求（标题/建议生成回落到
+    // 本端点）会抢占计数导致时序脆弱（CI 实锤）。
+    let body_s = body.to_string();
+    let has_tool_results = body_s.contains(r#""role":"tool""#);
+    let is_main_turn = body_s.contains("use tools");
+    let _ = n;
     match probe.scenario {
         Scenario::ToolRoundtrip => {
-            if n == 0 {
+            if is_main_turn && !has_tool_results {
                 sse(tool_call_chunks(&[(
                     "call_1",
                     "list_dir",
@@ -158,7 +164,7 @@ async fn handler(
             }
         }
         Scenario::ParallelToolCalls => {
-            if n == 0 {
+            if is_main_turn && !has_tool_results {
                 sse(tool_call_chunks(&[
                     ("call_a", "list_dir", r#"{"path":"."}"#),
                     ("call_b", "list_dir", r#"{"path":".."}"#),
@@ -421,22 +427,31 @@ async fn provider_compliance_tools_and_multimodal() {
                     .as_ref()
                     .unwrap_or_else(|e| panic!("ToolRoundtrip 回合必须收束：{e}"));
                 let bodies = main_mock.probe.bodies.lock().unwrap().clone();
-                assert!(bodies.len() >= 2, "工具往返必须至少 2 次请求");
-                // B3 请求形状：首请求带 tools 数组且含 list_dir；messages 有 role
-                let first = &bodies[0];
-                let tools = body_text(first);
+                // 引擎的辅助请求（标题/建议生成回落会话客户端）可能与主
+                // 回合交错抢占下标——按**内容**选请求，不按位置（CI 时序
+                // 实锤过 bodies[0] 被辅助请求占据）。
+                let main_req = bodies
+                    .iter()
+                    .find(|b| body_text(b).contains("use tools"))
+                    .expect("必须存在携带用户查询的主回合请求");
+                // B3 请求形状：主回合请求带 tools 数组且含 list_dir
+                let tools = body_text(main_req);
                 assert!(
                     tools.contains(r#""tools""#) && tools.contains("list_dir"),
-                    "首请求必须携带工具声明（含 list_dir）"
+                    "主回合请求必须携带工具声明（含 list_dir）"
                 );
-                let first_role = first["messages"][0]["role"].as_str().unwrap_or("");
+                let first_role = main_req["messages"][0]["role"].as_str().unwrap_or("");
                 assert!(
                     first_role == "system" || first_role == "user",
                     "messages[0].role 形状异常：{first_role}"
                 );
-                // 往返：第二次请求带 role:tool 且 tool_call_id 对应
-                let ids = tool_result_entries(&bodies[1]);
-                assert_eq!(ids, vec!["call_1"], "第二次请求必须携带对应工具结果");
+                // 往返：存在携带工具结果的后续请求，且 id 精确对应
+                let ids = bodies
+                    .iter()
+                    .map(tool_result_entries)
+                    .find(|ids| !ids.is_empty())
+                    .expect("必须存在携带工具结果的后续请求");
+                assert_eq!(ids, vec!["call_1"], "工具结果的 tool_call_id 必须精确对应");
                 assert!(
                     transcript.contains("TOOLS-DONE"),
                     "最终文本必须送达：{transcript}"
@@ -447,13 +462,16 @@ async fn provider_compliance_tools_and_multimodal() {
                     .as_ref()
                     .unwrap_or_else(|e| panic!("ParallelToolCalls 回合必须收束：{e}"));
                 let bodies = main_mock.probe.bodies.lock().unwrap().clone();
-                assert!(bodies.len() >= 2, "并行工具也必须完成往返");
-                let mut ids = tool_result_entries(&bodies[1]);
+                let mut ids = bodies
+                    .iter()
+                    .map(tool_result_entries)
+                    .find(|ids| !ids.is_empty())
+                    .expect("必须存在携带工具结果的后续请求");
                 ids.sort();
                 assert_eq!(
                     ids,
                     vec!["call_a", "call_b"],
-                    "两条并行调用的结果必须都在第二次请求里"
+                    "两条并行调用的结果必须都在同一后续请求里"
                 );
                 assert!(transcript.contains("PARALLEL-DONE"));
             }
