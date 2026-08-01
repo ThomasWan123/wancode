@@ -315,7 +315,7 @@ pub(crate) fn image_send_decision(
     use crate::caps_snapshot::model_option_caps;
     use crate::model_caps::{decide_image_path, HelperStatus};
 
-    let helper_key = doc
+    let helper_ref = doc
         .get("models")
         .and_then(|m| m.as_table_like())
         .and_then(|t| t.get("image_description"))
@@ -323,17 +323,37 @@ pub(crate) fn image_send_decision(
         .map(str::trim)
         .filter(|k| !k.is_empty())
         .map(String::from);
-    let helper_in_catalog = |k: &str| {
-        doc.get("model")
-            .and_then(|m| m.as_table_like())
-            .map(|t| t.get(k).is_some())
-            .unwrap_or(false)
+    // image_description 是**运行时 slug**（4b 套件实证），不是 catalog
+    // key——直接按 key 查会把"key≠slug 的合法配置"错判成 Unavailable。
+    // 解析次序：精确 key 命中（引擎 find_model_by_id 的第一分支，兼容
+    // key==slug 的常见配置）→ 全 [model.*].model 按 slug 扫描，唯一命中
+    // 才算数；重复 slug fail-closed（禁止 first/last wins——v0.18.6 身份
+    // 治理的既定纪律，引擎的 first-wins 在此收紧）。
+    let resolve_helper_catalog_key = |r: &str| -> Option<String> {
+        let table = doc.get("model").and_then(|m| m.as_table_like())?;
+        if table.get(r).is_some() {
+            return Some(r.to_string());
+        }
+        let matches: Vec<String> = table
+            .iter()
+            .filter(|(_, item)| {
+                item.as_table_like()
+                    .and_then(|t| t.get("model"))
+                    .and_then(|v| v.as_str())
+                    == Some(r)
+            })
+            .map(|(k, _)| k.to_string())
+            .collect();
+        match matches.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None, // 0 个或多个（歧义）都不可路由
+        }
     };
-    let helper_caps = helper_key
+    let helper_catalog_key = helper_ref.as_deref().and_then(resolve_helper_catalog_key);
+    let helper_caps = helper_catalog_key
         .as_deref()
-        .filter(|k| helper_in_catalog(k))
         .map(|k| model_option_caps(snapshot, k, doc).caps);
-    let helper = match (&helper_key, &helper_caps) {
+    let helper = match (&helper_ref, &helper_caps) {
         (None, _) => HelperStatus::Missing,
         (Some(_), None) => HelperStatus::Unavailable,
         (Some(_), Some(c)) => HelperStatus::Resolved(c),
@@ -341,7 +361,7 @@ pub(crate) fn image_send_decision(
     let main_caps = main_key
         .map(|k| model_option_caps(snapshot, k, doc).caps)
         .unwrap_or_default();
-    (decide_image_path(transcribe_on, helper, &main_caps), helper_key)
+    (decide_image_path(transcribe_on, helper, &main_caps), helper_ref)
 }
 
 #[tauri::command]
@@ -414,6 +434,52 @@ base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
         set(None);
         assert!(!transcribe_images_enabled());
         set(orig.as_deref());
+    }
+
+    /// key≠slug 的合法配置（4b 实证的引擎语义）：image_description 写
+    /// slug、条目 key 任意——必须解析成功并放行，不得错判 Unavailable。
+    #[test]
+    fn helper_slug_resolves_when_key_differs() {
+        let snap = CapabilitySnapshot::empty();
+        let cfg = r#"
+[models]
+image_description = "glm-4v-flash"
+
+[model.my-eyes]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[model.main-text]
+model = "glm-5.2"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+"#;
+        let (d, _) = image_send_decision(true, &doc(cfg), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::AllowViaDescription);
+    }
+
+    /// 重复 slug fail-closed：两个条目同 slug 且无精确 key 命中——禁止
+    /// first/last wins（v0.18.6 身份治理纪律），判 Unavailable 阻断引导。
+    #[test]
+    fn duplicate_helper_slug_fails_closed() {
+        let snap = CapabilitySnapshot::empty();
+        let cfg = r#"
+[models]
+image_description = "glm-4v-flash"
+
+[model.eyes-open]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[model.eyes-coding]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+
+[model.main-text]
+model = "glm-5.2"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+"#;
+        let (d, _) = image_send_decision(true, &doc(cfg), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::BlockHelperUnavailable);
     }
 
     /// 辅助模型三态：Resolved / Unavailable（配置了但不在目录）/ Missing。

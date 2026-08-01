@@ -49,6 +49,8 @@ enum Scenario {
     TranscribeRoute,
     /// D1b：转述关闭——图片内联进主模型请求。
     InlineRoute,
+    /// helper mock 专属：返回唯一描述标记，供 D1a 断言"描述进入主模型"。
+    HelperVision,
 }
 
 #[derive(Clone)]
@@ -145,37 +147,55 @@ async fn handler(
 ) -> Response {
     probe.hits.fetch_add(1, Ordering::SeqCst);
     probe.bodies.lock().unwrap().push(body.clone());
-    // 分支按**请求内容**而非 hits 计数：辅助请求（标题/建议生成回落到
-    // 本端点）会抢占计数导致时序脆弱（CI 实锤）。
-    let body_s = body.to_string();
-    let has_tool_results = body_s.contains(r#""role":"tool""#);
-    let is_main_turn = body_s.contains("use tools");
+    // 分流按**结构**而非用户文本（复核定案：辅助请求会内嵌用户查询，
+    // 文本判据必然误判）：
+    //   messages 含 role=="tool" → 工具结果已回，给终稿；
+    //   tools 为非空数组       → 主工具请求，给 tool_calls；
+    //   其余（辅助标题/建议）   → 短文本。
+    let has_tool_results = body["messages"]
+        .as_array()
+        .map(|msgs| {
+            msgs.iter()
+                .any(|m| m["role"].as_str() == Some("tool"))
+        })
+        .unwrap_or(false);
+    let is_tool_request = body["tools"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
     match probe.scenario {
         Scenario::ToolRoundtrip => {
-            if is_main_turn && !has_tool_results {
+            if has_tool_results {
+                sse(text_chunks("TOOLS-DONE"))
+            } else if is_tool_request {
                 sse(tool_call_chunks(&[(
                     "call_1",
                     "list_dir",
                     r#"{"path":"."}"#,
                 )]))
             } else {
-                sse(text_chunks("TOOLS-DONE"))
+                sse(text_chunks("AUX-DONE"))
             }
         }
         Scenario::ParallelToolCalls => {
-            if is_main_turn && !has_tool_results {
+            if has_tool_results {
+                sse(text_chunks("PARALLEL-DONE"))
+            } else if is_tool_request {
                 sse(tool_call_chunks(&[
                     ("call_a", "list_dir", r#"{"path":"."}"#),
                     ("call_b", "list_dir", r#"{"path":".."}"#),
                 ]))
             } else {
-                sse(text_chunks("PARALLEL-DONE"))
+                sse(text_chunks("AUX-DONE"))
             }
         }
-        // 多模态两情景：主/辅 mock 都只回文本（断言对象是**请求**形状）
+        // 主 mock：只回文本（断言对象是**请求**形状与描述透传）
         Scenario::TranscribeRoute | Scenario::InlineRoute => {
             sse(text_chunks("MM-DONE"))
         }
+        // helper mock：返回唯一描述标记——D1a 据此断言"图片 → helper →
+        // 文字描述 → main"整条链路，而非仅两端各自形状。
+        Scenario::HelperVision => sse(text_chunks("VISION-DESCRIPTION-4B")),
     }
 }
 
@@ -379,7 +399,9 @@ async fn provider_compliance_tools_and_multimodal() {
         let main_mock = spawn_mock(scenario).await;
         // 多模态情景配独立 helper mock；helper 只在 TranscribeRoute 被路由
         let helper_mock = match scenario {
-            Scenario::TranscribeRoute | Scenario::InlineRoute => Some(spawn_mock(scenario).await),
+            Scenario::TranscribeRoute | Scenario::InlineRoute => {
+                Some(spawn_mock(Scenario::HelperVision).await)
+            }
             _ => None,
         };
         write_config(
@@ -546,6 +568,18 @@ async fn provider_compliance_tools_and_multimodal() {
                         "主模型请求不得内联图片（转述已接管）"
                     );
                 }
+                // 链路闭环：helper 的描述文本必须进入主模型请求——否则
+                // "引擎丢弃转述结果"也能通过前两条断言。
+                assert!(
+                    main_mock
+                        .probe
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|b| body_text(b).contains("VISION-DESCRIPTION-4B")),
+                    "主模型请求必须包含 helper 返回的描述标记"
+                );
             }
             Scenario::InlineRoute => {
                 result
@@ -563,6 +597,8 @@ async fn provider_compliance_tools_and_multimodal() {
                     "转述关闭：helper 不得被调用"
                 );
             }
+            // 仅作 helper mock 的响应脚本，不是独立情景
+            Scenario::HelperVision => unreachable!("HelperVision 不进情景循环"),
         }
         cancel.cancel();
         summary.push(serde_json::json!({
