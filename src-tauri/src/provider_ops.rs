@@ -324,16 +324,14 @@ pub(crate) fn image_send_decision(
         .filter(|k| !k.is_empty())
         .map(String::from);
     // image_description 是**运行时 slug**（4b 套件实证），不是 catalog
-    // key——直接按 key 查会把"key≠slug 的合法配置"错判成 Unavailable。
-    // 解析次序：精确 key 命中（引擎 find_model_by_id 的第一分支，兼容
-    // key==slug 的常见配置）→ 全 [model.*].model 按 slug 扫描，唯一命中
-    // 才算数；重复 slug fail-closed（禁止 first/last wins——v0.18.6 身份
-    // 治理的既定纪律，引擎的 first-wins 在此收紧）。
+    // key。解析次序固定（复核定案，防"字面 key 命中洗掉歧义"）：
+    //   ① slug 唯一匹配 → 用对应 catalog key；
+    //   ② slug 多匹配 → 歧义 fail-closed（禁止 first/last wins，
+    //      v0.18.6 身份治理纪律，较引擎 first-wins 收紧）；
+    //   ③ slug 零匹配但精确 key 存在 → 兼容旧 catalog-key 写法兜底；
+    //   ④ 均无 → 不可路由。
     let resolve_helper_catalog_key = |r: &str| -> Option<String> {
         let table = doc.get("model").and_then(|m| m.as_table_like())?;
-        if table.get(r).is_some() {
-            return Some(r.to_string());
-        }
         let matches: Vec<String> = table
             .iter()
             .filter(|(_, item)| {
@@ -346,7 +344,8 @@ pub(crate) fn image_send_decision(
             .collect();
         match matches.as_slice() {
             [one] => Some(one.clone()),
-            _ => None, // 0 个或多个（歧义）都不可路由
+            [] if table.get(r).is_some() => Some(r.to_string()),
+            _ => None, // 多匹配（歧义）或全无
         }
     };
     let helper_catalog_key = helper_ref.as_deref().and_then(resolve_helper_catalog_key);
@@ -480,6 +479,52 @@ base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
 "#;
         let (d, _) = image_send_decision(true, &doc(cfg), &snap, Some("main-text"));
         assert_eq!(d, ImagePathDecision::BlockHelperUnavailable);
+    }
+
+    /// 同名字面值不得洗掉歧义（复核 P0 边界）：存在 key==slug 的条目，
+    /// 但另一条目也用同一 slug——必须歧义阻断，不许字面 key 抢先命中。
+    #[test]
+    fn literal_key_must_not_wash_out_slug_ambiguity() {
+        let snap = CapabilitySnapshot::empty();
+        let cfg = r#"
+[models]
+image_description = "glm-4v-flash"
+
+[model.glm-4v-flash]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[model.eyes-coding]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+
+[model.main-text]
+model = "glm-5.2"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+"#;
+        let (d, _) = image_send_decision(true, &doc(cfg), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::BlockHelperUnavailable);
+    }
+
+    /// 兼容兜底（次序③）：slug 零匹配、但存在精确 key ——旧 catalog-key
+    /// 写法仍可路由。
+    #[test]
+    fn exact_key_fallback_when_no_slug_matches() {
+        let snap = CapabilitySnapshot::empty();
+        let cfg = r#"
+[models]
+image_description = "my-eyes"
+
+[model.my-eyes]
+model = "glm-4v-flash"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[model.main-text]
+model = "glm-5.2"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+"#;
+        let (d, _) = image_send_decision(true, &doc(cfg), &snap, Some("main-text"));
+        assert_eq!(d, ImagePathDecision::AllowViaDescription);
     }
 
     /// 辅助模型三态：Resolved / Unavailable（配置了但不在目录）/ Missing。
