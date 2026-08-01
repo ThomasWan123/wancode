@@ -27,16 +27,16 @@ usage 与错误/限流格式 / 上下文长度与压缩阈值 / system-developer
 > 证据纪律：每条含测试落点、CI run、日期与 commit——不写裸"已验证"。
 > 证据类型三分：**Mock 协议合规**（本地 mock × 生产 ACP 链）/ **真实 API smoke** / **引擎层单测**——互不替代，Mock 合规不单独提升真实服务的兼容等级。
 > 权威 run：[30698185882](https://github.com/ThomasWan123/wancode/actions/runs/30698185882)（main push）。tested main SHA = `f604792ffbd6c8a6190208b4670cd980ca2d2ae3`；artifact 内 `ci_sha` 与之**一致**。日期：2026-08-01。
-> artifact 90 天过期——两份摘要内容与其 SHA-256 已固化至 [`docs/evidence/provider-compliance-v0.18.9.json`](evidence/provider-compliance-v0.18.9.json)，长期可审计。
+> artifact 90 天过期（`expires_at` 在册）——原始摘要文件冻结于 [`docs/evidence/`](evidence/)，元数据（`artifact_id` / GitHub 官方 `archive_digest_sha256` / 内层 `summary_file_sha256`，两哈希为不同对象）固化至 [`provider-compliance-v0.18.9.json`](evidence/provider-compliance-v0.18.9.json)；CI 每轮以 [`verify_compliance_evidence.py`](../scripts/verify_compliance_evidence.py) 校验已提交证据。
 
 | 维度 | 证据类型 | 证据形态 | 落点 |
 |---|---|---|---|
-| 传输/流式：标准流（带 usage 终块）、无 `[DONE]` 哨兵、无 usage 字段、`reasoning_content`（正向进 `agent_thought_chunk` + 反向不混正文） | Mock 协议合规 | 生产 ACP 链路 × 情景 mock，7 情景 | [`provider_compliance.rs`](../src-tauri/tests/provider_compliance.rs) · artifact `compliance-summary-4a` |
+| 传输/流式：标准流（带 usage 终块）、无 `[DONE]` 哨兵、无 usage 字段、`reasoning_content`（正向进 `agent_thought_chunk` + 反向不混正文） | Mock 协议合规 | 生产 ACP 链路 × 情景 mock，7 情景 | [`provider_compliance.rs`](https://github.com/ThomasWan123/wancode/blob/f604792ffbd6c8a6190208b4670cd980ca2d2ae3/src-tauri/tests/provider_compliance.rs) · artifact `compliance-summary-4a` |
 | 错误解析：401（带状态+供应商 message）、429（归类限流）、500+非 JSON 体（含状态、`max_retries=1` 恰好 2 次请求实证重试） | Mock 协议合规 | 同上，逐情景区分断言、错误绝不含 Key | 同上 |
-| 工具调用：单调用往返（`tools` 结构化声明 + `tool_call_id` 精确对应）；**并行调用协议/批量工具调用支持**（一个 delta 两条调用、结果同请求齐备——不宣称测量执行时间重叠） | Mock 协议合规 | 生产 ACP 链路，请求体形状断言 | [`provider_compliance_4b.rs`](../src-tauri/tests/provider_compliance_4b.rs) · artifact `compliance-summary-4b` |
+| 工具调用：单调用往返（`tools` 结构化声明 + `tool_call_id` 精确对应）；**并行调用协议/批量工具调用支持**（一个 delta 两条调用、结果同请求齐备——不宣称测量执行时间重叠） | Mock 协议合规 | 生产 ACP 链路，请求体形状断言 | [`provider_compliance_4b.rs`](https://github.com/ThomasWan123/wancode/blob/f604792ffbd6c8a6190208b4670cd980ca2d2ae3/src-tauri/tests/provider_compliance_4b.rs) · artifact `compliance-summary-4b` |
 | 多模态路由：转述开启"图片 → helper → 描述标记进主模型"整链闭环；转述关闭图片内联、helper 零调用 | Mock 协议合规 | 同上（双 mock，描述标记 `VISION-DESCRIPTION-4B` 透传断言） | 同上 |
-| 凭据与端点隔离 | 引擎层集成测试 | **引用引擎 Gate 1 测试**（正确端点 1 次、错误端点 0 次、Authorization 归属） | 引擎 `tests/model_endpoint_routing.rs` · CI 步"Gate 1 引擎侧路由证据" |
-| 上下文压缩 | 引擎层单测 | **引擎层覆盖**（非 ACP 级重演，如实区分于"通过"） | 引擎 crate `xai-grok-compaction` 128 条单测 · CI 步"引擎压缩单测" |
+| 凭据与端点隔离 | 引擎层集成测试 | **引用引擎 Gate 1 测试**（正确端点 1 次、错误端点 0 次、Authorization 归属） | 引擎 [`model_endpoint_routing.rs`](https://github.com/ThomasWan123/grok-build/blob/b189869b7755d2b482969acf6c92da3ecfeffd36/crates/codegen/xai-grok-shell/tests/model_endpoint_routing.rs)（基线 `b189869b`，[vendor patch](https://github.com/ThomasWan123/wancode/blob/f604792ffbd6c8a6190208b4670cd980ca2d2ae3/vendor/grok-build-local.patch) 仅含构建接线不引入测试）· CI 步"Gate 1 引擎侧路由证据" |
+| 上下文压缩 | 引擎层单测 | **引擎层覆盖**（非 ACP 级重演，如实区分于"通过"） | 引擎 crate [`xai-grok-compaction`](https://github.com/ThomasWan123/grok-build/blob/b189869b7755d2b482969acf6c92da3ecfeffd36/crates/common/xai-grok-compaction/src)（基线 `b189869b`）128 条单测 · CI 步"引擎压缩单测" |
 
 ### 套件挖出的兼容性知识（已入产品/测试）
 
