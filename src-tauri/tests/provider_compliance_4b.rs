@@ -430,16 +430,44 @@ async fn provider_compliance_tools_and_multimodal() {
                 // 引擎的辅助请求（标题/建议生成回落会话客户端）可能与主
                 // 回合交错抢占下标——按**内容**选请求，不按位置（CI 时序
                 // 实锤过 bodies[0] 被辅助请求占据）。
-                let main_req = bodies
+                // 可能多条请求都含用户查询文本（辅助标题/建议请求会内嵌
+                // 会话内容）——主回合的判据是"带 tools 声明的那条"；若一条
+                // 都没有，携带全部候选的诊断切片失败。
+                let candidates: Vec<&serde_json::Value> = bodies
                     .iter()
-                    .find(|b| body_text(b).contains("use tools"))
-                    .expect("必须存在携带用户查询的主回合请求");
-                // B3 请求形状：主回合请求带 tools 数组且含 list_dir
-                let tools = body_text(main_req);
-                assert!(
-                    tools.contains(r#""tools""#) && tools.contains("list_dir"),
-                    "主回合请求必须携带工具声明（含 list_dir）"
-                );
+                    .filter(|b| body_text(b).contains("use tools"))
+                    .collect();
+                assert!(!candidates.is_empty(), "必须存在携带用户查询的请求");
+                let main_req = candidates
+                    .iter()
+                    .find(|b| {
+                        let t = body_text(b);
+                        t.contains(r#""tools""#) && t.contains("list_dir")
+                    })
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let diag: Vec<String> = candidates
+                            .iter()
+                            .map(|b| {
+                                let t = body_text(b);
+                                format!(
+                                    "len={} model={} has_tools_key={} head={}",
+                                    t.len(),
+                                    b["model"].as_str().unwrap_or("?"),
+                                    t.contains(r#""tools""#),
+                                    t.chars().take(400).collect::<String>()
+                                )
+                            })
+                            .collect();
+                        panic!(
+                            "主回合请求必须携带工具声明（含 list_dir）。候选 {} 条：
+{}",
+                            diag.len(),
+                            diag.join("
+---
+")
+                        )
+                    });
                 let first_role = main_req["messages"][0]["role"].as_str().unwrap_or("");
                 assert!(
                     first_role == "system" || first_role == "user",
