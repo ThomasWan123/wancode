@@ -1,0 +1,77 @@
+{
+  "release": "v0.18.9",
+  "date": "2026-08-01",
+  "run": "https://github.com/ThomasWan123/wancode/actions/runs/30698185882",
+  "tested_main_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3",
+  "note": "artifact 90 天过期；本文件固化两份摘要内容与其 SHA-256，长期可审计。tested main SHA 与 artifact 内 ci_sha 一致。",
+  "suites": {
+    "4a-transport-errors": {
+      "artifact_file": "compliance-summary-4a.json",
+      "artifact_sha256": "d46ca684d4b6ad6226f1140aad41fbde2a7ad867db1b006730a189e1c3c8483b",
+      "summary": {
+        "suite": "4a-transport-errors",
+        "scenarios": [
+          {
+            "scenario": "Standard",
+            "pass": true
+          },
+          {
+            "scenario": "NoDoneMarker",
+            "pass": true
+          },
+          {
+            "scenario": "NoUsage",
+            "pass": true
+          },
+          {
+            "scenario": "ReasoningContent",
+            "pass": true
+          },
+          {
+            "scenario": "Err401",
+            "pass": true
+          },
+          {
+            "scenario": "Err429",
+            "pass": true
+          },
+          {
+            "scenario": "Err500Html",
+            "pass": true
+          }
+        ],
+        "total": 7,
+        "generated_unix": 1785586642,
+        "ci_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3"
+      }
+    },
+    "4b-tools-multimodal": {
+      "artifact_file": "compliance-summary-4b.json",
+      "artifact_sha256": "cf7638bb16e2a4debeb191579778ebdfb8897444313cb97f5b672469daa464a4",
+      "summary": {
+        "suite": "4b-tools-multimodal",
+        "scenarios": [
+          {
+            "scenario": "ToolRoundtrip",
+            "pass": true
+          },
+          {
+            "scenario": "ParallelToolCalls",
+            "pass": true
+          },
+          {
+            "scenario": "TranscribeRoute",
+            "pass": true
+          },
+          {
+            "scenario": "InlineRoute",
+            "pass": true
+          }
+        ],
+        "total": 4,
+        "generated_unix": 1785586646,
+        "ci_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3"
+      }
+    }
+  }
+}
