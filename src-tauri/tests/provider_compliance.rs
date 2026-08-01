@@ -16,7 +16,9 @@
 //! 引擎 xai-grok-compaction crate 的单测覆盖（128 条，CI "引擎压缩
 //! 单测"步），不做 ACP 级重演——矩阵标"引擎层覆盖"而非"通过"。
 //!
-//! 末尾输出结构化摘要行（COMPLIANCE_SUMMARY <json>）供矩阵回填（PR 5）。
+//! 末尾把结构化摘要写入 JSON 文件（COMPLIANCE_SUMMARY_PATH 或
+//! CARGO_TARGET_TMPDIR），CI 上传为 artifact `compliance-summary-4a`
+//! 供矩阵回填（PR 5）——cargo 捕获通过测试的 stdout，println 不算导出。
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -460,14 +462,23 @@ async fn provider_compliance_transport_and_errors() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    println!(
-        "COMPLIANCE_SUMMARY {}",
-        serde_json::json!({
-            "suite": "4a-transport-errors",
-            "scenarios": summary,
-            "total": 7,
-            "generated_unix": generated_unix,
-            "ci_sha": std::env::var("GITHUB_SHA").ok(),
-        })
-    );
+    let out = serde_json::json!({
+        "suite": "4a-transport-errors",
+        "scenarios": summary,
+        "total": 7,
+        "generated_unix": generated_unix,
+        "ci_sha": std::env::var("GITHUB_SHA").ok(),
+    });
+    // 真实导出通道：写 JSON 文件（cargo 捕获通过测试的 stdout，println
+    // 在 CI 日志里不可见——只打印不算导出）。路径优先取
+    // COMPLIANCE_SUMMARY_PATH（CI 设为 workspace 内并上传 artifact），
+    // 本地缺省落 CARGO_TARGET_TMPDIR。
+    let path = std::env::var("COMPLIANCE_SUMMARY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join("compliance-summary-4a.json")
+        });
+    std::fs::write(&path, out.to_string()).expect("摘要文件必须写出——导出即契约");
+    println!("COMPLIANCE_SUMMARY written to {}: {out}", path.display());
 }

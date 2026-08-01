@@ -102,4 +102,13 @@ jobs:
           cargo test -p xai-grok-shell --test model_identity_e2e
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
+        env:
+          COMPLIANCE_SUMMARY_PATH: ${{ github.workspace }}/compliance-summary-4a.json
         run: cargo test -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance
+      # #127-4 摘要真实导出：PR 5 从此 artifact 消费，不靠被 cargo 捕获的 stdout。
+      - name: 上传合规摘要 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-summary-4a
+          path: compliance-summary-4a.json
+          if-no-files-found: error
