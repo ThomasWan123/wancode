@@ -428,10 +428,12 @@ async fn provider_compliance_transport_and_errors() {
                         assert!(err.contains("500"), "5xx 必须携带状态：{err}");
                         // 非 JSON 体不得导致崩溃/悬挂；且 5xx 走了重试
                         // （max_retries=1 → 恰好 2 次请求）
-                        assert!(
-                            mock.probe.hits.load(Ordering::SeqCst) >= 2,
-                            "5xx 必须触发重试（hits={}）",
-                            mock.probe.hits.load(Ordering::SeqCst)
+                        // max_retries=1 的契约是**恰好** 1+1=2 次：
+                        // >=2 会把失控重试误判为通过。
+                        assert_eq!(
+                            mock.probe.hits.load(Ordering::SeqCst),
+                            2,
+                            "max_retries=1 必须恰好请求 2 次"
                         );
                     }
                     _ => unreachable!(),
@@ -451,9 +453,21 @@ async fn provider_compliance_transport_and_errors() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // 矩阵回填用结构化摘要（PR 5 消费；含引擎 commit 由 CI 环境提供）
+    // 矩阵回填用结构化摘要（PR 5 消费）。字段即全部内容：suite、逐情景
+    // 结果（任一失败整测早已 panic，走到这里即全过）、情景数、生成时间
+    // （unix 秒）、CI 提交（GITHUB_SHA，本地运行为 null）。
+    let generated_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     println!(
         "COMPLIANCE_SUMMARY {}",
-        serde_json::json!({ "suite": "4a-transport-errors", "scenarios": summary })
+        serde_json::json!({
+            "suite": "4a-transport-errors",
+            "scenarios": summary,
+            "total": 7,
+            "generated_unix": generated_unix,
+            "ci_sha": std::env::var("GITHUB_SHA").ok(),
+        })
     );
 }
