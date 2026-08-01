@@ -143,14 +143,13 @@ async fn handler(
     State(probe): State<Probe>,
     axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
 ) -> Response {
-    let n = probe.hits.fetch_add(1, Ordering::SeqCst);
+    probe.hits.fetch_add(1, Ordering::SeqCst);
     probe.bodies.lock().unwrap().push(body.clone());
     // 分支按**请求内容**而非 hits 计数：辅助请求（标题/建议生成回落到
     // 本端点）会抢占计数导致时序脆弱（CI 实锤）。
     let body_s = body.to_string();
     let has_tool_results = body_s.contains(r#""role":"tool""#);
     let is_main_turn = body_s.contains("use tools");
-    let _ = n;
     match probe.scenario {
         Scenario::ToolRoundtrip => {
             if is_main_turn && !has_tool_results {
@@ -468,6 +467,24 @@ async fn provider_compliance_tools_and_multimodal() {
 ")
                         )
                     });
+                // B3 请求形状：结构化断言，不止字符串包含——
+                // tools 为非空数组、条目 type=="function"、
+                // function.name=="list_dir" 且 function.parameters 是对象。
+                let tools_arr = main_req["tools"].as_array().expect("tools 必须是数组");
+                assert!(!tools_arr.is_empty(), "tools 数组不得为空");
+                let list_dir = tools_arr
+                    .iter()
+                    .find(|t| t["function"]["name"].as_str() == Some("list_dir"))
+                    .expect("tools 必须含 function.name == list_dir 的条目");
+                assert_eq!(
+                    list_dir["type"].as_str(),
+                    Some("function"),
+                    "工具条目 type 必须为 function"
+                );
+                assert!(
+                    list_dir["function"]["parameters"].is_object(),
+                    "function.parameters 必须是对象"
+                );
                 let first_role = main_req["messages"][0]["role"].as_str().unwrap_or("");
                 assert!(
                     first_role == "system" || first_role == "user",
@@ -512,9 +529,15 @@ async fn provider_compliance_tools_and_multimodal() {
                     helper.probe.hits.load(Ordering::SeqCst) >= 1,
                     "转述开启：图片必须路由到 helper"
                 );
-                let helper_body = body_text(&helper.probe.bodies.lock().unwrap()[0]);
+                // 按内容选（不按下标——本 PR 的时序教训）
                 assert!(
-                    helper_body.contains(PNG_SAMPLE),
+                    helper
+                        .probe
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|b| body_text(b).contains(PNG_SAMPLE)),
                     "helper 请求必须携带图片数据"
                 );
                 for b in main_mock.probe.bodies.lock().unwrap().iter() {
