@@ -76,7 +76,7 @@ jobs:
         working-directory: src-tauri
         # --no-deps：-D warnings 只对 wancode 自身生效。引擎是固定 commit 的
         # 上游代码，自带若干 clippy 警告，不该由我们的 CI 拦截。
-        run: cargo clippy -p wancode --lib --no-deps -- -D warnings
+        run: cargo clippy --locked -p wancode --lib --no-deps -- -D warnings
       # Gate 1：证明"选中某模型"的请求确实落在该模型自己的端点上、带自己的
       # Key。断言是请求计数（正确端点 1 次、错误端点 0 次）与 Authorization
       # 头，不是对代码路径的推理。跑在引擎目录，与克隆步同一套路径推导。
@@ -85,27 +85,42 @@ jobs:
         run: |
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
-          cargo test -p xai-grok-shell --test model_endpoint_routing
+          cargo test --locked -p xai-grok-shell --test model_endpoint_routing
       # #127-4 D3 落点：上下文压缩由引擎 crate 单测覆盖（合规矩阵引用此步）。
       - name: 引擎压缩单测（xai-grok-compaction）
         shell: pwsh
         run: |
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
-          cargo test -p xai-grok-compaction
+          cargo test --locked -p xai-grok-compaction
       # 磁盘上的旧会话记录 → 歧义 → 用户选定 → 真实 HTTP。不含 GUI 那一段。
       - name: 引擎身份链集成测试（旧记录 → 歧义 → 选定 → 正确端点）
         shell: pwsh
         run: |
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
-          cargo test -p xai-grok-shell --test model_identity_e2e
+          cargo test --locked -p xai-grok-shell --test model_identity_e2e
       - name: lib 单测 + 引擎金丝雀
         working-directory: src-tauri
         env:
           COMPLIANCE_SUMMARY_PATH: ${{ github.workspace }}/compliance-summary-4a.json
           COMPLIANCE_SUMMARY_PATH_4B: ${{ github.workspace }}/compliance-summary-4b.json
-        run: cargo test -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance --test provider_compliance_4b
+        run: cargo test --locked -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance --test provider_compliance_4b
+      # Cargo.lock 漂移防线第二层（第一层是上面所有 cargo 命令的 --locked）：
+      # 全套 Rust 测试后断言引擎工作树的 Cargo.lock 与 vendor 覆盖文件逐字节
+      # 一致。--locked 只保证语义等价，这里保证连格式重写都没发生。
+      # B1（#14）合入后此步可升级为 scripts/audit_effective_tree.ps1 verify。
+      - name: 引擎 Cargo.lock 未漂移校验
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          $a = (Get-FileHash (Join-Path $engine "Cargo.lock") -Algorithm SHA256).Hash
+          $b = (Get-FileHash "vendor/grok-build-Cargo.lock" -Algorithm SHA256).Hash
+          if ($a -ne $b) {
+            Write-Host "::error::引擎 Cargo.lock 在构建/测试后被 Cargo 改写，与 vendor/grok-build-Cargo.lock 不一致。请在干净有效树上重新生成覆盖文件并提交。"
+            exit 1
+          }
+          Write-Host "引擎 Cargo.lock == vendor 覆盖文件（sha256 $a）"
       # #127-4 摘要真实导出：PR 5 从此 artifact 消费，不靠被 cargo 捕获的 stdout。
       - name: 上传合规摘要 artifact
         uses: actions/upload-artifact@v4

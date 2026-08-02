@@ -77,6 +77,6 @@ if ($LASTEXITCODE -ne 0) { throw "npm install 失败" }
 
 Write-Host ""
 Write-Host "[bootstrap] 完成。下一步："
-Write-Host "  构建调试版： cd src-tauri; cargo build -p wancode   （环境变量见 scripts/smoke.ps1 头部）"
+Write-Host "  构建调试版： cd src-tauri; cargo build --locked -p wancode   （环境变量见 scripts/smoke.ps1 头部）"
 Write-Host "  引擎冒烟：   powershell -File scripts/smoke.ps1"
 Write-Host "  发布：       powershell -File scripts/release.ps1"

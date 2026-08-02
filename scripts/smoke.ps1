@@ -18,9 +18,11 @@ $env:RUSTFLAGS = "-C link-arg=/STACK:16777216"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link"
 
 if (-not $SkipBuild) {
-  Write-Host "[smoke] cargo build -p wancode ..."
+  Write-Host "[smoke] cargo build --locked -p wancode ..."
   Set-Location "$root\src-tauri"
-  cargo build -p wancode
+  # --locked：引擎 Cargo.lock 由 vendor/grok-build-Cargo.lock 覆盖而来，
+  # 构建不得静默改写它（v0.18.9 曾漂移出 5 个未登记依赖）。
+  cargo build --locked -p wancode
   if ($LASTEXITCODE -ne 0) { throw "build 失败" }
 }
 

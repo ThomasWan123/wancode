@@ -50,6 +50,14 @@ Set-Location $root
 npm run tauri build
 if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
 
+# tauri build 内部调 cargo，无法直接传 --locked——改为构建后断言：
+# 引擎工作树 Cargo.lock 未被 Cargo 改写（与 vendor 覆盖文件逐字节一致）。
+$engineLock = Join-Path (Split-Path $root -Parent) "grok-build\Cargo.lock"
+$vendorLock = Join-Path $root "vendor\grok-build-Cargo.lock"
+if ((Get-FileHash $engineLock).Hash -ne (Get-FileHash $vendorLock).Hash) {
+  throw "构建后引擎 Cargo.lock 与 vendor/grok-build-Cargo.lock 不一致（依赖漂移）。请从干净有效树再生覆盖文件后重新发布。"
+}
+
 $setup = "$bundle\nsis\wancode_${Version}_x64-setup.exe"
 $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
@@ -97,7 +105,7 @@ Write-Host ""
 Write-Host "══════════ 发版强制检查单（v0.12.2 起，全过才发）══════════" -ForegroundColor Yellow
 Write-Host "  [ ] 1. 真零配置首启 smoke：挪走 ~/.grok/config.toml 启动，应弹向导且 60 秒不崩"
 Write-Host "  [ ] 2. 老配置升级 smoke：现有配置启动，会话可用"
-Write-Host "  [ ] 3. Rust 单测全绿：cargo test -p wancode --lib"
+Write-Host "  [ ] 3. Rust 单测全绿：cargo test --locked -p wancode --lib"
 Write-Host "  [ ] 4. 上传后镜像验证：latest.json version 正确 + 安装包首 KB 为 MZ 头"
 Write-Host "  [ ] 5. 资产名断言：release 资产列表必须含精确文件名 latest.json（禁用 file#label 改名上传）"
 Write-Host "  （教训：v0.12.0 发布后才发现新用户装机即闪退——历史所有版本都没测过第 1 条）"
