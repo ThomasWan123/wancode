@@ -108,11 +108,11 @@ Cargo.lock 覆盖                                   │
 
 - 紧急通道**硬契约 + 物理分离**（评审定案）：永久接线与紧急补丁**拆为两个文件**，不共存于同一 patch、不靠文本边界解析：
   - `vendor/grok-build-wiring.patch`：常驻（workspace member 注入等 ≤50 行），内容哈希登记于清单 `wiring_patch_sha256`，变更即改清单同提交；
-  - `vendor/grok-build-emergency.patch`：**常态为空文件**（清单记 `emergency_patch_sha256=none`）；启用时头部三要素——**事故编号、到期版本、内容 hash**——并同步清单；
+  - `vendor/grok-build-emergency.patch`：**常态为空文件**（清单记 `emergency_patch_sha256=none`）；启用时头部只含**两项元数据——事故编号、到期版本**；文件完整哈希（覆盖头部与补丁正文全部字节）只记录并校验于清单 `emergency_patch_sha256`——单一哈希、无自引用（文件内自述哈希会对包含自身的文件做哈希，逻辑上不可满足）；
   - bootstrap 固定顺序：先 `git apply` wiring；emergency **仅在非空时**才 `git apply`（`git apply` 对空输入会直接报错 "unrecognized input"——空文件无条件套用会让 bootstrap 必然失败，空即跳过是执行语义的一部分，不是优化）；
   - CI 分别校验，`none` 的比较语义显式定义（空文件也有真实 sha256，"哈希 == none" 无法直接比较）：
     - 清单 `emergency_patch_sha256=none` ⇔ 断言 emergency 文件**存在且为 0 字节**（不比哈希）；
-    - 清单为具体哈希 ⇔ 断言文件非空且 sha256 相等，且头部三要素齐备：缺任一要素 → **fail**、当前版本 ≥ 到期版本 → **fail**、头部自述 hash 与内容不符 → **fail**；
+    - 清单为具体哈希 ⇔ 断言文件非空且完整文件 sha256 == 清单值，且头部两项元数据齐备：缺事故编号或到期版本 → **fail**、当前版本 ≥ 到期版本 → **fail**；
     - wiring 恒为非空哈希比较；到期前每轮 CI 显著打印剩余期限。
 - 供应链审计：
   - 双侧钉死（lock + 分支保护 + 变更即打标签）；任何构建可追溯唯一有效树；
@@ -129,5 +129,5 @@ B1（含 CI 三断言 + 审计脚本入仓）→ B2 → B3 → B4 → 收尾。�
 - ✅ 裁决①：取消独立 B5，测试随产品域同批（B2/B3/B4 已并入）。
 - ✅ 裁决②：同步审计"机器完整、人工聚焦"。
 - ✅ 裁决③：仅 engine commit 变化时打标签。
-- ✅ 紧急 patch 升级为硬契约（三要素 + 到期即 fail）。
+- ✅ 紧急 patch 升级为硬契约（头部两项元数据 + 清单完整文件哈希 + 到期即 fail）。
 - 开放：无（本版无新增开放问题；承重修订见 §0——有效树定义、workspace member 永不迁、全树审计）。
