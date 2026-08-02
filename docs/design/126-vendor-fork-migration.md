@@ -51,7 +51,11 @@ Cargo.lock 覆盖                                   │
 
 ## 2. commit 固定与回滚
 
-- 固定：`vendor/grok-build.lock`（repo + 40 位 commit）唯一事实源，不引入浮动分支引用。
+- 固定：**有效树的事实源是三元组**，三个分量全部在 wancode 仓库受版本控制、由同一个 wancode commit 唯一确定：
+  1. `vendor/grok-build.lock`（repo + 40 位 commit）——只钉 **fork 分量**；
+  2. 接线 patch（`vendor/grok-build-local.patch`）的当前内容；
+  3. `vendor/grok-build-Cargo.lock` 覆盖文件的当前内容。
+  单说 "repo+commit 是唯一事实源" 是错的（§0 的有效树公式即反例）；lock 不引入浮动分支引用。
 - 标签（评审裁决③）：**仅在 engine commit 变化时**在 fork 打 `wancode-engine/<engine-short-sha>` 标签；每个 WanCode release 继续在发布证据（合规摘要 + docs/evidence）记录 engine commit——同一引擎 commit 不堆积多个标签。
 - 不可变性：integration/mirror 分支保护、禁 force-push；错误提交 revert 前进式修复。
 - 回滚：应用层 = revert wancode 的 lock bump（一步）；引擎层 = integration revert + 新 lock bump；迁移期 = 每批独立，退回上一批 lock commit 即完全恢复，无半迁移状态。
@@ -62,7 +66,7 @@ Cargo.lock 覆盖                                   │
 
 | 批 | 域（产品 + **其测试同批**） | 独立验收 |
 |---|---|---|
-| B1 | 构建接线中可迁部分：protoc/Windows 修复（workspace member 注入**永不迁**，留接线 patch） | wancode 全量构建 + CI 三 job + CI 新增三道断言（§4）落地 |
+| B1 | 构建接线中可迁部分：protoc/Windows 修复（workspace member 注入**永不迁**，留接线 patch）；**bootstrap 参数化 + 审计脚本入仓**（审计可执行性前提） | wancode 全量构建 + CI 三 job + CI 三道断言（§4）落地 + 用审计脚本自证 B1 等价 |
 | B2 | 模型身份全域：catalog_model_id、resolve_override_ungated、modelBlock/ACP meta、双端点路由 **+ model_endpoint_routing.rs、model_identity_e2e.rs** | Gate 1 + 身份链 + model_block_over_acp 全绿；矩阵中 Gate 1 落点由"patch 引入"改 fork blob 直链 |
 | B3 | 图片转述全域：transcribe 管线、尺寸门、降级垫底 **+ 其引擎侧测试** | 4b 套件 + 图片专项冒烟 |
 | B4 | 兼容杂项全域：429 文案、object 宽容化、4v-flash max_tokens 等 **+ 其单测** | 4a 套件（错误组）+ 对应单测 |
@@ -70,22 +74,27 @@ Cargo.lock 覆盖                                   │
 
 ### 有效树等价审计（每批必做，全树、非按批范围）
 
-比较对象消歧（本修订版核心）：
+比较对象消歧：
 
 ```
 树 A = bootstrap(fork@新commit, 新裁剪patch, 新Cargo.lock覆盖)   ← 迁移后有效树
 树 B = bootstrap(fork@旧commit, 旧patch,     旧Cargo.lock覆盖)   ← 迁移前有效树
-断言：git diff --no-index 树A 树B == 空（全树，含 Cargo.lock）
+断言：两棵**工作树**（排除 .git）逐字节相等
 ```
 
-- 审计脚本入仓（`scripts/audit_effective_tree.ps1`），两侧都走**同一 bootstrap 代码路径**产树，不手工拼装；
-- **全树对比，每批执行**——不做"仅该批范围"的局部对比（局部范围定义模糊，正是"审计说等价、实际对象不等价"的来源）；
-- 唯一允许的差异白名单：无（Cargo.lock 若因 fork Cargo.toml 变更而再生，再生结果本身就是新覆盖文件，两树各用各的覆盖后仍须逐字节相等——不相等即该批引入了行为变化，红停）。
+可执行性前提（B1 必须先落地，否则审计无法按文执行）：
+
+1. **bootstrap 参数化**：现行 `bootstrap.ps1` 写死兄弟目录 `../grok-build`，无法同机产两棵树。B1 第一项改动 = bootstrap 增加 `-Dest <dir>`（缺省保持现行为），审计脚本用两个临时目录各产一棵，仍是同一 bootstrap 代码路径。
+2. **排除 `.git` 的对比语义**：两棵树 clone 自不同 commit，`.git` 目录**永不相等**——原稿"git diff --no-index 全树"必然恒红、不可执行。审计对比只针对工作树内容：`git diff --no-index` 前剥离/排除两侧 `.git`（脚本内定形，含隐藏文件、精确到字节）。Cargo.lock 属工作树，照常比对。
+3. 审计脚本 `scripts/audit_effective_tree.ps1` 与 bootstrap 参数化同批（B1）入仓，B1 自身即用它验收。
+
+- **全树对比，每批执行**——不做"仅该批范围"的局部对比（范围定义模糊即假等价来源）；
+- 差异白名单：无。fork Cargo.toml 变更的批次须同 PR 再生覆盖文件；两树各自套用各自覆盖后仍须逐字节相等，不相等即该批引入行为变化，红停。
 
 ## 4. CI 如何证明使用了指定 fork commit（B1 随批落地）
 
 1. clone 步后断言：`git -C $engine rev-parse HEAD == lock.commit`，否则 fail；
-2. 接线 patch 硬断言：CI 记录并校验 patch 文件 sha256 与仓库内当前版本一致；`git -C $engine status --porcelain` 只含预期改动（patch 触及文件 + Cargo.lock 覆盖）；
+2. 套用结果断言（不比 patch 自身 hash——CI 本就从仓库读 patch，"与仓库一致"是循环断言、永真无效）：`git -C $engine status --porcelain` 输出的文件集合必须**恰好等于**「patch 触及文件清单（脚本从 patch 的 diff 头解析生成）∪ {Cargo.lock}」——多一个少一个都 fail；
 3. `engine_commit` 字段写入合规摘要（COMPLIANCE_SUMMARY）与发布证据，与 compatibility.md 落点闭环。
 
 ## 5. 紧急补丁通道与供应链审计
