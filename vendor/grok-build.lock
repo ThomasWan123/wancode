@@ -11,7 +11,8 @@
 #
 # 字段语义：
 #   wiring_patch_sha256    vendor/grok-build-wiring.patch 完整文件 sha256。
-#                          迁移期 = 尚未迁入 fork 的全部残留（B2–B4 逐批裁剪），
+#                          迁移期 = 尚未迁入 fork 的全部残留（B3–B4 逐批裁剪；
+#                          B2 已迁模型身份全域，残留 = 图片转述 + 兼容杂项 + 接线），
 #                          终态 ≤50 行仅 workspace member 注入（本机目录结构，永不进 fork）。
 #   emergency_patch_sha256 none ⇔ vendor/grok-build-emergency.patch 为 0 字节；
 #                          启用时 = 完整文件 sha256（头部两项元数据：事故编号、到期版本）。
@@ -20,8 +21,8 @@
 #                          相对路径+文件字节哈希 → 排序清单 → 整体 sha256），
 #                          由 audit_effective_tree.ps1 hash 模式复算。
 repo=https://github.com/ThomasWan123/grok-build.git
-commit=898cf9ac33fee7ef0a1da639bbdac9449d11b051
-wiring_patch_sha256=6366b9a0d0fc0328624400caa3f7519af6477421ce610b0f353d79113a57394d
+commit=c562ae8130de35272c69ef6c83f1ff9cc0929e5f
+wiring_patch_sha256=310e9c37ef5bb56707594b2032649d08a4bd661133c9247104dc2e23ea14f9d1
 emergency_patch_sha256=none
 cargo_lock_sha256=8e4405b08a3e096bcf60a667fa5e342834bdb0b5115fe005c398639f2cf5fc30
 effective_tree_sha256=ccb057fb4054a354957c63c746f487f7dd34ca90c3b62d7dd369e9459053869f
