@@ -1,4 +1,4 @@
-# #126 设计稿：vendor 补丁迁移自有 fork（v0.19 基础设施）· 修订二版
+# #126 设计稿：vendor 补丁迁移自有 fork（v0.19 基础设施）· 修订四版
 
 > 状态：**设计评审中，未开工迁移**。评审通过前不做任何迁移动作（含 B1）。
 > 现状事实：引擎 = fork `ThomasWan123/grok-build` @ `b189869b7755d2b482969acf6c92da3ecfeffd36`；本地补丁 `vendor/grok-build-local.patch` **7153 行 / 30 文件**（迁移中拆为 wiring/emergency 双文件，见 §5）；bootstrap 的实际序列 = clone → `git apply patch` → **`Cargo.lock` 被 `vendor/grok-build-Cargo.lock` 覆盖**。
@@ -109,8 +109,11 @@ Cargo.lock 覆盖                                   │
 - 紧急通道**硬契约 + 物理分离**（评审定案）：永久接线与紧急补丁**拆为两个文件**，不共存于同一 patch、不靠文本边界解析：
   - `vendor/grok-build-wiring.patch`：常驻（workspace member 注入等 ≤50 行），内容哈希登记于清单 `wiring_patch_sha256`，变更即改清单同提交；
   - `vendor/grok-build-emergency.patch`：**常态为空文件**（清单记 `emergency_patch_sha256=none`）；启用时头部三要素——**事故编号、到期版本、内容 hash**——并同步清单；
-  - bootstrap 固定顺序 `wiring → emergency` 依次 `git apply`；
-  - CI 分别校验：两文件各自哈希 == 清单登记值；emergency 非空时缺任一要素 → **fail**、当前版本 ≥ 到期版本 → **fail**、hash 不符 → **fail**；到期前每轮 CI 显著打印剩余期限。
+  - bootstrap 固定顺序：先 `git apply` wiring；emergency **仅在非空时**才 `git apply`（`git apply` 对空输入会直接报错 "unrecognized input"——空文件无条件套用会让 bootstrap 必然失败，空即跳过是执行语义的一部分，不是优化）；
+  - CI 分别校验，`none` 的比较语义显式定义（空文件也有真实 sha256，"哈希 == none" 无法直接比较）：
+    - 清单 `emergency_patch_sha256=none` ⇔ 断言 emergency 文件**存在且为 0 字节**（不比哈希）；
+    - 清单为具体哈希 ⇔ 断言文件非空且 sha256 相等，且头部三要素齐备：缺任一要素 → **fail**、当前版本 ≥ 到期版本 → **fail**、头部自述 hash 与内容不符 → **fail**；
+    - wiring 恒为非空哈希比较；到期前每轮 CI 显著打印剩余期限。
 - 供应链审计：
   - 双侧钉死（lock + 分支保护 + 变更即打标签）；任何构建可追溯唯一有效树；
   - 同步审计报告存 `docs/evidence/engine-sync/<date>.md`：完整 commit 列表（机器）+ 风险项人工标注（§1）+ Cargo.lock diff 的 crate 级新增/升级摘要 + 许可证变化检查；
