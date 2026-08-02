@@ -105,7 +105,7 @@ Write-Host ""
 Write-Host "══════════ 发版强制检查单（v0.12.2 起，全过才发）══════════" -ForegroundColor Yellow
 Write-Host "  [ ] 1. 真零配置首启 smoke：挪走 ~/.grok/config.toml 启动，应弹向导且 60 秒不崩"
 Write-Host "  [ ] 2. 老配置升级 smoke：现有配置启动，会话可用"
-Write-Host "  [ ] 3. Rust 单测全绿：cargo test -p wancode --lib"
+Write-Host "  [ ] 3. Rust 单测全绿：cargo test --locked -p wancode --lib"
 Write-Host "  [ ] 4. 上传后镜像验证：latest.json version 正确 + 安装包首 KB 为 MZ 头"
 Write-Host "  [ ] 5. 资产名断言：release 资产列表必须含精确文件名 latest.json（禁用 file#label 改名上传）"
 Write-Host "  （教训：v0.12.0 发布后才发现新用户装机即闪退——历史所有版本都没测过第 1 条）"
