@@ -1,0 +1,60 @@
+# #126 迁移等价审计（复核定案 P0-1/P1）：独立于 rust job 并行运行，
+# 仅在引擎输入（lock/双 patch/Cargo.lock 覆盖）或 bootstrap/审计脚本变化时触发；
+# B1–B4/收尾每个迁移 PR 都会因 vendor/** 变化而必然执行。
+#
+# 两个断言步：
+#   1) 负向门测试——verify 的每种错误状态必须非零退出且错误原因命中（fail-closed 实证）；
+#   2) 迁移前后两树 compare——同一 materializer 构造 before(基分支 vendor 输入)/after(本 PR
+#      vendor 输入) 两棵临时树，逐字节比对并输出可留档 JSON 摘要（artifact）。
+name: engine-migration-audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "vendor/**"
+      # .gitattributes 里的 `vendor/** -text` 是字节确定性的根基：改动它会
+      # 改变 vendor 输入的物化字节，进而改变有效树摘要。不纳入触发路径的话，
+      # 单独动这个文件可以静默绕过整条等价审计防线。
+      - ".gitattributes"
+      - "scripts/bootstrap.ps1"
+      - "scripts/audit_effective_tree.ps1"
+      - "scripts/effective_tree_lib.ps1"
+      - "scripts/migration_audit.ps1"
+      - "scripts/test_audit_negative.ps1"
+      - ".github/workflows/engine-migration-audit.yml"
+  workflow_dispatch:
+    inputs:
+      before_sha:
+        description: "迁移前 wancode commit（默认 origin/main）"
+        required: false
+
+jobs:
+  migration-audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整历史：git show <before_sha>:vendor/* 提取旧输入
+          # 显式检出 PR 头提交：缺省会检出 refs/pull/N/merge——GitHub 合成的
+          # 临时 merge commit，它不在任何分支历史里、PR 更新后即失效。审计摘要
+          # 的 after_wancode_sha 必须是可长期追溯的真实提交，否则留档 JSON 里
+          # 记的是一个日后谁也复算不出来的 SHA。
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: 负向门测试（verify 错误状态必须红且原因正确）
+        shell: pwsh
+        run: powershell -File scripts/test_audit_negative.ps1
+      - name: 迁移前后两树等价审计（同一 materializer）
+        shell: pwsh
+        run: |
+          $before = "${{ github.event.pull_request.base.sha }}"
+          if (-not $before) { $before = "${{ inputs.before_sha }}" }
+          if (-not $before) { $before = (git rev-parse origin/main).Trim() }
+          powershell -File scripts/migration_audit.ps1 -BeforeSha $before -OutFile migration-audit-summary.json
+      - name: 上传审计摘要 artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migration-audit-summary
+          path: migration-audit-summary.json
+          if-no-files-found: error
