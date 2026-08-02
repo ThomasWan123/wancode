@@ -1,7 +1,7 @@
 # #126 设计稿：vendor 补丁迁移自有 fork（v0.19 基础设施）· 修订二版
 
 > 状态：**设计评审中，未开工迁移**。评审通过前不做任何迁移动作（含 B1）。
-> 现状事实：引擎 = fork `ThomasWan123/grok-build` @ `b189869b7755d2b482969acf6c92da3ecfeffd36`；本地补丁 `vendor/grok-build-local.patch` **7153 行 / 30 文件**；bootstrap 的实际序列 = clone → `git apply patch` → **`Cargo.lock` 被 `vendor/grok-build-Cargo.lock` 覆盖**。
+> 现状事实：引擎 = fork `ThomasWan123/grok-build` @ `b189869b7755d2b482969acf6c92da3ecfeffd36`；本地补丁 `vendor/grok-build-local.patch` **7153 行 / 30 文件**（迁移中拆为 wiring/emergency 双文件，见 §5）；bootstrap 的实际序列 = clone → `git apply patch` → **`Cargo.lock` 被 `vendor/grok-build-Cargo.lock` 覆盖**。
 
 ## 0. 核心定义：有效树（Effective Tree）
 
@@ -36,7 +36,7 @@ Cargo.lock 覆盖                                   │
 
 ### 0.1 永不进 fork 的部分（防"本机目录结构污染"）
 
-- `Cargo.toml` workspace members 注入 `"../wancode/src-tauri"`：这是**本机目录布局**（wancode 与引擎互为兄弟目录）的接线，进 fork 会把一个仓库外相对路径烧进引擎树、单独 clone fork 即坏。**永久保留在 wancode 侧接线 patch**（迁移终态 ≤50 行）。
+- `Cargo.toml` workspace members 注入 `"../wancode/src-tauri"`：这是**本机目录布局**（wancode 与引擎互为兄弟目录）的接线，进 fork 会把一个仓库外相对路径烧进引擎树、单独 clone fork 即坏。**永久保留在 `vendor/grok-build-wiring.patch`**（迁移终态 ≤50 行，与紧急补丁物理分离，见 §5）。
 - `vendor/grok-build-Cargo.lock` 覆盖：wancode 挂入后的完整依赖解析，属 wancode 构建产物空间，不进 fork。fork 侧改动 `Cargo.toml` 的批次必须在**同一 wancode PR** 内再生该覆盖文件（cargo 在有效树上重解析），审计含此再生结果。
 - protoc/Windows 修复（`xai-proto-build`）：不含本机路径，**迁入 fork**（B1）。
 
@@ -51,14 +51,21 @@ Cargo.lock 覆盖                                   │
 
 ## 2. commit 固定与回滚
 
-- 固定：**有效树的事实源是三元组**，三个分量全部在 wancode 仓库受版本控制、由同一个 wancode commit 唯一确定：
-  1. `vendor/grok-build.lock`（repo + 40 位 commit）——只钉 **fork 分量**；
-  2. 接线 patch（`vendor/grok-build-local.patch`）的当前内容；
-  3. `vendor/grok-build-Cargo.lock` 覆盖文件的当前内容。
-  单说 "repo+commit 是唯一事实源" 是错的（§0 的有效树公式即反例）；lock 不引入浮动分支引用。
+- 固定：`vendor/grok-build.lock` **升级为构建清单（build manifest）**——不只钉 fork 分量，而是登记有效树全部输入与预期产物的内容哈希，成为**可校验清单**：
+
+  ```
+  repo=<fork url>
+  commit=<40 位 sha>
+  wiring_patch_sha256=<常驻接线 patch 内容哈希>
+  emergency_patch_sha256=none | <紧急 patch 内容哈希>
+  cargo_lock_sha256=<Cargo.lock 覆盖文件内容哈希>
+  effective_tree_sha256=<有效树规范化摘要，见 §3 审计>
+  ```
+
+  "同一 wancode commit 可追溯三份输入"只解决溯源，不解决**校验**——清单哈希让 CI 能证明 patch/覆盖文件的字节内容与预期一致，`effective_tree_sha256` 让任何一方可独立复算整棵有效树。lock 不引入浮动分支引用。
 - 标签（评审裁决③）：**仅在 engine commit 变化时**在 fork 打 `wancode-engine/<engine-short-sha>` 标签；每个 WanCode release 继续在发布证据（合规摘要 + docs/evidence）记录 engine commit——同一引擎 commit 不堆积多个标签。
 - 不可变性：integration/mirror 分支保护、禁 force-push；错误提交 revert 前进式修复。
-- 回滚：应用层 = revert wancode 的 lock bump（一步）；引擎层 = integration revert + 新 lock bump；迁移期 = 每批独立，退回上一批 lock commit 即完全恢复，无半迁移状态。
+- 回滚：应用层 = **revert 整个 wancode 批次提交**（清单、接线 patch、紧急 patch、Cargo.lock 覆盖四项在同一提交内，一次 revert 全量恢复——不存在"只回 commit 不回 patch"的半恢复态）；引擎层 = integration revert + 新批次提交；迁移期 = 每批独立，revert 该批的 wancode 提交即完全恢复。
 
 ## 3. 7153 行 / 30 文件的分批迁移（评审裁决①：测试与产品域同批）
 
@@ -85,7 +92,7 @@ Cargo.lock 覆盖                                   │
 可执行性前提（B1 必须先落地，否则审计无法按文执行）：
 
 1. **bootstrap 参数化**：现行 `bootstrap.ps1` 写死兄弟目录 `../grok-build`，无法同机产两棵树。B1 第一项改动 = bootstrap 增加 `-Dest <dir>`（缺省保持现行为），审计脚本用两个临时目录各产一棵，仍是同一 bootstrap 代码路径。
-2. **排除 `.git` 的对比语义**：两棵树 clone 自不同 commit，`.git` 目录**永不相等**——原稿"git diff --no-index 全树"必然恒红、不可执行。审计对比只针对工作树内容：`git diff --no-index` 前剥离/排除两侧 `.git`（脚本内定形，含隐藏文件、精确到字节）。Cargo.lock 属工作树，照常比对。
+2. **规范化对比语义**：两棵树 clone 自不同 commit，`.git` 永不相等——原稿"全树 diff"恒红不可执行。审计脚本先做**规范化清单**：排除 `.git/`、`target/` 与审计临时文件，对其余全部相对路径 + 文件字节计算哈希，得出排序清单；两树清单逐项相等即等价，清单整体再哈希即为 `effective_tree_sha256`（写入构建清单，供 CI 与第三方复算）。Cargo.lock 属工作树，照常入列。
 3. 审计脚本 `scripts/audit_effective_tree.ps1` 与 bootstrap 参数化同批（B1）入仓，B1 自身即用它验收。
 
 - **全树对比，每批执行**——不做"仅该批范围"的局部对比（范围定义模糊即假等价来源）；
@@ -94,16 +101,16 @@ Cargo.lock 覆盖                                   │
 ## 4. CI 如何证明使用了指定 fork commit（B1 随批落地）
 
 1. clone 步后断言：`git -C $engine rev-parse HEAD == lock.commit`，否则 fail；
-2. 套用结果断言（不比 patch 自身 hash——CI 本就从仓库读 patch，"与仓库一致"是循环断言、永真无效）：`git -C $engine status --porcelain` 输出的文件集合必须**恰好等于**「patch 触及文件清单（脚本从 patch 的 diff 头解析生成）∪ {Cargo.lock}」——多一个少一个都 fail；
+2. **清单内容哈希断言**（P0 核心）：`wiring/emergency/cargo_lock` 三文件实际 sha256 各自 == 清单登记值；套用后按审计脚本规范化流程复算 `effective_tree_sha256` == 清单登记值——porcelain 精确集合断言（文件集合 == patch 触及清单 ∪ {Cargo.lock}）保留为快速结构检查，但**不替代内容哈希**；
 3. `engine_commit` 字段写入合规摘要（COMPLIANCE_SUMMARY）与发布证据，与 compatibility.md 落点闭环。
 
 ## 5. 紧急补丁通道与供应链审计
 
-- 紧急通道**硬契约**（评审升级）：接线 patch 之外的紧急内容非空时，patch 头部必须含三要素——**事故编号、到期版本、patch 内容 hash**；CI 解析头部：
-  - 缺任一要素 → **fail**（不是告警）；
-  - 当前版本 ≥ 到期版本仍未清空 → **fail**；
-  - hash 与实际内容不符 → **fail**。
-  - 到期前每轮 CI 显著打印剩余期限。
+- 紧急通道**硬契约 + 物理分离**（评审定案）：永久接线与紧急补丁**拆为两个文件**，不共存于同一 patch、不靠文本边界解析：
+  - `vendor/grok-build-wiring.patch`：常驻（workspace member 注入等 ≤50 行），内容哈希登记于清单 `wiring_patch_sha256`，变更即改清单同提交；
+  - `vendor/grok-build-emergency.patch`：**常态为空文件**（清单记 `emergency_patch_sha256=none`）；启用时头部三要素——**事故编号、到期版本、内容 hash**——并同步清单；
+  - bootstrap 固定顺序 `wiring → emergency` 依次 `git apply`；
+  - CI 分别校验：两文件各自哈希 == 清单登记值；emergency 非空时缺任一要素 → **fail**、当前版本 ≥ 到期版本 → **fail**、hash 不符 → **fail**；到期前每轮 CI 显著打印剩余期限。
 - 供应链审计：
   - 双侧钉死（lock + 分支保护 + 变更即打标签）；任何构建可追溯唯一有效树；
   - 同步审计报告存 `docs/evidence/engine-sync/<date>.md`：完整 commit 列表（机器）+ 风险项人工标注（§1）+ Cargo.lock diff 的 crate 级新增/升级摘要 + 许可证变化检查；
