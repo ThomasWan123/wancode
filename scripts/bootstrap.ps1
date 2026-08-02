@@ -71,21 +71,24 @@ if (-not (Test-Path $engine)) {
   # 用 vendor 里冻结的解析结果，避免新机器重解析出不同小版本。
   Copy-Item (Join-Path $root "vendor\grok-build-Cargo.lock") "Cargo.lock" -Force
   Pop-Location
-  Write-Host "[bootstrap] 引擎就绪（fork@$($commit.Substring(0,9)) + wiring patch）"
 } else {
-  Push-Location $engine
-  $head = git rev-parse HEAD
-  $patched = (git status --short -- Cargo.toml) -ne $null
-  Pop-Location
-  if ($head -ne $commit) {
-    Write-Host "[bootstrap] 警告：$engine HEAD=$($head.Substring(0,9)) 与 lock=$($commit.Substring(0,9)) 不一致" -ForegroundColor Yellow
-    Write-Host "           升级引擎请自行 checkout 后重打补丁并跑全量 smoke。"
-  } elseif (-not $patched) {
-    Write-Host "[bootstrap] 警告：引擎 commit 正确但本地补丁似未应用（Cargo.toml 无改动）" -ForegroundColor Yellow
-  } else {
-    Write-Host "[bootstrap] $engine 已就绪（commit 与补丁均匹配），跳过"
-  }
+  Write-Host "[bootstrap] $engine 已存在，进入 verify 级校验（不做任何自动修改）"
 }
+
+# ── 3.5 就绪门（#126 B1 复核定案）：无论新 clone 还是已有目录，宣布 ready 前
+# 必须过 verify 级完整校验（HEAD/三文件哈希/porcelain 精确集合/有效树摘要）。
+# 任一不符：报错 + 非零退出 + 不执行 npm install；绝不自动删除或覆盖已有目录。
+powershell -NoProfile -File (Join-Path $PSScriptRoot "audit_effective_tree.ps1") verify -Engine $engine
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "[bootstrap] 引擎目录未通过构建清单校验，判为【非就绪】。" -ForegroundColor Red
+  Write-Host "  安全处置（本脚本不会自动删改该目录）：" -ForegroundColor Red
+  Write-Host "    1) 若目录内无你的手工改动：把它移走（如改名 grok-build-old）后重跑 bootstrap，"
+  Write-Host "       会按构建清单重新 clone 出规范化树（raw 字节，禁 EOL 转换）；"
+  Write-Host "    2) 或用 -Dest 在别处创建规范化树，再自行切换；"
+  Write-Host "    3) 注意：老树若曾以 autocrlf=true 物化（CRLF），仅改配置无法修复，必须重 clone。"
+  exit 1
+}
+Write-Host "[bootstrap] 引擎就绪（fork@$($commit.Substring(0,9)) + wiring patch，verify 全过）"
 
 if (-not $isDefaultDest) {
   Write-Host "[bootstrap] -Dest 模式：跳过 npm install（审计树只需引擎工作树）"

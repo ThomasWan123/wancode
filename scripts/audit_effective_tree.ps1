@@ -1,64 +1,29 @@
 ﻿# 有效树等价审计 + 构建清单校验（#126 B1，设计稿 §3/§4/§5）
 #
-# 规范化清单：排除 .git/、target/ 与审计临时文件（*.audit-tmp），
-# 对其余全部文件计算「相对路径<TAB>sha256」，按路径排序；
-# 清单整体（UTF-8、LF 连接）再 sha256 = effective_tree_sha256。
-# 相对路径统一正斜杠。Cargo.lock 属工作树，照常入列。
+# 共享规范化/哈希逻辑见 effective_tree_lib.ps1（与 migration_audit.ps1 同源）。
 #
 # 模式：
 #   hash    -Tree <dir>                打印该树的 effective_tree_sha256
 #   compare -TreeA <dir> -TreeB <dir>  两树规范化清单逐项比对，差异全打印
-#   verify  -Engine <dir>              CI 三道断言（设计稿 §4/§5）：
-#                                      ① 引擎 HEAD == 清单 commit
-#                                      ② wiring/emergency/cargo_lock 三文件哈希 == 清单；
-#                                        emergency=none ⇔ 0 字节；非空则头部须含
-#                                        事故编号+到期版本，当前版本 ≥ 到期版本即 fail
-#                                      ③ porcelain 精确集合 == patch 触及 ∪ {Cargo.lock}
-#                                        （快速结构检查）+ 复算 effective_tree_sha256 == 清单
+#   verify  -Engine <dir> [-Root <仓库根>]   CI/bootstrap 共用的三道断言（§4/§5）：
+#           ① 引擎 HEAD == 清单 commit
+#           ② wiring/emergency/cargo_lock 三文件哈希 == 清单；
+#             emergency=none ⇔ 0 字节；非空则头部须含事故编号+到期版本，
+#             当前版本 ≥ 到期版本即 fail
+#           ③ porcelain 精确集合 == patch 触及 ∪ {Cargo.lock}（快速结构检查）
+#             + 复算 effective_tree_sha256 == 清单
+#           -Root 缺省为本仓库根；负向门测试用它注入临时夹具。
 param(
   [Parameter(Mandatory, Position = 0)][ValidateSet("hash", "compare", "verify")][string]$Mode,
   [string]$Tree,
   [string]$TreeA,
   [string]$TreeB,
-  [string]$Engine
+  [string]$Engine,
+  [string]$Root
 )
 $ErrorActionPreference = "Stop"
-$root = Split-Path $PSScriptRoot -Parent
-
-function Get-NormalizedManifest([string]$dir) {
-  $dir = (Resolve-Path $dir).Path
-  $lines = [System.Collections.Generic.List[string]]::new()
-  Get-ChildItem -Path $dir -Recurse -File -Force | ForEach-Object {
-    $rel = $_.FullName.Substring($dir.Length).TrimStart('\', '/') -replace '\\', '/'
-    if ($rel -like '.git/*' -or $rel -like 'target/*' -or $rel -like '*/target/*' -or $rel -like '*.audit-tmp') { return }
-    $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-    $lines.Add("$rel`t$h")
-  }
-  $lines.Sort([System.StringComparer]::Ordinal)
-  return $lines
-}
-
-function Get-ManifestDigest($lines) {
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n") + "`n")
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-}
-
-function Get-BuildManifest {
-  $m = @{}
-  Get-Content (Join-Path $root "vendor\grok-build.lock") | Where-Object { $_ -match '^[a-z0-9_]+=' } | ForEach-Object {
-    $k, $v = $_ -split '=', 2
-    $m[$k] = $v
-  }
-  foreach ($k in "repo", "commit", "wiring_patch_sha256", "emergency_patch_sha256", "cargo_lock_sha256", "effective_tree_sha256") {
-    if (-not $m[$k]) { throw "构建清单缺字段：$k" }
-  }
-  return $m
-}
-
-function Get-FileSha([string]$path) {
-  return (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-}
+. (Join-Path $PSScriptRoot "effective_tree_lib.ps1")
+if ($Root) { $root = (Resolve-Path $Root).Path } else { $root = Split-Path $PSScriptRoot -Parent }
 
 switch ($Mode) {
   "hash" {
@@ -69,20 +34,13 @@ switch ($Mode) {
     if (-not $TreeA -or -not $TreeB) { throw "compare 模式需要 -TreeA 与 -TreeB" }
     $a = Get-NormalizedManifest $TreeA
     $b = Get-NormalizedManifest $TreeB
-    $mapA = @{}; foreach ($l in $a) { $p, $h = $l -split "`t"; $mapA[$p] = $h }
-    $mapB = @{}; foreach ($l in $b) { $p, $h = $l -split "`t"; $mapB[$p] = $h }
-    $bad = 0
-    foreach ($p in $mapA.Keys) {
-      if (-not $mapB.ContainsKey($p)) { Write-Host "只在 A：$p"; $bad++ }
-      elseif ($mapA[$p] -ne $mapB[$p]) { Write-Host "内容不同：$p"; $bad++ }
-    }
-    foreach ($p in $mapB.Keys) { if (-not $mapA.ContainsKey($p)) { Write-Host "只在 B：$p"; $bad++ } }
+    $bad = Compare-NormalizedManifests $a $b "A" "B"
     if ($bad -gt 0) { Write-Host "AUDIT FAIL：$bad 项差异（A=$TreeA B=$TreeB）" -ForegroundColor Red; exit 1 }
     Write-Host "AUDIT OK：两树逐字节等价（$($a.Count) 文件）；effective_tree_sha256=$(Get-ManifestDigest $a)"
   }
   "verify" {
     if (-not $Engine) { throw "verify 模式需要 -Engine" }
-    $m = Get-BuildManifest
+    $m = Read-BuildManifest (Join-Path $root "vendor\grok-build.lock")
     # ① HEAD == commit
     $head = (git -C $Engine rev-parse HEAD).Trim()
     if ($head -ne $m.commit) { Write-Host "VERIFY FAIL：引擎 HEAD=$head != 清单 commit=$($m.commit)" -ForegroundColor Red; exit 1 }
