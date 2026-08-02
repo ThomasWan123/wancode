@@ -113,6 +113,11 @@ jobs:
           name: compliance-summary-4a
           path: compliance-summary-4a.json
           if-no-files-found: error
+      # #127-5：校验已提交的证据文件（哈希/pass/ci_sha/字段齐备），
+      # 不下载即将过期的 artifact。
+      - name: 校验合规证据文件
+        shell: pwsh
+        run: python scripts/verify_compliance_evidence.py
       - name: 上传合规摘要 artifact（4b）
         uses: actions/upload-artifact@v4
         with:

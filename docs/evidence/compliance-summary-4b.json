@@ -1,0 +1,1 @@
+{"suite":"4b-tools-multimodal","scenarios":[{"scenario":"ToolRoundtrip","pass":true},{"scenario":"ParallelToolCalls","pass":true},{"scenario":"TranscribeRoute","pass":true},{"scenario":"InlineRoute","pass":true}],"total":4,"generated_unix":1785586646,"ci_sha":"f604792ffbd6c8a6190208b4670cd980ca2d2ae3"}

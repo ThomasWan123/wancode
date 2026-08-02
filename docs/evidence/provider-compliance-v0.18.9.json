@@ -1,0 +1,89 @@
+{
+  "release": "v0.18.9",
+  "date": "2026-08-01",
+  "run": "https://github.com/ThomasWan123/wancode/actions/runs/30698185882",
+  "tested_main_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3",
+  "engine_baseline": {
+    "repo": "https://github.com/ThomasWan123/grok-build",
+    "commit": "b189869b7755d2b482969acf6c92da3ecfeffd36"
+  },
+  "note": "artifact 90 天过期（expires_at 在册）；原始摘要文件冻结于本目录，archive_digest_sha256 为 GitHub 官方 artifact ZIP digest，summary_file_sha256 为解包后内层 JSON 文件哈希——两者是不同对象。校验：scripts/verify_compliance_evidence.py（CI verify 模式）。",
+  "suites": {
+    "4a-transport-errors": {
+      "artifact_id": 8818302613,
+      "artifact_name": "compliance-summary-4a",
+      "archive_digest_sha256": "84650ff6ecb42a3a6e7776b23b8439d9c1788863692078e610d414f6cc30d41e",
+      "expires_at": "2026-10-30T11:41:16Z",
+      "summary_file": "compliance-summary-4a.json",
+      "summary_file_sha256": "d46ca684d4b6ad6226f1140aad41fbde2a7ad867db1b006730a189e1c3c8483b",
+      "summary": {
+        "suite": "4a-transport-errors",
+        "scenarios": [
+          {
+            "scenario": "Standard",
+            "pass": true
+          },
+          {
+            "scenario": "NoDoneMarker",
+            "pass": true
+          },
+          {
+            "scenario": "NoUsage",
+            "pass": true
+          },
+          {
+            "scenario": "ReasoningContent",
+            "pass": true
+          },
+          {
+            "scenario": "Err401",
+            "pass": true
+          },
+          {
+            "scenario": "Err429",
+            "pass": true
+          },
+          {
+            "scenario": "Err500Html",
+            "pass": true
+          }
+        ],
+        "total": 7,
+        "generated_unix": 1785586642,
+        "ci_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3"
+      }
+    },
+    "4b-tools-multimodal": {
+      "artifact_id": 8818302832,
+      "artifact_name": "compliance-summary-4b",
+      "archive_digest_sha256": "bec0f26189d5e626d68de5c2b94b5a72e3b1a04fbec93c0b328a304511879070",
+      "expires_at": "2026-10-30T11:41:16Z",
+      "summary_file": "compliance-summary-4b.json",
+      "summary_file_sha256": "cf7638bb16e2a4debeb191579778ebdfb8897444313cb97f5b672469daa464a4",
+      "summary": {
+        "suite": "4b-tools-multimodal",
+        "scenarios": [
+          {
+            "scenario": "ToolRoundtrip",
+            "pass": true
+          },
+          {
+            "scenario": "ParallelToolCalls",
+            "pass": true
+          },
+          {
+            "scenario": "TranscribeRoute",
+            "pass": true
+          },
+          {
+            "scenario": "InlineRoute",
+            "pass": true
+          }
+        ],
+        "total": 4,
+        "generated_unix": 1785586646,
+        "ci_sha": "f604792ffbd6c8a6190208b4670cd980ca2d2ae3"
+      }
+    }
+  }
+}
