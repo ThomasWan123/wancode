@@ -50,6 +50,14 @@ Set-Location $root
 npm run tauri build
 if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
 
+# tauri build 内部调 cargo，无法直接传 --locked——改为构建后断言：
+# 引擎工作树 Cargo.lock 未被 Cargo 改写（与 vendor 覆盖文件逐字节一致）。
+$engineLock = Join-Path (Split-Path $root -Parent) "grok-build\Cargo.lock"
+$vendorLock = Join-Path $root "vendor\grok-build-Cargo.lock"
+if ((Get-FileHash $engineLock).Hash -ne (Get-FileHash $vendorLock).Hash) {
+  throw "构建后引擎 Cargo.lock 与 vendor/grok-build-Cargo.lock 不一致（依赖漂移）。请从干净有效树再生覆盖文件后重新发布。"
+}
+
 $setup = "$bundle\nsis\wancode_${Version}_x64-setup.exe"
 $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
