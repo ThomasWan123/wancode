@@ -50,25 +50,30 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
     steps:
       - uses: actions/checkout@v4
-      - name: 按 lock 克隆引擎到兄弟目录并打补丁
+      # bootstrap 的工具链检查要求 protoc 先就位，故 setup-protoc 前置。
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # #126 B1：与 bootstrap 同一代码路径产树（-Dest 指到兄弟目录 = 缺省布局），
+      # 不再内联复制克隆/打补丁逻辑。
+      - name: 按构建清单产引擎有效树（bootstrap -Dest）
         shell: pwsh
         run: |
-          $lock = Get-Content vendor/grok-build.lock | Where-Object { $_ -match '^(repo|commit)=' }
-          $repo = ($lock | Where-Object { $_ -like 'repo=*' }) -replace '^repo=', ''
-          $commit = ($lock | Where-Object { $_ -like 'commit=*' }) -replace '^commit=', ''
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
-          git clone -c core.longpaths=true $repo $engine
-          git -C $engine checkout $commit
-          git -C $engine apply (Join-Path $PWD "vendor/grok-build-local.patch")
-          Copy-Item vendor/grok-build-Cargo.lock (Join-Path $engine "Cargo.lock") -Force
+          powershell -File scripts/bootstrap.ps1 -Dest $engine
+      # #126 B1 CI 三道断言（设计稿 §4）：HEAD==lock.commit；wiring/emergency/
+      # cargo_lock 三文件哈希==清单（emergency none ⇔ 0 字节，非空则事故编号/
+      # 到期版本齐备且未到期）；porcelain 精确集合 + effective_tree_sha256 复算。
+      - name: 构建清单校验（audit_effective_tree verify）
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          powershell -File scripts/audit_effective_tree.ps1 verify -Engine $engine
       - name: 占位 dist（tauri generate_context! 编译期要求 frontendDist 存在）
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Set-Content dist/index.html "<!doctype html><title>ci stub</title>"
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "../grok-build -> target"

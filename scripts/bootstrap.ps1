@@ -1,20 +1,30 @@
-# WanCode 一键开发环境搭建（v0.13-3）
+# WanCode 一键开发环境搭建（#126 B1：-Dest 参数化 + wiring/emergency 双补丁）
 #
-# 用法：  powershell -File scripts/bootstrap.ps1
+# 用法：  powershell -File scripts/bootstrap.ps1 [-Dest <引擎目录>]
 #
 # 做四件事：
 #   1. 检查工具链（rustup/cargo、protoc、node/npm、git；MSVC 由 rustup target 隐含）
-#   2. 在仓库【兄弟目录】../grok-build 克隆引擎并 checkout vendor/grok-build.lock
-#      指定的 commit（引擎必须是兄弟目录：src-tauri/Cargo.toml 靠
-#      workspace = "../../grok-build" 吃依赖继承，见 vendor/grok-build.lock 头注）
-#   3. 应用 vendor/grok-build-local.patch（Windows protoc 修复 + workspace 成员）
-#   4. npm install
+#   2. 按 vendor/grok-build.lock（构建清单）克隆引擎并 checkout 固定 commit。
+#      缺省目录 = 仓库【兄弟目录】../grok-build（src-tauri/Cargo.toml 靠
+#      workspace = "../../grok-build" 吃依赖继承）；-Dest 供审计脚本同机产多棵树。
+#   3. 打补丁，固定顺序：先 vendor/grok-build-wiring.patch（常驻接线 + 迁移期残留）；
+#      vendor/grok-build-emergency.patch 仅在非空时应用（git apply 对空输入必报错，
+#      空即跳过是执行语义的一部分）。随后覆盖 Cargo.lock。
+#   4. npm install（仅缺省目录时；-Dest 审计树跳过前端）
 #
-# 幂等：grok-build 已存在则只校验 commit 与补丁状态，不动本地改动。
+# 幂等：目标已存在则只校验 commit 与补丁状态，不动本地改动。
+param(
+  [string]$Dest
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent          # wancode 仓库根
-$parent = Split-Path $root -Parent                # 引擎的兄弟层
-$engine = Join-Path $parent "grok-build"
+$isDefaultDest = -not $Dest
+if ($isDefaultDest) {
+  $parent = Split-Path $root -Parent              # 引擎的兄弟层
+  $engine = Join-Path $parent "grok-build"
+} else {
+  $engine = $Dest
+}
 
 # ── 1. 工具链检查 ────────────────────────────────────────────────
 $missing = @()
@@ -32,7 +42,7 @@ if ($missing.Count -gt 0) {
   exit 1
 }
 
-# ── 2. 读取 lock 并准备引擎目录 ─────────────────────────────────
+# ── 2. 读取构建清单并准备引擎目录 ───────────────────────────────
 $lock = Get-Content (Join-Path $root "vendor\grok-build.lock") | Where-Object { $_ -match '^(repo|commit)=' }
 $repo = ($lock | Where-Object { $_ -like 'repo=*' }) -replace '^repo=', ''
 $commit = ($lock | Where-Object { $_ -like 'commit=*' }) -replace '^commit=', ''
@@ -46,27 +56,38 @@ if (-not (Test-Path $engine)) {
   Push-Location $engine
   git checkout $commit
   if ($LASTEXITCODE -ne 0) { Pop-Location; throw "checkout $commit 失败" }
-  # ── 3. 打本地补丁 + 锁定依赖解析 ──
-  git apply (Join-Path $root "vendor\grok-build-local.patch")
-  if ($LASTEXITCODE -ne 0) { Pop-Location; throw "补丁应用失败（vendor/grok-build-local.patch）" }
+  # ── 3. 打补丁（固定顺序 wiring → emergency）+ 锁定依赖解析 ──
+  git apply (Join-Path $root "vendor\grok-build-wiring.patch")
+  if ($LASTEXITCODE -ne 0) { Pop-Location; throw "补丁应用失败（vendor/grok-build-wiring.patch）" }
+  $emerg = Join-Path $root "vendor\grok-build-emergency.patch"
+  if ((Get-Item $emerg).Length -gt 0) {
+    Write-Host "[bootstrap] 应用紧急补丁 vendor/grok-build-emergency.patch" -ForegroundColor Yellow
+    git apply $emerg
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "补丁应用失败（vendor/grok-build-emergency.patch）" }
+  }
   # 覆盖 Cargo.lock：wancode 挂进 workspace 后依赖树被扩展过，
   # 用 vendor 里冻结的解析结果，避免新机器重解析出不同小版本。
   Copy-Item (Join-Path $root "vendor\grok-build-Cargo.lock") "Cargo.lock" -Force
   Pop-Location
-  Write-Host "[bootstrap] 引擎就绪（含 Windows protoc 补丁）"
+  Write-Host "[bootstrap] 引擎就绪（fork@$($commit.Substring(0,9)) + wiring patch）"
 } else {
   Push-Location $engine
   $head = git rev-parse HEAD
   $patched = (git status --short -- Cargo.toml) -ne $null
   Pop-Location
   if ($head -ne $commit) {
-    Write-Host "[bootstrap] 警告：../grok-build HEAD=$($head.Substring(0,9)) 与 lock=$($commit.Substring(0,9)) 不一致" -ForegroundColor Yellow
+    Write-Host "[bootstrap] 警告：$engine HEAD=$($head.Substring(0,9)) 与 lock=$($commit.Substring(0,9)) 不一致" -ForegroundColor Yellow
     Write-Host "           升级引擎请自行 checkout 后重打补丁并跑全量 smoke。"
   } elseif (-not $patched) {
     Write-Host "[bootstrap] 警告：引擎 commit 正确但本地补丁似未应用（Cargo.toml 无改动）" -ForegroundColor Yellow
   } else {
-    Write-Host "[bootstrap] ../grok-build 已就绪（commit 与补丁均匹配），跳过"
+    Write-Host "[bootstrap] $engine 已就绪（commit 与补丁均匹配），跳过"
   }
+}
+
+if (-not $isDefaultDest) {
+  Write-Host "[bootstrap] -Dest 模式：跳过 npm install（审计树只需引擎工作树）"
+  exit 0
 }
 
 # ── 4. 前端依赖 ─────────────────────────────────────────────────

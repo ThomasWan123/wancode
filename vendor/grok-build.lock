@@ -1,17 +1,27 @@
-# grok-build 引擎固定版本（v0.13-3 工程化）
+# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
 #
 # wancode 不把引擎做成 git submodule —— 引擎必须放在仓库的【兄弟目录】
 # ../grok-build：src-tauri/Cargo.toml 通过 workspace = "../../grok-build"
 # 挂进引擎的 workspace（这样才能吃 `workspace = true` 依赖继承），
 # submodule 嵌进来会让两个 .git 互相打架。
 #
-# scripts/bootstrap.ps1 按本文件 clone 固定 commit 并打 vendor/grok-build-local.patch。
-# 升级引擎版本 = 改这里的 commit + 重跑 bootstrap + 全量 smoke。
+# 有效树 = fork@commit + wiring patch (+ emergency patch 若非空) + Cargo.lock 覆盖。
+# scripts/bootstrap.ps1 按本清单产树；scripts/audit_effective_tree.ps1 verify
+# 模式校验全部哈希（CI 每轮执行）。升级引擎 = 改 commit + 重跑 bootstrap + 全量 smoke。
+#
+# 字段语义：
+#   wiring_patch_sha256    vendor/grok-build-wiring.patch 完整文件 sha256。
+#                          迁移期 = 尚未迁入 fork 的全部残留（B2–B4 逐批裁剪），
+#                          终态 ≤50 行仅 workspace member 注入（本机目录结构，永不进 fork）。
+#   emergency_patch_sha256 none ⇔ vendor/grok-build-emergency.patch 为 0 字节；
+#                          启用时 = 完整文件 sha256（头部两项元数据：事故编号、到期版本）。
+#   cargo_lock_sha256      vendor/grok-build-Cargo.lock 完整文件 sha256。
+#   effective_tree_sha256  有效树规范化清单摘要（排除 .git/、target/；
+#                          相对路径+文件字节哈希 → 排序清单 → 整体 sha256），
+#                          由 audit_effective_tree.ps1 hash 模式复算。
 repo=https://github.com/ThomasWan123/grok-build.git
-commit=b189869b7755d2b482969acf6c92da3ecfeffd36
-# 本地补丁（vendor/grok-build-local.patch）：
-#   1. Cargo.toml：workspace members 加 "../wancode/src-tauri"
-#   2. xai-proto-build/src/lib.rs：protoc 依赖输出改临时文件（/dev/stdout 在
-#      Windows 不存在），首行解析兼容盘符冒号转义
-# 另附 vendor/grok-build-Cargo.lock：wancode 挂入后扩展过的完整依赖解析，
-# bootstrap 直接覆盖引擎的 Cargo.lock，保证跨机器构建一致。
+commit=898cf9ac33fee7ef0a1da639bbdac9449d11b051
+wiring_patch_sha256=6366b9a0d0fc0328624400caa3f7519af6477421ce610b0f353d79113a57394d
+emergency_patch_sha256=none
+cargo_lock_sha256=c9f5016bb56dde5ebaecc98f7c881fd5cc6f965e92bc5b09077b5e450acb6f1e
+effective_tree_sha256=4262d6866e1a481795bab5b7e95e03efcdebef255955c1e3030a089eaa7e0843

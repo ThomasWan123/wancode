@@ -462,12 +462,24 @@ async fn provider_compliance_transport_and_errors() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // #126 B1：engine_commit 来自构建清单（vendor/grok-build.lock），与
+    // compatibility.md / 发布证据落点闭环。读不到 = 证据链断，直接 fail。
+    let lock = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/grok-build.lock"),
+    )
+    .expect("构建清单 vendor/grok-build.lock 必须可读");
+    let engine_commit = lock
+        .lines()
+        .find_map(|l| l.strip_prefix("commit="))
+        .expect("构建清单缺 commit= 行")
+        .to_string();
     let out = serde_json::json!({
         "suite": "4a-transport-errors",
         "scenarios": summary,
         "total": 7,
         "generated_unix": generated_unix,
         "ci_sha": std::env::var("GITHUB_SHA").ok(),
+        "engine_commit": engine_commit,
     });
     // 真实导出通道：写 JSON 文件（cargo 捕获通过测试的 stdout，println
     // 在 CI 日志里不可见——只打印不算导出）。路径优先取
