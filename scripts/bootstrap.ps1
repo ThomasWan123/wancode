@@ -1,4 +1,4 @@
-# WanCode 一键开发环境搭建（#126 B1：-Dest 参数化 + wiring/emergency 双补丁）
+﻿# WanCode 一键开发环境搭建（#126 B1：-Dest 参数化 + wiring/emergency 双补丁）
 #
 # 用法：  powershell -File scripts/bootstrap.ps1 [-Dest <引擎目录>]
 #
