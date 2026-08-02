@@ -3,7 +3,8 @@
 # 用临时夹具（微型引擎 git 仓库 + 夹具 -Root）驱动 audit_effective_tree.ps1 verify，
 # 每个场景断言【非零退出码 + 错误原因文本命中】，不接受"反正失败了"。
 # 场景：正向对照 / wiring 哈希错误 / none 但 emergency 非空 / emergency 已到期 /
-#       emergency 缺事故编号或到期版本 / 有效树多一个文件(porcelain) / 改一个文件(摘要)。
+#       emergency 缺事故编号或到期版本 / 合法 emergency 正向（非空+元数据齐备+未过期）/
+#       有效树多一个文件(porcelain) / 改一个文件(摘要)。
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "effective_tree_lib.ps1")
 $auditScript = Join-Path $PSScriptRoot "audit_effective_tree.ps1"
@@ -24,6 +25,7 @@ git -C $eng init -q
 git -C $eng config core.autocrlf false
 git -C $eng config user.email "fixture@test"; git -C $eng config user.name "fixture"
 W (Join-Path $eng "a.txt") "hello`n"
+W (Join-Path $eng "b.txt") "emergency target`n"   # 供合法 emergency 正向场景改动
 W (Join-Path $eng "Cargo.lock") "orig-lock`n"
 git -C $eng add -A; git -C $eng commit -q -m base
 $engCommit = (git -C $eng rev-parse HEAD).Trim()
@@ -91,12 +93,30 @@ Assert-Verify "emergency缺头部元数据" 0 "缺事故编号或到期版本"
 [System.IO.File]::WriteAllBytes($emerg, @())
 Write-FixtureLock (Get-FileSha $wiring) "none" $digest
 
-# 5) 有效树多一个文件 → porcelain 精确集合红
+# 5) 合法 emergency patch（非空 + 元数据齐备 + 未过期）必须【绿】。
+#    只有负向场景时，emergency 整条分支即便全盘失效也不会被发现——本场景
+#    是唯一能证明"启用紧急补丁后 verify 仍可通过"的证据。
+$emergDiff = Join-Path $fx "emergency.diff"
+W (Join-Path $eng "b.txt") "emergency patched`n"
+cmd /c "git -C `"$eng`" diff -- b.txt > `"$emergDiff`"" | Out-Null
+git -C $eng checkout -q -- b.txt
+# 元数据须落在前 10 行内（verify 只读文件头）；git apply 会跳过 diff 头之前的前言。
+W $emerg ("# incident: INC-TEST-OK`n# expires_in_version: 99.0.0`n" + [System.IO.File]::ReadAllText($emergDiff))
+git -C $eng apply $emerg
+if ($LASTEXITCODE -ne 0) { throw "夹具自身有问题：合法 emergency patch 应用失败" }
+Write-FixtureLock (Get-FileSha $wiring) (Get-FileSha $emerg) (Get-ManifestDigest (Get-NormalizedManifest $eng))
+Assert-Verify "合法emergency正向" 1 "VERIFY OK"
+# 还原到 emergency=none 基线（b.txt 复原 + 清空补丁 + 清单摘要回退）
+git -C $eng checkout -q -- b.txt
+[System.IO.File]::WriteAllBytes($emerg, @())
+Write-FixtureLock (Get-FileSha $wiring) "none" $digest
+
+# 6) 有效树多一个文件 → porcelain 精确集合红
 W (Join-Path $eng "stray.txt") "extra`n"
 Assert-Verify "有效树多一个文件" 0 "porcelain 集合与 patch 触及"
 Remove-Item (Join-Path $eng "stray.txt")
 
-# 6) 改一个 patch 触及文件的内容 → porcelain 集合不变，摘要复算红
+# 7) 改一个 patch 触及文件的内容 → porcelain 集合不变，摘要复算红
 W (Join-Path $eng "a.txt") "hello tampered`n"
 Assert-Verify "有效树改一个文件" 0 "effective_tree_sha256 复算"
 git -C $eng checkout -q -- a.txt; git -C $eng apply $wiring   # 还原

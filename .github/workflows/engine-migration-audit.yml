@@ -13,6 +13,10 @@ on:
     branches: [main]
     paths:
       - "vendor/**"
+      # .gitattributes 里的 `vendor/** -text` 是字节确定性的根基：改动它会
+      # 改变 vendor 输入的物化字节，进而改变有效树摘要。不纳入触发路径的话，
+      # 单独动这个文件可以静默绕过整条等价审计防线。
+      - ".gitattributes"
       - "scripts/bootstrap.ps1"
       - "scripts/audit_effective_tree.ps1"
       - "scripts/effective_tree_lib.ps1"
@@ -32,6 +36,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # 需要完整历史：git show <before_sha>:vendor/* 提取旧输入
+          # 显式检出 PR 头提交：缺省会检出 refs/pull/N/merge——GitHub 合成的
+          # 临时 merge commit，它不在任何分支历史里、PR 更新后即失效。审计摘要
+          # 的 after_wancode_sha 必须是可长期追溯的真实提交，否则留档 JSON 里
+          # 记的是一个日后谁也复算不出来的 SHA。
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: 负向门测试（verify 错误状态必须红且原因正确）
         shell: pwsh
         run: powershell -File scripts/test_audit_negative.ps1
