@@ -10,25 +10,3 @@ index 8184403..3a74ebc 100644
      "crates/build/xai-proto-build",
      "crates/codegen/ptyctl",
      "crates/codegen/ptyctl-cli",
-diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
-index 662052d..f39e7b4 100644
---- a/crates/codegen/xai-grok-sampling-types/src/types.rs
-+++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
-@@ -459,6 +459,8 @@ impl ToolCallRequest {
- #[derive(Debug, Serialize, Deserialize, Clone)]
- pub struct ChatCompletionResponse {
-     pub id: String,
-+    // 兼容非严格 OpenAI 实现（如智谱 GLM-4V 系列缺 object 字段）
-+    #[serde(default)]
-     pub object: String,
-     pub created: u64,
-     pub model: String,
-@@ -572,6 +574,8 @@ pub struct CompletionTokensDetails {
- #[derive(Debug, Serialize, Deserialize, Clone)]
- pub struct ChatCompletionChunk {
-     pub id: String,
-+    // 兼容非严格 OpenAI 实现（智谱 4V 流式 chunk 同样缺 object）
-+    #[serde(default)]
-     pub object: String,
-     pub created: u64,
-     pub model: String,

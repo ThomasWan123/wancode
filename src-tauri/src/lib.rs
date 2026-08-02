@@ -11,6 +11,8 @@ pub mod caps_snapshot;
 pub mod model_caps;
 pub mod updater_launch;
 mod updater_ops;
+#[cfg(test)]
+mod compat_contracts;
 
 use xai_grok_paths::AbsPathBuf;
 
