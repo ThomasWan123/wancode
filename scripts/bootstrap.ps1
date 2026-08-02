@@ -50,8 +50,10 @@ if (-not $repo -or -not $commit) { throw "vendor/grok-build.lock 缺 repo=/commi
 
 if (-not (Test-Path $engine)) {
   Write-Host "[bootstrap] clone $repo -> $engine @ $($commit.Substring(0,9))"
-  # core.longpaths：pager 快照文件名超 Windows 260 字符限制，不开会 checkout 失败
-  git clone -c core.longpaths=true $repo $engine
+  # core.longpaths：pager 快照文件名超 Windows 260 字符限制，不开会 checkout 失败。
+  # core.autocrlf=false：有效树摘要（effective_tree_sha256）要求字节跨机器确定，
+  # 工作树必须是原始 blob 字节，不做任何 EOL 转换（vendor 补丁也以 LF 存，见 .gitattributes）。
+  git clone -c core.longpaths=true -c core.autocrlf=false $repo $engine
   if ($LASTEXITCODE -ne 0) { throw "clone 失败" }
   Push-Location $engine
   git checkout $commit
