@@ -11,6 +11,7 @@ pub mod caps_snapshot;
 pub mod model_caps;
 pub mod updater_launch;
 mod updater_ops;
+pub mod surface;
 #[cfg(test)]
 mod compat_contracts;
 
