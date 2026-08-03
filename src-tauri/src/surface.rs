@@ -193,6 +193,9 @@ pub enum SurfaceError {
     MigrationIncomplete { failed: Vec<String> },
     /// 另一进程/线程正持有迁移排他锁——稍后重试，不得绕过。
     MigrationLocked { reason: String },
+    /// 迁移窗口已关闭，但本次快照中仍有无归属会话——既不回填（可能是
+    /// 崩溃期新层会话）也不静默成功，交显式恢复/认领裁决。
+    PostMarkerUnbound { session_ids: Vec<String> },
     /// 迁移标记存在但内容损坏/版本未知——不可信亦不可忽略。
     CorruptMigrationMarker { reason: String },
 }
@@ -233,6 +236,11 @@ impl std::fmt::Display for SurfaceError {
             SurfaceError::MigrationLocked { reason } => {
                 write!(f, "migration_locked: 迁移排他锁被占用：{reason}")
             }
+            SurfaceError::PostMarkerUnbound { session_ids } => write!(
+                f,
+                "post_marker_unbound: 迁移已完成但 {} 个会话无归属（不回填不吞错，需显式认领）",
+                session_ids.len()
+            ),
             SurfaceError::CorruptMigrationMarker { reason } => {
                 write!(f, "corrupt_migration_marker: 迁移标记损坏或版本未知：{reason}")
             }
@@ -331,7 +339,26 @@ impl SurfaceBindingStore {
     /// 写一个 binding：no-clobber 首写 + 幂等重写（同 kind）。
     /// 并发首写同一 session：恰有一个发布成功，落败方按既有文件裁决——
     /// 同 kind 幂等 Ok，异 kind ImmutableKindConflict。
+    ///
+    /// 传入对象先验证再落盘（复核三）：写入永远发生在「现在」，版本字段
+    /// 必须等于当前程序常量；空 session_id 拒绝。垃圾进不了磁盘，而不是
+    /// 靠下次读取才发现。
     pub fn write(&self, binding: &SurfaceBinding) -> Result<(), SurfaceError> {
+        if binding.session_id.is_empty() {
+            return Err(SurfaceError::CorruptBinding {
+                session_id: String::new(),
+                reason: "session_id 为空".into(),
+            });
+        }
+        if binding.binding_schema_version != CURRENT_BINDING_SCHEMA_VERSION
+            || binding.created_policy_version != CURRENT_POLICY_VERSION
+        {
+            return Err(SurfaceError::UnsupportedBindingVersion {
+                session_id: binding.session_id.clone(),
+                binding_schema_version: binding.binding_schema_version,
+                created_policy_version: binding.created_policy_version,
+            });
+        }
         let judge_existing = |existing: SurfaceBinding| {
             if existing.surface_kind == binding.surface_kind {
                 Ok(())
@@ -383,8 +410,10 @@ impl SurfaceBindingStore {
                 session_id: session_id.to_string(),
                 reason: e.to_string(),
             })?;
-        // 未来版本门：schema 或 policy 代号大于当前程序即阻塞。
-        if binding.binding_schema_version > CURRENT_BINDING_SCHEMA_VERSION
+        // 版本门：schema 严格等值——过去与未来的 schema 都阻塞（旧格式
+        // 必须经显式迁移，不做静默兼容读取）；policy 代号仅未来阻塞
+        // （旧 policy 会话按当前规则派生是两层契约的核心，G22⑥）。
+        if binding.binding_schema_version != CURRENT_BINDING_SCHEMA_VERSION
             || binding.created_policy_version > CURRENT_POLICY_VERSION
         {
             return Err(SurfaceError::UnsupportedBindingVersion {
@@ -476,7 +505,24 @@ impl SurfaceBindingStore {
     ) -> Result<(), SurfaceError> {
         let _lock = self.acquire_migration_lock()?;
         if self.migration_complete()? {
-            return Ok(()); // 窗口已关闭：no-op，不回填任何 ID。
+            // 窗口已关闭：绝不回填任何 ID，但也绝不静默成功——快照内仍
+            // 无归属的会话（真 legacy 被早先快照漏掉，或崩溃期新层会话）
+            // 结构化上报，交显式恢复/认领裁决（复核三：不允许「b1 被
+            // 漏掉后仍报成功」的终态）。
+            let mut unbound = Vec::new();
+            for sid in existing_session_ids {
+                // 此处只判定「有无有效归属」：缺失、损坏、读不出的一律
+                // 进清单（具体病因由后续 resolve/认领路径给出），本检查
+                // 不因单个坏文件中断整体上报。
+                match self.try_read_raw(sid) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => unbound.push(sid.to_string()),
+                }
+            }
+            if unbound.is_empty() {
+                return Ok(()); // 全部已有归属：幂等重跑。
+            }
+            return Err(SurfaceError::PostMarkerUnbound { session_ids: unbound });
         }
         let mut failed = Vec::new();
         for sid in existing_session_ids {
@@ -704,18 +750,27 @@ mod tests {
         }
     }
 
-    // 复核-1：标记完成后再次迁移是 no-op，不得回填新 ID。
+    // 复核-1（复核三修订）：标记完成后迁移绝不回填新 ID，且遇到快照内
+    // 无归属会话时**不得静默成功**——结构化 PostMarkerUnbound 上报。
     #[test]
-    fn migration_after_marker_is_noop() {
+    fn migration_after_marker_reports_unbound_never_backfills() {
         let (_g, s) = store();
         s.migrate_legacy(std::iter::empty()).unwrap();
         // 「引擎建会话成功、sidecar 写入前崩溃」的新 Chat 会话，
-        // 若启动时被当作 legacy 传给迁移——绝不能回填成 Code。
-        s.migrate_legacy(["crashed-chat"]).expect("no-op 成功");
+        // 若启动时被当作 legacy 传给迁移——不回填、不吞错。
+        match s.migrate_legacy(["crashed-chat"]) {
+            Err(SurfaceError::PostMarkerUnbound { session_ids }) => {
+                assert_eq!(session_ids, vec!["crashed-chat".to_string()]);
+            }
+            other => panic!("期望 PostMarkerUnbound，得到 {other:?}"),
+        }
         match s.resolve("crashed-chat") {
             Err(SurfaceError::UnboundSurface { .. }) => {}
             other => panic!("标记后迁移不得回填新 ID，得到 {other:?}"),
         }
+        // 快照内全部已有归属时才是幂等 Ok。
+        s.write(&binding("bound", SurfaceKind::Work)).unwrap();
+        s.migrate_legacy(["bound"]).expect("全绑定快照幂等成功");
     }
 
     // 复核-3：标记前缺 binding → MigrationRequired（不是 None、不是 Code）。
@@ -888,19 +943,31 @@ mod tests {
             let hb = run(vec!["b1".into(), victim.clone()]);
             let ra = ha.join().unwrap();
             let rb = hb.join().unwrap();
-            // A 的快照无失败项：必成功（先跑实跑，后跑则 no-op）。
+            // A 的快照无失败项且全在 A 自己跑内可绑定：必成功。
             assert!(ra.is_ok(), "A 必成功，得到 {ra:?}");
-            // 标记必有效（A 成功即发布，或 B 先清空跑道后 A 补位——
-            // 本布局 B 必失败不会发布，故标记只可能来自 A）。
             assert!(s.migration_complete().unwrap());
-            // B 两种合法结果：实跑报 MigrationIncomplete（可见失败），
-            // 或 A 先完成后 no-op Ok。
+            // 复核三：B **永远不得报成功**——它的快照里 victim 必然无归属
+            // （b1 视交错可能已绑或未绑）。合法结果只有两种可见失败：
+            // 实跑 MigrationIncomplete，或标记后 PostMarkerUnbound。
             match &rb {
                 Err(SurfaceError::MigrationIncomplete { failed }) => {
                     assert_eq!(failed, &vec![victim.clone()]);
                 }
-                Ok(()) => {}
-                other => panic!("B 非法结果 {other:?}"),
+                Err(SurfaceError::PostMarkerUnbound { session_ids }) => {
+                    assert!(session_ids.contains(&victim), "victim 必在上报清单");
+                }
+                other => panic!("B 不得报成功/其他，得到 {other:?}"),
+            }
+            // 「b1 被漏掉但整体报成功」被禁止：若 b1 无归属，B 的错误
+            // 必须点名 b1。
+            let b1_bound = s.try_read_raw("b1").unwrap().is_some();
+            if !b1_bound {
+                match &rb {
+                    Err(SurfaceError::PostMarkerUnbound { session_ids }) => {
+                        assert!(session_ids.contains(&"b1".to_string()), "漏掉的 b1 必须被点名");
+                    }
+                    other => panic!("b1 未绑定时 B 必须 PostMarkerUnbound 点名，得到 {other:?}"),
+                }
             }
             // 无论哪种交错：victim 绝不被升为 Code；结局是可见阻塞。
             std::fs::remove_dir(s.path_for(&victim)).unwrap();
@@ -913,10 +980,10 @@ mod tests {
         }
     }
 
-    // 复核二-P1a：过去版本 schema（低于当前）是受支持输入——行为锁定：
-    // 正常解析、派生仍用当前规则。防未来改动无声回归。
+    // 复核三-P1a：过去版本 schema 同样结构化阻塞——旧格式必须经显式
+    // 迁移，不做静默兼容读取（schema 门为严格等值）。
     #[test]
-    fn past_schema_version_accepted_and_derives_current() {
+    fn past_schema_version_blocks() {
         let (_g, s) = store();
         s.write(&binding("past", SurfaceKind::Work)).unwrap();
         std::fs::write(
@@ -924,18 +991,37 @@ mod tests {
             r#"{"binding_schema_version":0,"session_id":"past","surface_kind":"work","created_policy_version":0}"#,
         )
         .unwrap();
-        let b = s.resolve("past").expect("过去版本必须可读");
-        assert_eq!(b.binding_schema_version, 0);
-        let p = derive_effective_policy(b.surface_kind);
-        assert_eq!(p.policy_version, CURRENT_POLICY_VERSION);
-        assert_eq!(p, derive_effective_policy(SurfaceKind::Work));
+        assert!(matches!(
+            s.resolve("past"),
+            Err(SurfaceError::UnsupportedBindingVersion { binding_schema_version: 0, .. })
+        ));
     }
 
-    // 复核二-P1b：write() 路径同样过版本门——快路径读到未来版本文件时
-    // 新写入被结构化拒绝，不静默覆盖也不静默成功。
+    // 复核三-P1b：write() 验证**传入对象**本身——版本字段必须等于当前
+    // 程序常量、session_id 非空；垃圾对象拒收且不落盘。
     #[test]
-    fn write_path_enforces_version_gate() {
+    fn write_validates_argument_object() {
         let (_g, s) = store();
+        // 未来 schema 的传入对象。
+        let mut b1 = binding("arg-a", SurfaceKind::Chat);
+        b1.binding_schema_version = 99;
+        assert!(matches!(
+            s.write(&b1),
+            Err(SurfaceError::UnsupportedBindingVersion { binding_schema_version: 99, .. })
+        ));
+        assert!(!s.path_for("arg-a").exists(), "拒收对象不得落盘");
+        // 非当前 policy 代号的传入对象（写入永远发生在「现在」）。
+        let mut b2 = binding("arg-b", SurfaceKind::Chat);
+        b2.created_policy_version = 0;
+        assert!(matches!(
+            s.write(&b2),
+            Err(SurfaceError::UnsupportedBindingVersion { created_policy_version: 0, .. })
+        ));
+        assert!(!s.path_for("arg-b").exists());
+        // 空 session_id。
+        let b3 = SurfaceBinding::new("", SurfaceKind::Code);
+        assert!(matches!(s.write(&b3), Err(SurfaceError::CorruptBinding { .. })));
+        // 既有未来版本文件上写入也被版本门拒（读取路径的门）。
         s.write(&binding("fut-w", SurfaceKind::Chat)).unwrap();
         std::fs::write(
             s.path_for("fut-w"),
@@ -949,16 +1035,17 @@ mod tests {
     }
 
     // RED-8：旧 created_policy_version 按当前规则派生，不能恢复旧权限。
+    // （旧 binding 由历史版本程序写下——直接落盘模拟，不走 write()：
+    // write() 的参数验证只收当前版本。）
     #[test]
     fn old_policy_version_derives_with_current_rules() {
         let (_g, s) = store();
-        let old = SurfaceBinding {
-            binding_schema_version: CURRENT_BINDING_SCHEMA_VERSION,
-            session_id: "vintage".into(),
-            surface_kind: SurfaceKind::Chat,
-            created_policy_version: 0, // 早于当前代号
-        };
-        s.write(&old).unwrap();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("vintage"),
+            r#"{"binding_schema_version":1,"session_id":"vintage","surface_kind":"chat","created_policy_version":0}"#,
+        )
+        .unwrap();
         let back = s.resolve("vintage").unwrap();
         let policy = derive_effective_policy(back.surface_kind);
         assert_eq!(policy, derive_effective_policy(SurfaceKind::Chat));
