@@ -32,15 +32,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # 三处版本号（package.json / tauri.conf.json / Cargo.toml）必须一致，
-      # 否则 updater 的 latest.json 与安装包版本对不上。
+      # 五处版本号必须一致：package.json / tauri.conf.json / Cargo.toml，
+      # 外加 package-lock.json 的顶部 version 与 packages[""].version——
+      # v0.18.9 时 lockfile 曾漂移在 0.18.6，此前三处检查全绿照样放行
+      # （PR #16 复盘）。lockfile 不一致时任何一次 npm install 都会把它
+      # 自动同步并产生工作树噪音。
       - run: |
           set -e
           a=$(node -p "require('./package.json').version")
           b=$(node -p "require('./src-tauri/tauri.conf.json').version")
           c=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          echo "package.json=$a tauri.conf.json=$b Cargo.toml=$c"
-          [ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::版本号不一致"; exit 1; }
+          d=$(node -p "require('./package-lock.json').version")
+          e=$(node -p "require('./package-lock.json').packages[''].version")
+          echo "package.json=$a tauri.conf.json=$b Cargo.toml=$c lock.version=$d lock.root=$e"
+          [ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::版本号不一致（manifest 三处）"; exit 1; }
+          [ "$a" = "$d" ] && [ "$a" = "$e" ] || { echo "::error::package-lock.json 版本漂移（$d/$e ≠ $a），运行 npm install 同步后提交"; exit 1; }
 
   rust:
     runs-on: windows-latest
