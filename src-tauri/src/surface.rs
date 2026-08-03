@@ -191,6 +191,8 @@ pub enum SurfaceError {
     StoreIo { session_id: String, reason: String },
     /// 迁移未全部成功，完成标记未写。
     MigrationIncomplete { failed: Vec<String> },
+    /// 另一进程/线程正持有迁移排他锁——稍后重试，不得绕过。
+    MigrationLocked { reason: String },
     /// 迁移标记存在但内容损坏/版本未知——不可信亦不可忽略。
     CorruptMigrationMarker { reason: String },
 }
@@ -227,6 +229,9 @@ impl std::fmt::Display for SurfaceError {
             }
             SurfaceError::MigrationIncomplete { failed } => {
                 write!(f, "migration_incomplete: {} 个会话回填失败", failed.len())
+            }
+            SurfaceError::MigrationLocked { reason } => {
+                write!(f, "migration_locked: 迁移排他锁被占用：{reason}")
             }
             SurfaceError::CorruptMigrationMarker { reason } => {
                 write!(f, "corrupt_migration_marker: 迁移标记损坏或版本未知：{reason}")
@@ -421,15 +426,55 @@ impl SurfaceBindingStore {
         }
     }
 
+    /// 迁移排他锁：`migration.lock` 以 Windows 独占共享模式（share_mode 0）
+    /// 打开，句柄存活期间任何其他进程/线程都打不开——进程崩溃即释放，
+    /// 无陈旧锁问题。占用中返回结构化 MigrationLocked（调用方稍后重试）。
+    /// 目的（复核 P0）：封死「A/B 同时通过标记缺失检查，A 发布标记后
+    /// B 的回填失败被后续 no-op 吞掉」的交错——标记检查与发布全程在锁内。
+    fn acquire_migration_lock(&self) -> Result<std::fs::File, SurfaceError> {
+        std::fs::create_dir_all(&self.root).map_err(|e| SurfaceError::StoreIo {
+            session_id: String::new(),
+            reason: format!("创建 sidecar 目录失败: {e}"),
+        })?;
+        let path = self.root.join("migration.lock");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true).create(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.share_mode(0); // 独占：他人 open 即 ERROR_SHARING_VIOLATION
+        }
+        opts.open(&path).map_err(|e| {
+            // Windows 共享冲突 = 锁被占（raw 32）；其余按 IO 上报。
+            if e.raw_os_error() == Some(32) {
+                SurfaceError::MigrationLocked {
+                    reason: "另一迁移正在进行".into(),
+                }
+            } else {
+                SurfaceError::StoreIo {
+                    session_id: String::new(),
+                    reason: format!("迁移锁获取失败: {e}"),
+                }
+            }
+        })
+    }
+
     /// 首次升级迁移：把现存会话幂等回填为 Code；**全部成功**才发布完成
     /// 标记（有内容、no-clobber），任一失败返回 MigrationIncomplete。
     /// **标记已有效时为 no-op**——迁移窗口已关闭，绝不回填新 ID（否则
     /// 崩溃期的新层会话会被错误提升为 Code）。标记损坏则上抛。
+    ///
+    /// 全程持迁移排他锁（复核 P0）：标记复查、回填、标记发布是一个
+    /// 排他临界区，两个迁移不可能交错；锁被占返回 MigrationLocked。
+    /// 胜者快照之外的 legacy 会话（理论上不应存在——快照后新建的会话
+    /// 自带 binding）最终表现为可见的 unbound_surface，走显式恢复/认领，
+    /// 永不静默升 Code。
     /// 会话枚举由调用方提供（App 层扫 ~/.grok sessions），本层不做 IO 发现。
     pub fn migrate_legacy<'a>(
         &self,
         existing_session_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), SurfaceError> {
+        let _lock = self.acquire_migration_lock()?;
         if self.migration_complete()? {
             return Ok(()); // 窗口已关闭：no-op，不回填任何 ID。
         }
@@ -445,9 +490,17 @@ impl SurfaceBindingStore {
         if !failed.is_empty() {
             return Err(SurfaceError::MigrationIncomplete { failed });
         }
-        // 标记发布：同一套唯一临时文件 + sync + no-clobber（并发迁移恰一个
-        // 发布成功，其余视为已完成）。
+        // 标记发布：同一套唯一临时文件 + sync + no-clobber。持锁下无并发
+        // 发布者，若仍撞到已存在文件说明状态异常——回读校验兜底。
         self.publish_no_clobber("<marker>", &self.marker_path(), MARKER_CONTENT)?;
+        // 发布后回读校验：确认落盘的标记确实有效（内容/版本匹配），
+        // 不把「发布调用返回」当成「标记有效」。
+        if !self.migration_complete()? {
+            return Err(SurfaceError::StoreIo {
+                session_id: String::new(),
+                reason: "标记发布后回读缺失".into(),
+            });
+        }
         Ok(())
     }
 }
@@ -774,6 +827,125 @@ mod tests {
                 winner_kind
             );
         }
+    }
+
+    // 复核二-P0a：迁移排他锁被占 → MigrationLocked，不得绕过。
+    #[cfg(windows)]
+    #[test]
+    fn migration_lock_excludes_concurrent_holder() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        // 手工独占持有锁文件，模拟另一进程的迁移进行中。
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .share_mode(0)
+                .open(s.root.join("migration.lock"))
+                .unwrap()
+        };
+        match s.migrate_legacy(["x"]) {
+            Err(SurfaceError::MigrationLocked { .. }) => {}
+            other => panic!("期望 MigrationLocked，得到 {other:?}"),
+        }
+        drop(_held);
+        s.migrate_legacy(["x"]).expect("锁释放后须成功");
+        assert!(s.migration_complete().unwrap());
+    }
+
+    // 复核二-P0b：不同枚举快照 + 一方失败的并发迁移——排他锁下两个迁移
+    // 不可能交错：绝不出现「B 部分回填失败被 A 的标记静默吞掉且 B 上报
+    // 成功」。合法终态只有两类，且失败方要么拿到 MigrationIncomplete、
+    // 要么拿到的是标记后 no-op（其快照外会话表现为可见 unbound_surface）。
+    #[test]
+    fn concurrent_migrations_different_snapshots_one_failing() {
+        for round in 0..10 {
+            let (_g, s) = store();
+            let victim = format!("victim-{round}");
+            std::fs::create_dir_all(s.path_for(&victim)).unwrap(); // B 必失败项
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let run = |ids: Vec<String>| {
+                let root = s.root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let s = SurfaceBindingStore::new(root);
+                    barrier.wait();
+                    // 锁被占就重试——模拟真实调用方行为。
+                    loop {
+                        match s.migrate_legacy(ids.iter().map(|x| x.as_str())) {
+                            Err(SurfaceError::MigrationLocked { .. }) => {
+                                std::thread::yield_now();
+                                continue;
+                            }
+                            other => return other,
+                        }
+                    }
+                })
+            };
+            let ha = run(vec!["a1".into()]);
+            let hb = run(vec!["b1".into(), victim.clone()]);
+            let ra = ha.join().unwrap();
+            let rb = hb.join().unwrap();
+            // A 的快照无失败项：必成功（先跑实跑，后跑则 no-op）。
+            assert!(ra.is_ok(), "A 必成功，得到 {ra:?}");
+            // 标记必有效（A 成功即发布，或 B 先清空跑道后 A 补位——
+            // 本布局 B 必失败不会发布，故标记只可能来自 A）。
+            assert!(s.migration_complete().unwrap());
+            // B 两种合法结果：实跑报 MigrationIncomplete（可见失败），
+            // 或 A 先完成后 no-op Ok。
+            match &rb {
+                Err(SurfaceError::MigrationIncomplete { failed }) => {
+                    assert_eq!(failed, &vec![victim.clone()]);
+                }
+                Ok(()) => {}
+                other => panic!("B 非法结果 {other:?}"),
+            }
+            // 无论哪种交错：victim 绝不被升为 Code；结局是可见阻塞。
+            std::fs::remove_dir(s.path_for(&victim)).unwrap();
+            match s.resolve(&victim) {
+                Err(SurfaceError::UnboundSurface { .. }) => {}
+                other => panic!("victim 必须 unbound_surface，得到 {other:?}"),
+            }
+            // A 快照内的会话必已绑定。
+            assert_eq!(s.resolve("a1").unwrap().surface_kind, SurfaceKind::Code);
+        }
+    }
+
+    // 复核二-P1a：过去版本 schema（低于当前）是受支持输入——行为锁定：
+    // 正常解析、派生仍用当前规则。防未来改动无声回归。
+    #[test]
+    fn past_schema_version_accepted_and_derives_current() {
+        let (_g, s) = store();
+        s.write(&binding("past", SurfaceKind::Work)).unwrap();
+        std::fs::write(
+            s.path_for("past"),
+            r#"{"binding_schema_version":0,"session_id":"past","surface_kind":"work","created_policy_version":0}"#,
+        )
+        .unwrap();
+        let b = s.resolve("past").expect("过去版本必须可读");
+        assert_eq!(b.binding_schema_version, 0);
+        let p = derive_effective_policy(b.surface_kind);
+        assert_eq!(p.policy_version, CURRENT_POLICY_VERSION);
+        assert_eq!(p, derive_effective_policy(SurfaceKind::Work));
+    }
+
+    // 复核二-P1b：write() 路径同样过版本门——快路径读到未来版本文件时
+    // 新写入被结构化拒绝，不静默覆盖也不静默成功。
+    #[test]
+    fn write_path_enforces_version_gate() {
+        let (_g, s) = store();
+        s.write(&binding("fut-w", SurfaceKind::Chat)).unwrap();
+        std::fs::write(
+            s.path_for("fut-w"),
+            r#"{"binding_schema_version":99,"session_id":"fut-w","surface_kind":"chat","created_policy_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            s.write(&binding("fut-w", SurfaceKind::Chat)),
+            Err(SurfaceError::UnsupportedBindingVersion { .. })
+        ));
     }
 
     // RED-8：旧 created_policy_version 按当前规则派生，不能恢复旧权限。
