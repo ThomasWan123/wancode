@@ -218,7 +218,7 @@ impl std::fmt::Display for SurfaceError {
                 created_policy_version,
             } => write!(
                 f,
-                "unsupported_binding_version: 会话 {session_id} 来自未来版本（schema {binding_schema_version}, policy {created_policy_version}），请升级 WanCode"
+                "unsupported_binding_version: 会话 {session_id} 的 binding 版本不受当前程序支持（schema {binding_schema_version}, policy {created_policy_version}）"
             ),
             SurfaceError::SessionIdMismatch { requested, embedded } => {
                 write!(f, "session_id_mismatch: 请求 {requested} ≠ 文件内 {embedded}")
@@ -405,23 +405,40 @@ impl SurfaceBindingStore {
                 })
             }
         };
+        // 两阶段解析（终核 P1）：非当前 schema 的文件形状未知——先用
+        // 宽容探针只取版本字段过版本门，否则「未来 schema + 新字段」会
+        // 在 deny_unknown_fields 全量解析里先炸成 CorruptBinding，把
+        // 「版本不支持」误报成「损坏」。
+        // 阶段一：宽容探针（未知字段放行；缺版本字段 = 不是本格式）。
+        #[derive(Deserialize)]
+        struct SchemaProbe {
+            binding_schema_version: u32,
+            #[serde(default)]
+            created_policy_version: u32,
+        }
+        let probe: SchemaProbe =
+            serde_json::from_str(&text).map_err(|e| SurfaceError::CorruptBinding {
+                session_id: session_id.to_string(),
+                reason: format!("版本探针解析失败: {e}"),
+            })?;
+        // 版本门：schema 严格等值——过去与未来的 schema 都阻塞（旧格式
+        // 必须经显式迁移，不做静默兼容读取）；policy 代号仅未来阻塞
+        // （旧 policy 会话按当前规则派生是两层契约的核心，G22⑥）。
+        if probe.binding_schema_version != CURRENT_BINDING_SCHEMA_VERSION
+            || probe.created_policy_version > CURRENT_POLICY_VERSION
+        {
+            return Err(SurfaceError::UnsupportedBindingVersion {
+                session_id: session_id.to_string(),
+                binding_schema_version: probe.binding_schema_version,
+                created_policy_version: probe.created_policy_version,
+            });
+        }
+        // 阶段二：当前 schema 的严格全量解析（deny_unknown_fields）。
         let binding: SurfaceBinding =
             serde_json::from_str(&text).map_err(|e| SurfaceError::CorruptBinding {
                 session_id: session_id.to_string(),
                 reason: e.to_string(),
             })?;
-        // 版本门：schema 严格等值——过去与未来的 schema 都阻塞（旧格式
-        // 必须经显式迁移，不做静默兼容读取）；policy 代号仅未来阻塞
-        // （旧 policy 会话按当前规则派生是两层契约的核心，G22⑥）。
-        if binding.binding_schema_version != CURRENT_BINDING_SCHEMA_VERSION
-            || binding.created_policy_version > CURRENT_POLICY_VERSION
-        {
-            return Err(SurfaceError::UnsupportedBindingVersion {
-                session_id: session_id.to_string(),
-                binding_schema_version: binding.binding_schema_version,
-                created_policy_version: binding.created_policy_version,
-            });
-        }
         if binding.session_id != session_id {
             return Err(SurfaceError::SessionIdMismatch {
                 requested: session_id.to_string(),
@@ -1031,6 +1048,39 @@ mod tests {
         assert!(matches!(
             s.write(&binding("fut-w", SurfaceKind::Chat)),
             Err(SurfaceError::UnsupportedBindingVersion { .. })
+        ));
+    }
+
+    // 终核-P1a：未来 schema + 未知字段 → 必须报版本不支持，不得误报损坏
+    // （两阶段解析的判别性测试：单次严格解析会先炸 CorruptBinding）。
+    #[test]
+    fn future_schema_with_unknown_fields_reports_version_not_corrupt() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("fut-shape"),
+            r#"{"binding_schema_version":2,"session_id":"fut-shape","surface_kind":"quantum","brand_new_field":{"nested":true}}"#,
+        )
+        .unwrap();
+        match s.resolve("fut-shape") {
+            Err(SurfaceError::UnsupportedBindingVersion { binding_schema_version: 2, .. }) => {}
+            other => panic!("期望 UnsupportedBindingVersion(schema=2)，得到 {other:?}"),
+        }
+    }
+
+    // 终核-P1b：缺版本字段 = 不是本格式 → 探针阶段即 CorruptBinding。
+    #[test]
+    fn missing_schema_field_is_corrupt() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("no-ver"),
+            r#"{"session_id":"no-ver","surface_kind":"chat"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            s.resolve("no-ver"),
+            Err(SurfaceError::CorruptBinding { .. })
         ));
     }
 
