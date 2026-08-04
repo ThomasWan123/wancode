@@ -84,6 +84,10 @@ pub struct StartResult {
     /// #127-2：config.toml 读取/解析失败时的文件级诊断——能力元数据问题
     /// 不阻止会话启动，但绝不静默（全员 unknown 必须有可见原因）。
     pub caps_config_issue: Option<crate::caps_snapshot::FileIssue>,
+    /// v0.19-2a：会话的真实层身份（来自 sidecar，不是前端猜测）。
+    pub surface_kind: crate::surface::SurfaceKind,
+    /// 当前策略规则代号（派生用，见 surface::CURRENT_POLICY_VERSION）。
+    pub policy_version: u32,
 }
 
 #[derive(serde::Serialize, Clone, Default)]
@@ -190,12 +194,21 @@ pub(crate) async fn start_inner(
     // 不启动任何会话。所有入口（前端 agent_start、autotest）都过这里；
     // 门内部并发共享同一结果、migration_locked 有界重试；损坏标记/迁移
     // 不完整等一律结构化阻塞（SURFACE_GATE_BLOCKED: {json}）。
-    {
+    let resumed_binding = {
         let surface = app.state::<crate::surface_gate::SurfaceState>();
         if let Err(e) = surface.ensure_migrated().await {
             return Err(anyhow!("{}", crate::surface_gate::gate_blocked_message(&e)));
         }
-    }
+        // 恢复会话：启动引擎、加载会话之前先 resolve——层身份只信 sidecar，
+        // 不信前端参数或 localStorage。无归属/损坏/版本不支持一律在
+        // 引擎起来之前拒绝。
+        match resume.as_ref() {
+            Some(sid) => Some(surface.resolve(sid).map_err(|e| {
+                anyhow!("{}", crate::surface_gate::binding_blocked_message(&e))
+            })?),
+            None => None,
+        }
+    };
     match validate_startup_models() {
         StartupModels::Ok => {}
         StartupModels::NoModels => {
@@ -367,6 +380,28 @@ pub(crate) async fn start_inner(
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
         (resp.session_id, resp.models)
     };
+    // ── v0.19-2a 最低身份事务链：引擎返回 ID → 写 binding → 成功后才
+    // 安装 handle/返回前端。写失败即取消本次 Agent——绝不暴露可发送的
+    // handle；引擎可能留下孤立会话，恢复时会被 unbound_surface 拦住，
+    // 走显式恢复/认领，不会静默升 Code。
+    let surface_binding = match resumed_binding {
+        Some(b) => b,
+        None => {
+            let surface = app.state::<crate::surface_gate::SurfaceState>();
+            match surface
+                .bind_new_session(&session_id.0, crate::surface::SurfaceKind::Code)
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    cancel.cancel();
+                    return Err(anyhow!(
+                        "{}",
+                        crate::surface_gate::binding_blocked_message(&e)
+                    ));
+                }
+            }
+        }
+    };
     // #127-2 聊天目录链：同一世代快照 + config 文档，逐 option 出能力。
     // 配置读取/解析失败不阻止会话启动，但必须作为结构化诊断随
     // StartResult 返回——禁止 unwrap_or_default 静默降级为全员 unknown。
@@ -442,6 +477,9 @@ pub(crate) async fn start_inner(
         model_block,
         model_options,
         caps_config_issue,
+        surface_kind: surface_binding.surface_kind,
+        policy_version: crate::surface::derive_effective_policy(surface_binding.surface_kind)
+            .policy_version,
     })
 }
 

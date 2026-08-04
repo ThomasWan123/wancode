@@ -448,6 +448,7 @@ pub async fn scheduler_delete(
 #[tauri::command]
 pub async fn session_fork(
     state: State<'_, AgentState>,
+    surface: State<'_, crate::surface_gate::SurfaceState>,
     workspace: String,
     target_prompt_index: Option<usize>,
 ) -> Result<String, String> {
@@ -464,10 +465,18 @@ pub async fn session_fork(
         params["targetPromptIndex"] = serde_json::json!(i);
     }
     let v = ext_call(&state, "x.ai/session/fork", params).await?;
-    v.get("newSessionId")
+    let new_id = v
+        .get("newSessionId")
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("fork 未返回 newSessionId: {v}"))
+        .ok_or_else(|| format!("fork 未返回 newSessionId: {v}"))?;
+    // v0.19-2a 身份链：fork 出的会话继承源会话的层身份，写失败即报错
+    // ——新会话文件已落盘但无归属，恢复时会被 unbound_surface 拦住，
+    // 不会静默升 Code。
+    surface
+        .inherit_binding(&source, &new_id)
+        .map_err(|e| crate::surface_gate::binding_blocked_message(&e))?;
+    Ok(new_id)
 }
 
 /// Grep the workspace (`x.ai/search/content`). Respects .gitignore.

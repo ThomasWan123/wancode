@@ -13,7 +13,10 @@ use crate::autotest::walkdir_find;
 /// prompt，结果从磁盘会话历史读取，用后即删。后台会话经 background_sessions
 /// 屏蔽：不发 agent://update、权限请求自动取消。
 #[tauri::command]
-pub async fn review_run(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+pub async fn review_run(
+    state: State<'_, AgentState>,
+    surface: State<'_, crate::surface_gate::SurfaceState>,
+) -> Result<serde_json::Value, String> {
     let (acp_tx, cwd) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
@@ -61,6 +64,13 @@ pub async fn review_run(state: State<'_, AgentState>) -> Result<serde_json::Valu
             .await
             .map_err(|e| format!("创建审查会话失败: {e}"))?;
     let rid = resp.session_id.clone();
+    // v0.19-2a 身份链：审查临时会话「用后即删」，但删除前崩溃会留下
+    // 孤儿——它是普通会话（非 subagent），会进 list_summaries 与会话
+    // 列表。写 binding 保证孤儿被点开时走正常 Code 恢复而非
+    // unbound_surface 硬阻塞。
+    surface
+        .bind_new_session(&rid.0, crate::surface::SurfaceKind::Code)
+        .map_err(|e| crate::surface_gate::binding_blocked_message(&e))?;
     state
         .background_sessions
         .lock()

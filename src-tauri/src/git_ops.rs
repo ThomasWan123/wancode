@@ -78,6 +78,7 @@ pub async fn git_checkout_session_head(
 #[tauri::command]
 pub async fn worktree_resume_session(
     state: State<'_, AgentState>,
+    surface: State<'_, crate::surface_gate::SurfaceState>,
     workspace: String,
 ) -> Result<serde_json::Value, String> {
     let source = {
@@ -98,9 +99,21 @@ pub async fn worktree_resume_session(
     if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
         return Err(e.to_string());
     }
-    v.get("result")
+    let result = v
+        .get("result")
         .cloned()
-        .ok_or_else(|| format!("resume_session 未返回结果: {v}"))
+        .ok_or_else(|| format!("resume_session 未返回结果: {v}"))?;
+    // v0.19-2a 身份链：worktree fork 出的新会话继承源会话层身份。
+    // 前端随后 startSession(newId) 走 resume 路径，那里会 resolve——
+    // 此处不写 binding 的话恢复必被 unbound_surface 拦死。
+    if let Some(new_id) = result.get("sessionId").and_then(|s| s.as_str()) {
+        surface
+            .inherit_binding(&source, new_id)
+            .map_err(|e| crate::surface_gate::binding_blocked_message(&e))?;
+    } else {
+        return Err(format!("resume_session 结果缺 sessionId: {result}"));
+    }
+    Ok(result)
 }
 
 /// List worktrees. See the casing note above — this one is snake_case.

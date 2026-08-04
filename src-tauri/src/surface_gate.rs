@@ -16,7 +16,7 @@
 //! - 损坏标记 / 迁移不完整 / 存储 IO 等一律阻止会话启动，错误以
 //!   `SURFACE_GATE_BLOCKED: {json}` 形态给前端（serde tag = code）。
 
-use crate::surface::{SurfaceBindingStore, SurfaceError};
+use crate::surface::{SurfaceBinding, SurfaceBindingStore, SurfaceError, SurfaceKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -103,6 +103,35 @@ impl SurfaceState {
         self.gate.clone()
     }
 
+    /// 新会话身份写入（最低事务链：引擎返回 ID → 写 binding → 成功后
+    /// 调用方才安装 handle/返回前端）。写失败调用方必须取消本次 Agent。
+    pub fn bind_new_session(
+        &self,
+        session_id: &str,
+        kind: SurfaceKind,
+    ) -> Result<SurfaceBinding, SurfaceError> {
+        let b = SurfaceBinding::new(session_id, kind);
+        self.gate.store().write(&b)?;
+        Ok(b)
+    }
+
+    /// 恢复会话身份解析：在启动引擎、加载会话之前调用；层身份只信
+    /// sidecar，不信前端参数或 localStorage。
+    pub fn resolve(&self, session_id: &str) -> Result<SurfaceBinding, SurfaceError> {
+        self.gate.store().resolve(session_id)
+    }
+
+    /// 派生路径（fork / worktree resume 等）：新会话继承源会话的层身份。
+    /// 源无归属即失败——派生不能凭空发明身份。
+    pub fn inherit_binding(
+        &self,
+        source_session_id: &str,
+        new_session_id: &str,
+    ) -> Result<SurfaceBinding, SurfaceError> {
+        let source = self.gate.store().resolve(source_session_id)?;
+        self.bind_new_session(new_session_id, source.surface_kind)
+    }
+
     /// 生产迁移门：枚举 = 引擎公开的全量会话列举（无数量上限）。
     pub async fn ensure_migrated(&self) -> Result<(), SurfaceError> {
         self.gate
@@ -126,6 +155,14 @@ impl SurfaceState {
 pub fn gate_blocked_message(e: &SurfaceError) -> String {
     format!(
         "SURFACE_GATE_BLOCKED: {}",
+        serde_json::to_string(e).unwrap_or_else(|_| e.to_string())
+    )
+}
+
+/// 身份链错误（resolve/写 binding 失败）→ 前端契约字符串。
+pub fn binding_blocked_message(e: &SurfaceError) -> String {
+    format!(
+        "SURFACE_BINDING_BLOCKED: {}",
         serde_json::to_string(e).unwrap_or_else(|_| e.to_string())
     )
 }
@@ -249,6 +286,67 @@ mod tests {
             .expect("锁释放后须放行");
         holder.join().unwrap();
         assert!(g.store().migration_complete().unwrap());
+    }
+
+    // 2a-6：生产链——迁移 → 新建（写 binding）→ 进程重启（新实例）→
+    // 恢复 resolve 成功且身份保持；未写 binding 的「崩溃孤儿」则被拦。
+    #[tokio::test]
+    async fn full_chain_migrate_create_restart_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("surface-bindings");
+        // 第一进程：迁移 + 新建会话写 binding。
+        {
+            let s = SurfaceState::new(root.clone());
+            s.gate()
+                .ensure_migrated(|| async { Ok(vec!["legacy-1".to_string()]) })
+                .await
+                .unwrap();
+            s.bind_new_session("fresh-chat", SurfaceKind::Chat).unwrap();
+            // 模拟崩溃孤儿：引擎已建会话但 binding 未写成。
+            // （什么都不写就是这个状态。）
+        }
+        // 第二进程（重启）：全新实例。
+        let s2 = SurfaceState::new(root);
+        s2.gate()
+            .ensure_migrated(|| async { Ok(vec!["legacy-1".to_string()]) })
+            .await
+            .expect("重启后门幂等放行");
+        assert_eq!(s2.resolve("legacy-1").unwrap().surface_kind, SurfaceKind::Code);
+        assert_eq!(
+            s2.resolve("fresh-chat").unwrap().surface_kind,
+            SurfaceKind::Chat,
+            "新建会话重启后必须恢复出同一层身份"
+        );
+        assert!(matches!(
+            s2.resolve("orphan-crashed"),
+            Err(SurfaceError::UnboundSurface { .. })
+        ));
+    }
+
+    // 2a-7：派生路径继承——fork/worktree 的新会话拿源会话的层身份；
+    // 源无归属时派生失败，不发明身份。
+    #[tokio::test]
+    async fn inherit_binding_copies_source_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SurfaceState::new(dir.path().join("surface-bindings"));
+        s.gate()
+            .ensure_migrated(|| async { Ok(vec![]) })
+            .await
+            .unwrap();
+        s.bind_new_session("src-work", SurfaceKind::Work).unwrap();
+        let b = s.inherit_binding("src-work", "child-1").unwrap();
+        assert_eq!(b.surface_kind, SurfaceKind::Work);
+        assert_eq!(s.resolve("child-1").unwrap().surface_kind, SurfaceKind::Work);
+        // 源无归属：拒绝派生。
+        assert!(matches!(
+            s.inherit_binding("ghost-src", "child-2"),
+            Err(SurfaceError::UnboundSurface { .. })
+        ));
+        assert!(matches!(
+            s.resolve("child-2"),
+            Err(SurfaceError::UnboundSurface { .. }),
+
+        ));
     }
 
     // 2a-5：损坏标记 → 门阻塞且错误结构化（前端契约串可解析）。
