@@ -365,6 +365,49 @@ mod tests {
         ));
     }
 
+    // 2a-9（review 身份 P0 判别证据）：review 临时会话按 review_run 的
+    // 代码路径（活跃会话 → inherit_binding）派生。判别点：源是非 Code
+    // 层时，派生结果必须是源的层——旧实现硬编码 bind(Code) 在本测试
+    // 必红。源无归属时 review 派生同样被拒。
+    #[tokio::test]
+    async fn review_style_derivation_inherits_source_never_invents_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SurfaceState::new(dir.path().join("surface-bindings"));
+        s.gate()
+            .ensure_migrated(|| async { Ok(vec![]) })
+            .await
+            .unwrap();
+        // 活跃会话是 Chat（非 Code）——审查派生必须继承 Chat。
+        s.bind_new_session("active-chat", SurfaceKind::Chat).unwrap();
+        let review = s.inherit_binding("active-chat", "review-temp-1").unwrap();
+        assert_eq!(review.surface_kind, SurfaceKind::Chat);
+        assert_ne!(
+            review.surface_kind,
+            SurfaceKind::Code,
+            "review 派生绝不发明 Code 身份"
+        );
+        assert_eq!(
+            s.resolve("review-temp-1").unwrap().surface_kind,
+            SurfaceKind::Chat,
+            "崩溃孤儿复活时也按源会话层恢复"
+        );
+        // Code 源正常继承 Code（现状主路径）。
+        s.bind_new_session("active-code", SurfaceKind::Code).unwrap();
+        assert_eq!(
+            s.inherit_binding("active-code", "review-temp-2").unwrap().surface_kind,
+            SurfaceKind::Code
+        );
+        // 源无归属（孤儿会话上触发审查）：拒绝派生，不发明身份。
+        assert!(matches!(
+            s.inherit_binding("orphan-active", "review-temp-3"),
+            Err(SurfaceError::UnboundSurface { .. })
+        ));
+        assert!(matches!(
+            s.resolve("review-temp-3"),
+            Err(SurfaceError::UnboundSurface { .. })
+        ));
+    }
+
     // 2a-8（复核 P0 验收样本形状）：标记后存在孤儿 → 门必须放行、
     // 健康会话正常打开，仅孤儿在 resolve 时单独 unbound_surface。
     #[tokio::test]
