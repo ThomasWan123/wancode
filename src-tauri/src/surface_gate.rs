@@ -82,6 +82,22 @@ impl SurfaceGate {
                 .store
                 .migrate_legacy(ids.iter().map(|s| s.as_str()));
         }
+        // 门级裁决（复核 P0：孤儿不得全局拒启动）：标记后存在无归属会话
+        // 是**个别会话**的病，不是门的病——store 层如实上报（复核三契约
+        // 不变），门层降为诊断日志放行；这些会话在各自 resolve 时单独被
+        // unbound_surface 拦住，走显式认领。若把它做成门级失败，一个
+        // 崩溃孤儿就能把 235 个健康会话全部锁死（真实现场实测形态）。
+        let result = match result {
+            Err(SurfaceError::PostMarkerUnbound { session_ids }) => {
+                tracing::warn!(
+                    count = session_ids.len(),
+                    ids = ?session_ids,
+                    "标记后存在无归属会话：门放行，逐会话 resolve 时单独阻塞（待显式认领）"
+                );
+                Ok(())
+            }
+            other => other,
+        };
         *slot = Some(result.clone());
         result
     }
@@ -346,6 +362,50 @@ mod tests {
             s.resolve("child-2"),
             Err(SurfaceError::UnboundSurface { .. }),
 
+        ));
+    }
+
+    // 2a-8（复核 P0 验收样本形状）：标记后存在孤儿 → 门必须放行、
+    // 健康会话正常打开，仅孤儿在 resolve 时单独 unbound_surface。
+    #[tokio::test]
+    async fn gate_passes_with_orphans_and_blocks_them_individually() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("surface-bindings");
+        // 第一进程：迁移完成 + 一个健康新会话。
+        {
+            let s = SurfaceState::new(root.clone());
+            s.gate()
+                .ensure_migrated(|| async { Ok(vec!["healthy-legacy".to_string()]) })
+                .await
+                .unwrap();
+            s.bind_new_session("healthy-new", SurfaceKind::Chat).unwrap();
+            // 孤儿 = 引擎建会话成功、binding 写入前崩溃：什么都不写。
+        }
+        // 冷启动（新实例）：枚举包含孤儿——门必须放行。
+        let s2 = SurfaceState::new(root);
+        s2.gate()
+            .ensure_migrated(|| async {
+                Ok(vec![
+                    "healthy-legacy".to_string(),
+                    "healthy-new".to_string(),
+                    "orphan-crashed".to_string(),
+                ])
+            })
+            .await
+            .expect("孤儿不得把门打死（235 个健康会话不能陪葬）");
+        // 健康会话正常打开。
+        assert_eq!(
+            s2.resolve("healthy-legacy").unwrap().surface_kind,
+            SurfaceKind::Code
+        );
+        assert_eq!(
+            s2.resolve("healthy-new").unwrap().surface_kind,
+            SurfaceKind::Chat
+        );
+        // 仅孤儿单独被拦。
+        assert!(matches!(
+            s2.resolve("orphan-crashed"),
+            Err(SurfaceError::UnboundSurface { .. })
         ));
     }
 
