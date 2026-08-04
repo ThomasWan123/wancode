@@ -186,6 +186,16 @@ pub(crate) async fn start_inner(
     // 继续操作都可能绕过它直达这里。校验必须住在所有入口的必经之路上。
     // 错误码是前端契约：MODEL_REQUIRED → 重开向导；MODEL_CONFIG_INVALID
     // → 提示修配置。改动前先跑 config 单测。
+    // ── v0.19-2a 迁移门（必经之路，与模型门同级）：层归属迁移完成前
+    // 不启动任何会话。所有入口（前端 agent_start、autotest）都过这里；
+    // 门内部并发共享同一结果、migration_locked 有界重试；损坏标记/迁移
+    // 不完整等一律结构化阻塞（SURFACE_GATE_BLOCKED: {json}）。
+    {
+        let surface = app.state::<crate::surface_gate::SurfaceState>();
+        if let Err(e) = surface.ensure_migrated().await {
+            return Err(anyhow!("{}", crate::surface_gate::gate_blocked_message(&e)));
+        }
+    }
     match validate_startup_models() {
         StartupModels::Ok => {}
         StartupModels::NoModels => {
