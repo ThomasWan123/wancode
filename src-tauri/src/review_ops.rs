@@ -17,10 +17,10 @@ pub async fn review_run(
     state: State<'_, AgentState>,
     surface: State<'_, crate::surface_gate::SurfaceState>,
 ) -> Result<serde_json::Value, String> {
-    let (acp_tx, cwd) = {
+    let (acp_tx, cwd, source_sid) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
-        (h.acp_tx.clone(), h.cwd.clone())
+        (h.acp_tx.clone(), h.cwd.clone(), h.session_id.0.to_string())
     };
 
     // 1. 收集未提交改动的 unified diff（总量截断，防撑爆上下文）
@@ -64,12 +64,13 @@ pub async fn review_run(
             .await
             .map_err(|e| format!("创建审查会话失败: {e}"))?;
     let rid = resp.session_id.clone();
-    // v0.19-2a 身份链：审查临时会话「用后即删」，但删除前崩溃会留下
-    // 孤儿——它是普通会话（非 subagent），会进 list_summaries 与会话
-    // 列表。写 binding 保证孤儿被点开时走正常 Code 恢复而非
-    // unbound_surface 硬阻塞。
+    // v0.19-2a 身份链（复核修正）：审查临时会话**继承**当前会话的层
+    // 身份，与 fork/worktree 同一原则——派生不发明身份。此前硬编码
+    // Code 是错的：当前会话若是别的层，审查孤儿会以 Code 身份复活。
+    // 「用后即删」前崩溃的孤儿是普通会话（非 subagent）、会进列表，
+    // 继承的 binding 保证它被点开时按源会话的层恢复。
     surface
-        .bind_new_session(&rid.0, crate::surface::SurfaceKind::Code)
+        .inherit_binding(&source_sid, &rid.0)
         .map_err(|e| crate::surface_gate::binding_blocked_message(&e))?;
     state
         .background_sessions
