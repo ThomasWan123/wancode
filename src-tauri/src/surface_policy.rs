@@ -67,6 +67,9 @@ pub enum SurfacePolicyError {
     /// Chat 零文件/零执行承诺；私有 cwd 只隔项目 hooks 隔不了全局。
     /// 空 hooks 配置会退回磁盘 discovery，故必须启动前探测阻塞。
     GlobalHooksConflict { hook_count: usize, detail: String },
+    /// 存在可能向引擎贡献 hooks/MCP 的插件输入面。G26 下引擎插件
+    /// discovery 本体不可达，按输入面超集拦截（多拦不漏）。
+    PluginExtensionsConflict { sources: Vec<String> },
 }
 
 impl std::fmt::Display for SurfacePolicyError {
@@ -82,6 +85,12 @@ impl std::fmt::Display for SurfacePolicyError {
             SurfacePolicyError::GlobalHooksConflict { hook_count, detail } => write!(
                 f,
                 "global_hooks_conflict: {hook_count} 个全局 hooks 会对 Chat 生效（{detail}）"
+            ),
+            SurfacePolicyError::PluginExtensionsConflict { sources } => write!(
+                f,
+                "plugin_extensions_conflict: {} 个插件输入面非空（{}）",
+                sources.len(),
+                sources.join("; ")
             ),
         }
     }
@@ -179,14 +188,22 @@ pub(crate) fn ensure_chat_model_allowed(
     }
 }
 
-/// 全局 hooks 门（复核 P0）：用**引擎自己的 discovery**只读探测所有会
-/// 对 Chat 生效的全局/plugin hooks（git_root=None + untrusted ⇒ 仅全局
-/// 来源：~/.grok/hooks、hooks-paths、Claude/Cursor 全局），命中任意一个
-/// 即结构化阻塞。不能用空 hooks:{} 覆盖——空配置会退回磁盘 discovery。
-/// discovery 报错同样 fail-closed（无法确定 = 阻塞）。
+/// 磁盘全局 hooks 门（复核三：**名实相符**——只覆盖磁盘全局 hooks：
+/// ~/.grok/hooks、hooks-paths、Claude/Cursor 全局；plugin 携带的文件型/
+/// inline hooks 由 [`ensure_no_plugin_extensions`] 在源头拦截）。
+/// 用**引擎自己的 discovery**只读探测（git_root=None + untrusted ⇒ 仅
+/// 全局来源），命中即阻塞；报错 fail-closed；空 hooks:{} 不可作覆盖
+/// （会退回磁盘 discovery）。
+///
+/// compat 面（复核三 P1）：用 `CompatConfig::default()`——VendorCompat
+/// 全字段 true（全 vendor 全面开启），是任何 compat_resolved（config +
+/// remote settings 只会**关闭**面）的**超集**：门的发现面 ≥ 引擎实际
+/// 加载面，零漏、只可能多拦。resolve_compat_config 为引擎私有且
+/// remote settings 不可达（G26），复现 resolved 反而引入分歧窗口；
+/// default=全开由测试 2c-7 钉死，上游翻转即红。
 // 临时：切片 2（start_inner/agent_set_model 接线）后移除。
 #[allow(dead_code)]
-pub(crate) fn ensure_no_global_hooks() -> Result<(), SurfacePolicyError> {
+pub(crate) fn ensure_no_disk_global_hooks() -> Result<(), SurfacePolicyError> {
     let (registry, errors) = xai_grok_shell::util::hooks::discover_hooks(
         None,
         &xai_grok_tools::types::compat::CompatConfig::default(),
@@ -218,6 +235,72 @@ fn classify_global_hooks(
     }
     Ok(())
 }
+
+/// 插件扩展门（复核三 P0）：**G26 接口冲突的明确记录**——引擎插件
+/// discovery 本体在 xai-grok-agent（新增依赖改 Cargo.lock、破清单哈希，
+/// G26 禁止），无法直接复用。本门枚举引擎 PluginsConfig 的**全部输入
+/// 面**（与 shell config.rs merge_claude_plugins 同源）：
+/// ① config.toml `[plugins]` 的 enabled/paths/cli_plugin_dirs；
+/// ② `~/.claude/settings.json` 的 enabledPlugins；
+/// ③ `~/.claude/plugins/known_marketplaces.json` 存在性。
+/// 任一非空 ⇒ 引擎可能加载贡献 hooks/MCP 的插件 ⇒ 阻塞 Chat。
+/// 这是输入面**超集**（不解析 manifest，多拦不漏），不是仅查
+/// [plugins] 的半套探针。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
+pub(crate) fn ensure_no_plugin_extensions(
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), SurfacePolicyError> {
+    let mut sources = Vec::new();
+    if let Some(p) = doc.get("plugins").and_then(|v| v.as_table_like()) {
+        for key in ["enabled", "paths", "cli_plugin_dirs"] {
+            let non_empty = p
+                .get(key)
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+            if non_empty {
+                sources.push(format!("config.toml [plugins].{key}"));
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from) {
+        let claude_settings = home.join(".claude").join("settings.json");
+        if let Ok(text) = std::fs::read_to_string(&claude_settings) {
+            let enabled_non_empty = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    v.get("enabledPlugins")
+                        .map(|e| e.as_object().is_some_and(|o| !o.is_empty()))
+                })
+                .unwrap_or(false);
+            if enabled_non_empty {
+                sources.push("~/.claude/settings.json enabledPlugins".into());
+            }
+        }
+        if home
+            .join(".claude")
+            .join("plugins")
+            .join("known_marketplaces.json")
+            .is_file()
+        {
+            sources.push("~/.claude/plugins/known_marketplaces.json".into());
+        }
+    }
+    if sources.is_empty() {
+        Ok(())
+    } else {
+        Err(SurfacePolicyError::PluginExtensionsConflict { sources })
+    }
+}
+
+/// Chat 接线必须钉死的 managed MCP 关闭 env（切片 2 使用）：引擎
+/// ManagedMcpsConfig::resolve 优先级 = **env > config > remote >
+/// default**——env 是 G26 下唯一稳赢杠杆。mcp_servers=[] 不等于零
+/// MCP：managed/plugin/热重载 MCP 都在会话建立后另行合并。
+#[allow(dead_code)]
+pub(crate) const MANAGED_MCPS_ENV: &str = "GROK_MANAGED_MCPS_ENABLED";
+#[allow(dead_code)]
+pub(crate) const MANAGED_MCP_GATEWAY_ENV: &str = "GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED";
 
 #[cfg(test)]
 mod tests {
@@ -342,11 +425,49 @@ mod tests {
     // 后续请求体测试覆盖）。
     #[test]
     fn global_hooks_probe_runs() {
-        match ensure_no_global_hooks() {
+        match ensure_no_disk_global_hooks() {
             Ok(()) => {}
             Err(SurfacePolicyError::GlobalHooksConflict { .. }) => {}
             Err(other) => panic!("探测只应产生 GlobalHooksConflict，得到 {other:?}"),
         }
+    }
+
+    // 2c-7：compat 超集面钉死——CompatConfig::default() 的 vendor hooks
+    // 面必须全 true（探测面 ≥ 引擎 resolved 面的前提）。上游翻转默认值
+    // 本测试即红，届时改为显式全开构造。
+    #[test]
+    fn default_compat_is_superset_for_hooks() {
+        let c = xai_grok_tools::types::compat::CompatConfig::default();
+        assert!(c.claude.hooks, "claude hooks 面必须默认开启（超集前提）");
+        assert!(c.cursor.hooks, "cursor hooks 面必须默认开启（超集前提）");
+    }
+
+    // 2c-8：插件扩展门——config 输入面三态（claude 磁盘面依机器状态，
+    // 干净环境行为由 CI 覆盖；此处注入 config 面）。
+    #[test]
+    fn plugin_extensions_gate_on_config_inputs() {
+        let d = doc("[model.glm]\n");
+        match ensure_no_plugin_extensions(&d) {
+            Ok(()) => {}
+            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
+                assert!(sources.iter().all(|s| s.contains(".claude")));
+            }
+            Err(other) => panic!("非法错误 {other:?}"),
+        }
+        let d = doc("[plugins]\nenabled=[\"foo\"]\n");
+        match ensure_no_plugin_extensions(&d) {
+            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
+                assert!(sources.iter().any(|s| s.contains("[plugins].enabled")));
+            }
+            other => panic!("期望 PluginExtensionsConflict，得到 {other:?}"),
+        }
+        let d = doc("[plugins]\npaths=[\"/x\"]\n");
+        assert!(matches!(
+            ensure_no_plugin_extensions(&d),
+            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
+        ));
+        let e = SurfacePolicyError::PluginExtensionsConflict { sources: vec!["s".into()] };
+        assert!(policy_blocked_message(&e).contains("\"code\":\"plugin_extensions_conflict\""));
     }
 
     // 2c-4：startupHints 形状（skipGitStatus 为引擎 StartupHints 真实字段，
