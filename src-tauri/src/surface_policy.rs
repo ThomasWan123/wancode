@@ -236,70 +236,90 @@ fn classify_global_hooks(
     Ok(())
 }
 
-/// 插件扩展门（复核四 P0-1/P0-3 定案：**方案 A 完整镜像**）。
+/// 插件扩展门（复核六定版：引擎有效配置复用）。
 ///
-/// G26 接口冲突记录：引擎插件 discovery 本体在 xai-grok-agent（新增
-/// 依赖改 Cargo.lock、破清单哈希，G26 禁止），无法直接调用。本门
-/// **完整镜像**引擎 discovery 的全部来源（xai-grok-agent
-/// plugins/discovery.rs 文档序，锁定引擎 commit 下逐条对齐；漂移锁
-/// 测试 2c-10 钉住引擎来源文件字节，引擎升级即红、强制重审本清单）：
-///   1. config `[plugins].cli_plugin_dirs`
-///   2. 项目 `.grok/plugins` / `.claude/plugins`（Chat 用私有中性
-///      cwd，项目面天然为空——仍由 cwd 决策保证，不在本门枚举）
-///   3. `$GROK_HOME/plugins/`
-///   4. `~/.claude/plugins/`（目录非空即拦，天然涵盖其内的
-///      installed_plugins.json 与 known_marketplaces.json 及其指向）
-///   5. `~/.grok/installed-plugins/`（install registry）
-///   6. config `[plugins].paths` 与 `[plugins].enabled`
-///   7. `~/.claude/settings.json` enabledPlugins
+/// 启动/配置面封锁：**直接调用引擎自己的解析**，不再手写镜像——
+/// - [`resolve_effective_plugins_config`]（pub，config/mod.rs:1354）：
+///   enabled/paths/cli_plugin_dirs 的有效值（managed_config.toml 合并
+///   层 user-wins、项目层、folder-trust 全在内）；
+/// - [`load_effective_config_disk_only`]（pub use :883）读
+///   `[plugins].install_dir`——与引擎 InstallRegistry 同一配置层；
+///   **读取/解析失败 fail-closed**；未配置回落
+///   `$GROK_HOME/installed-plugins`（引擎 resolve_install_dir 同序）；
+/// - 磁盘用户面照扫：`$GROK_HOME/plugins`、`~/.claude/plugins`（目录
+///   非空即拦，涵盖 installed_plugins.json/known_marketplaces.json）、
+///   `~/.claude/settings.json` enabledPlugins；
+/// - 项目 `.grok/.claude/plugins` 面由 Chat 私有中性 cwd 保证。
 ///
-/// 任一来源非空 ⇒ 阻塞 Chat。目录判定 = read_dir 有任意条目（超集，
-/// 不解析 manifest）。**热重载安全性由此推出**：会话全期所有来源为
-/// 空 ⇒ reload 无物可载（方案 A 的生命周期论证）。
-///
-/// 根目录可注入（判别测试用）；生产包装取真实 grok_home 与 ~/.claude。
+/// **生命周期边界未由本门解决**（复核六定性）：`/plugins` 的
+/// BuiltinGate::Plugins 是 `plugin_registry.is_some()` 的状态派生门，
+/// 不是可设置开关；引擎 process-wide reload fan-out 可把其他会话加载
+/// 的插件快照重新合入活跃 Chat。是否存在可靠客户端杠杆由真实链探针
+/// 裁决（设计稿复核六），本门只承诺启动/配置面。
 // 临时：切片 2（start_inner/agent_set_model 接线）后移除。
 #[allow(dead_code)]
 pub(crate) fn ensure_no_plugin_extensions(
-    doc: &toml_edit::DocumentMut,
+    cwd: &std::path::Path,
 ) -> Result<(), SurfacePolicyError> {
+    let eff = xai_grok_shell::config::resolve_effective_plugins_config(cwd);
     let grok_home = xai_grok_shell::util::grok_home::grok_home();
+    let install_dir = match xai_grok_shell::config::load_effective_config_disk_only() {
+        Ok(root) => root
+            .get("plugins")
+            .and_then(|p| p.get("install_dir"))
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| grok_home.join("installed-plugins")),
+        Err(e) => {
+            return Err(SurfacePolicyError::PluginExtensionsConflict {
+                sources: vec![format!("有效配置读取失败（fail-closed）：{e}")],
+            });
+        }
+    };
     let claude_home = std::env::var_os("USERPROFILE")
         .map(std::path::PathBuf::from)
         .map(|h| h.join(".claude"));
-    scan_plugin_sources(doc, &grok_home, claude_home.as_deref())
+    scan_plugin_sources(
+        &eff.enabled,
+        &eff.paths,
+        &eff.cli_plugin_dirs,
+        &install_dir,
+        &grok_home,
+        claude_home.as_deref(),
+    )
 }
 
-/// 判定内核（可注入根，判别测试直击）。
+/// 判定内核（全输入注入，判别测试直击）。
 fn scan_plugin_sources(
-    doc: &toml_edit::DocumentMut,
+    enabled: &[String],
+    paths: &[String],
+    cli_plugin_dirs: &[std::path::PathBuf],
+    install_dir: &std::path::Path,
     grok_home: &std::path::Path,
     claude_home: Option<&std::path::Path>,
 ) -> Result<(), SurfacePolicyError> {
     let mut sources = Vec::new();
-    // 来源 1/6：config [plugins] 三数组。
-    if let Some(p) = doc.get("plugins").and_then(|v| v.as_table_like()) {
-        for key in ["enabled", "paths", "cli_plugin_dirs"] {
-            let non_empty = p
-                .get(key)
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| !a.is_empty());
-            if non_empty {
-                sources.push(format!("config.toml [plugins].{key}"));
-            }
-        }
+    if !enabled.is_empty() {
+        sources.push("有效配置 [plugins].enabled".to_string());
     }
-    // 来源 3/5：$GROK_HOME/plugins 与 install registry。
+    if !paths.is_empty() {
+        sources.push("有效配置 [plugins].paths".to_string());
+    }
+    if !cli_plugin_dirs.is_empty() {
+        sources.push("有效配置 [plugins].cli_plugin_dirs".to_string());
+    }
     let dir_non_empty = |p: &std::path::Path| {
         std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_some())
     };
+    if dir_non_empty(install_dir) {
+        sources.push(format!(
+            "install registry（有效 install_dir = {}）",
+            install_dir.display()
+        ));
+    }
     if dir_non_empty(&grok_home.join("plugins")) {
         sources.push("$GROK_HOME/plugins".into());
     }
-    if dir_non_empty(&grok_home.join("installed-plugins")) {
-        sources.push("$GROK_HOME/installed-plugins（install registry）".into());
-    }
-    // 来源 4/7：~/.claude 面。
     if let Some(claude) = claude_home {
         if dir_non_empty(&claude.join("plugins")) {
             sources.push("~/.claude/plugins".into());
@@ -346,10 +366,12 @@ mod tests {
     use super::*;
     use xai_grok_shell::agent::config::AgentDefinition;
 
-    /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下三个 discovery
-    /// 来源文件的联合 sha256。引擎升级后按测试指引重审并更新。
+    /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下插件「来源/激活/
+    /// 重载」决策文件（agent 3 + shell 4+1）的联合 sha256。引擎升级后
+    /// 按测试指引重审并更新。注意（复核六）：漂移锁只防实现漂移，
+    /// 不能替代会话级执行隔离——后者由真实链探针裁决。
     const PLUGIN_DISCOVERY_SOURCES_SHA256: &str =
-        "2bf7f4066dc5590ee5a5a1b2de10af2a43a3ab3b9e20f3ea3161af7a12e1091b";
+        "ed7c4c06ce9b4537219ac053e0d25879db8caf43b3e13dad0ecad1e3a00aad07";
 
     // 2c-1：`_meta.agentProfile` 形状锁定——serialize → 引擎
     // AgentDefinition::from_json 往返，防形状漂移（终审硬约束 A）。
@@ -486,69 +508,53 @@ mod tests {
         assert!(c.cursor.hooks, "cursor hooks 面必须默认开启（超集前提）");
     }
 
-    // 2c-8：插件扩展门——config 输入面三态（claude 磁盘面依机器状态，
-    // 干净环境行为由 CI 覆盖；此处注入 config 面）。
+    // 2c-8/2c-9（复核六）：判定内核全输入注入——有效配置数组、
+    // install_dir（含自定义外部目录判别样本）、磁盘用户面三态。
     #[test]
-    fn plugin_extensions_gate_on_config_inputs() {
-        let d = doc("[model.glm]\n");
-        match ensure_no_plugin_extensions(&d) {
-            Ok(()) => {}
-            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
-                assert!(sources.iter().all(|s| s.contains(".claude")));
-            }
-            Err(other) => panic!("非法错误 {other:?}"),
-        }
-        let d = doc("[plugins]\nenabled=[\"foo\"]\n");
-        match ensure_no_plugin_extensions(&d) {
-            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
-                assert!(sources.iter().any(|s| s.contains("[plugins].enabled")));
-            }
-            other => panic!("期望 PluginExtensionsConflict，得到 {other:?}"),
-        }
-        let d = doc("[plugins]\npaths=[\"/x\"]\n");
-        assert!(matches!(
-            ensure_no_plugin_extensions(&d),
-            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
-        ));
-        let e = SurfacePolicyError::PluginExtensionsConflict { sources: vec!["s".into()] };
-        assert!(policy_blocked_message(&e).contains("\"code\":\"plugin_extensions_conflict\""));
-    }
-
-    // 2c-9（复核四判别①②）：config 为空时，仅 $GROK_HOME/plugins 有
-    // 插件 → 必须阻断；仅 install registry（installed-plugins/）有
-    // 插件 → 必须阻断；全部来源为空 → 放行。
-    #[test]
-    fn plugin_gate_blocks_disk_sources_with_empty_config() {
-        let d = doc("[model.glm]\n");
+    fn plugin_gate_discriminates_all_sources() {
         let tmp = tempfile::tempdir().unwrap();
         let grok = tmp.path().join("grok-home");
-        std::fs::create_dir_all(&grok).unwrap();
-        // 全空：放行（claude_home 注入空目录，隔离本机状态）。
         let claude = tmp.path().join("claude-home");
+        let install = tmp.path().join("default-install");
+        std::fs::create_dir_all(&grok).unwrap();
         std::fs::create_dir_all(&claude).unwrap();
-        scan_plugin_sources(&d, &grok, Some(&claude)).expect("全部来源为空须放行");
-        // 仅 $GROK_HOME/plugins 有一个插件目录：阻断。
-        std::fs::create_dir_all(grok.join("plugins").join("evil-plugin")).unwrap();
-        match scan_plugin_sources(&d, &grok, Some(&claude)) {
-            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
-                assert!(sources.iter().any(|s| s.contains("$GROK_HOME/plugins")));
-            }
-            other => panic!("期望阻断，得到 {other:?}"),
-        }
-        std::fs::remove_dir_all(grok.join("plugins")).unwrap();
-        // 仅 install registry 有条目：阻断。
-        std::fs::create_dir_all(grok.join("installed-plugins").join("mk-plugin")).unwrap();
+        let empty: &[String] = &[];
+        let no_cli: &[std::path::PathBuf] = &[];
+        // 全空：放行。
+        scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude))
+            .expect("全部来源为空须放行");
+        // 有效配置 enabled 非空：阻断。
+        let en = vec!["foo".to_string()];
         assert!(matches!(
-            scan_plugin_sources(&d, &grok, Some(&claude)),
+            scan_plugin_sources(&en, empty, no_cli, &install, &grok, Some(&claude)),
             Err(SurfacePolicyError::PluginExtensionsConflict { .. })
         ));
-        std::fs::remove_dir_all(grok.join("installed-plugins")).unwrap();
-        // 仅 ~/.claude/plugins 目录非空（涵盖 installed_plugins.json /
-        // known_marketplaces.json 任何形态）：阻断。
+        // 判别样本（复核五 P0-1）：自定义 install_dir 指向外部目录，
+        // 仅该处有 registry 条目——必须阻断。
+        let external = tmp.path().join("external-plugins");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("registry.json"), "{}").unwrap();
+        match scan_plugin_sources(empty, empty, no_cli, &external, &grok, Some(&claude)) {
+            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
+                assert!(
+                    sources.iter().any(|s| s.contains("install_dir")),
+                    "必须点名 install_dir 来源：{sources:?}"
+                );
+            }
+            other => panic!("外部 install_dir 必须阻断，得到 {other:?}"),
+        }
+        // 仅 $GROK_HOME/plugins 有插件：阻断。
+        std::fs::create_dir_all(grok.join("plugins").join("evil")).unwrap();
+        assert!(matches!(
+            scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude)),
+            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
+        ));
+        std::fs::remove_dir_all(grok.join("plugins")).unwrap();
+        // 仅 ~/.claude/plugins 非空：阻断。
         std::fs::create_dir_all(claude.join("plugins")).unwrap();
         std::fs::write(claude.join("plugins").join("installed_plugins.json"), "{}").unwrap();
         assert!(matches!(
-            scan_plugin_sources(&d, &grok, Some(&claude)),
+            scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude)),
             Err(SurfacePolicyError::PluginExtensionsConflict { .. })
         ));
     }
@@ -559,11 +565,22 @@ mod tests {
     #[test]
     fn plugin_discovery_source_drift_lock() {
         use sha2::{Digest, Sha256};
-        let engine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../grok-build/crates/codegen/xai-grok-agent/src/plugins");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../grok-build/crates/codegen");
         let mut hasher = Sha256::new();
-        for f in ["discovery.rs", "marketplace.rs", "install_registry.rs"] {
-            let bytes = std::fs::read(engine.join(f))
+        // agent 侧：discovery 来源；shell 侧：有效配置合并、registry
+        // fan-out/reload、slash gate（复核五 P1 扩容清单）。
+        for f in [
+            "xai-grok-agent/src/plugins/discovery.rs",
+            "xai-grok-agent/src/plugins/marketplace.rs",
+            "xai-grok-agent/src/plugins/install_registry.rs",
+            "xai-grok-shell/src/config/mod.rs",
+            "xai-grok-shell/src/agent/config.rs",
+            "xai-grok-shell/src/session/slash_commands.rs",
+            "xai-grok-shell/src/session/acp_session_impl/hooks_plugins.rs",
+            "xai-grok-shell/src/agent/mvp_agent/agent_ops.rs",
+        ] {
+            let bytes = std::fs::read(crates.join(f))
                 .unwrap_or_else(|e| panic!("读引擎 {f} 失败：{e}"));
             hasher.update((bytes.len() as u64).to_le_bytes());
             hasher.update(&bytes);
