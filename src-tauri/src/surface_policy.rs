@@ -263,30 +263,67 @@ pub(crate) fn ensure_no_plugin_extensions(
 ) -> Result<(), SurfacePolicyError> {
     let eff = xai_grok_shell::config::resolve_effective_plugins_config(cwd);
     let grok_home = xai_grok_shell::util::grok_home::grok_home();
-    let install_dir = match xai_grok_shell::config::load_effective_config_disk_only() {
+    let raw_install = match xai_grok_shell::config::load_effective_config_disk_only() {
         Ok(root) => root
             .get("plugins")
             .and_then(|p| p.get("install_dir"))
             .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| grok_home.join("installed-plugins")),
+            .map(str::to_owned),
         Err(e) => {
             return Err(SurfacePolicyError::PluginExtensionsConflict {
                 sources: vec![format!("有效配置读取失败（fail-closed）：{e}")],
             });
         }
     };
-    let claude_home = std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .map(|h| h.join(".claude"));
+    let install_dir = resolve_install_dir_like_engine(raw_install.as_deref(), &grok_home)?;
+    // ~/.claude 面：与引擎同源的 home 解析（std::env::home_dir，
+    // Windows = USERPROFILE + GetUserProfileDirectoryW 回退，与引擎
+    // dirs::home_dir 的 USERPROFILE 路径等价）；解析不到 fail-closed
+    // ——静默跳过 claude 扫描就是漏面（复核七 P1）。
+    let Some(home) = std::env::home_dir() else {
+        return Err(SurfacePolicyError::PluginExtensionsConflict {
+            sources: vec!["home 目录无法解析（fail-closed，~/.claude 面不可确认）".into()],
+        });
+    };
+    let claude_home = home.join(".claude");
     scan_plugin_sources(
         &eff.enabled,
         &eff.paths,
         &eff.cli_plugin_dirs,
         &install_dir,
         &grok_home,
-        claude_home.as_deref(),
+        Some(&claude_home),
     )
+}
+
+/// install_dir 解析——与引擎 InstallRegistry::read_install_dir_from_config
+/// 逐分支一致（install_registry.rs:263）：
+/// - `~/x` → home_dir()/x（引擎用 dirs::home_dir，此处 std::env::home_dir，
+///   Windows 均以 USERPROFILE 为首选——home 不可解析时**fail-closed**，
+///   引擎侧 `?` 返回 None 会静默回落默认目录，这里更严）；
+/// - 绝对/其他路径原样 `PathBuf::from`；
+/// - 未配置 → `$GROK_HOME/installed-plugins`（resolve_install_dir 同序）。
+fn resolve_install_dir_like_engine(
+    raw: Option<&str>,
+    grok_home: &std::path::Path,
+) -> Result<std::path::PathBuf, SurfacePolicyError> {
+    match raw {
+        None => Ok(grok_home.join("installed-plugins")),
+        Some(value) => {
+            if let Some(stripped) = value.strip_prefix("~/") {
+                match std::env::home_dir() {
+                    Some(home) => Ok(home.join(stripped)),
+                    None => Err(SurfacePolicyError::PluginExtensionsConflict {
+                        sources: vec![format!(
+                            "install_dir={value} 的 ~ 展开失败（home 不可解析，fail-closed）"
+                        )],
+                    }),
+                }
+            } else {
+                Ok(std::path::PathBuf::from(value))
+            }
+        }
+    }
 }
 
 /// 判定内核（全输入注入，判别测试直击）。
@@ -371,7 +408,7 @@ mod tests {
     /// 按测试指引重审并更新。注意（复核六）：漂移锁只防实现漂移，
     /// 不能替代会话级执行隔离——后者由真实链探针裁决。
     const PLUGIN_DISCOVERY_SOURCES_SHA256: &str =
-        "ed7c4c06ce9b4537219ac053e0d25879db8caf43b3e13dad0ecad1e3a00aad07";
+        "fcfcc49a0f98689e452b6f1b6bd5281502abe55c7cbcb5d7020f798ecb7c992e";
 
     // 2c-1：`_meta.agentProfile` 形状锁定——serialize → 引擎
     // AgentDefinition::from_json 往返，防形状漂移（终审硬约束 A）。
@@ -559,6 +596,37 @@ mod tests {
         ));
     }
 
+    // 2c-11（复核七 P0）：install_dir 解析与引擎逐分支一致——
+    // `~/x` 展开到 home、绝对路径原样、未配置回落默认。旧实现把
+    // `~/external-plugins` 当字面相对路径，本测试必红。
+    #[test]
+    fn install_dir_resolution_matches_engine_semantics() {
+        let grok = std::path::Path::new("G:/grok-home");
+        // 未配置 → $GROK_HOME/installed-plugins。
+        assert_eq!(
+            resolve_install_dir_like_engine(None, grok).unwrap(),
+            grok.join("installed-plugins")
+        );
+        // 绝对路径原样。
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("D:/external-plugins"), grok).unwrap(),
+            std::path::PathBuf::from("D:/external-plugins")
+        );
+        // ~/x → home_dir()/x（与引擎 dirs::home_dir 的 USERPROFILE 路径
+        // 等价；本测试环境必有 home）。
+        let home = std::env::home_dir().expect("测试环境必有 home");
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("~/external-plugins"), grok).unwrap(),
+            home.join("external-plugins"),
+            "~ 必须展开为 home，不得当字面相对路径"
+        );
+        // 非 ~/ 前缀的波浪线（如 ~x）不展开——引擎 strip_prefix 同语义。
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("~x"), grok).unwrap(),
+            std::path::PathBuf::from("~x")
+        );
+    }
+
     // 2c-10（复核四 P0-3 漂移锁）：镜像清单对齐的引擎 discovery 来源
     // 文件字节哈希。引擎升级（lock bump）改动这些文件时本测试必红，
     // 强制重审 scan_plugin_sources 的来源清单后更新哈希。
@@ -579,6 +647,9 @@ mod tests {
             "xai-grok-shell/src/session/slash_commands.rs",
             "xai-grok-shell/src/session/acp_session_impl/hooks_plugins.rs",
             "xai-grok-shell/src/agent/mvp_agent/agent_ops.rs",
+            // 复核七：有效配置合并语义与 GROK_HOME/home 路径语义。
+            "xai-grok-config/src/loader.rs",
+            "xai-grok-config/src/paths.rs",
         ] {
             let bytes = std::fs::read(crates.join(f))
                 .unwrap_or_else(|e| panic!("读引擎 {f} 失败：{e}"));
