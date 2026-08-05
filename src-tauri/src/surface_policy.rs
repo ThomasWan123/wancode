@@ -408,7 +408,7 @@ mod tests {
     /// 按测试指引重审并更新。注意（复核六）：漂移锁只防实现漂移，
     /// 不能替代会话级执行隔离——后者由真实链探针裁决。
     const PLUGIN_DISCOVERY_SOURCES_SHA256: &str =
-        "fcfcc49a0f98689e452b6f1b6bd5281502abe55c7cbcb5d7020f798ecb7c992e";
+        "3d433ecb531aa2b612c4d3b6426395b1d61bf0e23c9fedcfb64b134a90ec83be";
 
     // 2c-1：`_meta.agentProfile` 形状锁定——serialize → 引擎
     // AgentDefinition::from_json 往返，防形状漂移（终审硬约束 A）。
@@ -650,6 +650,13 @@ mod tests {
             // 复核七：有效配置合并语义与 GROK_HOME/home 路径语义。
             "xai-grok-config/src/loader.rs",
             "xai-grok-config/src/paths.rs",
+            // 复核十：fan-out 真实控制面——broadcast 本体、文本 /plugins
+            // 路径（仅当前会话）、两个 ACP 广播入口（x.ai/plugins/action
+            // 与 x.ai/plugins/reload，实测 plugins.rs:161 / session_admin.rs:51）。
+            "xai-grok-shell/src/agent/mvp_agent/mod.rs",
+            "xai-grok-shell/src/session/acp_session_impl/slash_exec.rs",
+            "xai-grok-shell/src/extensions/plugins.rs",
+            "xai-grok-shell/src/extensions/session_admin.rs",
         ] {
             let bytes = std::fs::read(crates.join(f))
                 .unwrap_or_else(|e| panic!("读引擎 {f} 失败：{e}"));
