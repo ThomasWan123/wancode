@@ -28,11 +28,15 @@ use serde::Serialize;
 /// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
 /// 重新归属。生产 agent_start 固定传 Code；Chat 仅测试/内部可达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
 pub(crate) enum NewSurfaceIntent {
     Code,
     Chat,
 }
 
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
 impl NewSurfaceIntent {
     pub(crate) fn surface_kind(self) -> crate::surface::SurfaceKind {
         match self {
@@ -57,6 +61,12 @@ pub enum SurfacePolicyError {
     /// Chat 恢复/切换时无法确定模型的 agent_type（配置读不到、
     /// 模型不在 config）——fail-closed。
     ModelUnresolvable { model_id: String, reason: String },
+    /// 存在会对 Chat 会话生效的全局/plugin hooks（~/.grok/hooks、
+    /// hooks-paths、Claude/Cursor 全局 hooks）。hooks 可在
+    /// UserPromptSubmit/Stop 等事件执行命令、写任意路径，直接违反
+    /// Chat 零文件/零执行承诺；私有 cwd 只隔项目 hooks 隔不了全局。
+    /// 空 hooks 配置会退回磁盘 discovery，故必须启动前探测阻塞。
+    GlobalHooksConflict { hook_count: usize, detail: String },
 }
 
 impl std::fmt::Display for SurfacePolicyError {
@@ -69,6 +79,10 @@ impl std::fmt::Display for SurfacePolicyError {
             SurfacePolicyError::ModelUnresolvable { model_id, reason } => {
                 write!(f, "model_unresolvable: 模型 {model_id} 无法确定 agent_type：{reason}")
             }
+            SurfacePolicyError::GlobalHooksConflict { hook_count, detail } => write!(
+                f,
+                "global_hooks_conflict: {hook_count} 个全局 hooks 会对 Chat 生效（{detail}）"
+            ),
         }
     }
 }
@@ -86,11 +100,13 @@ pub fn policy_blocked_message(e: &SurfacePolicyError) -> String {
 /// typed 构造：工具条目来自 `ToolConfig::from(&WebSearchTool/&WebFetchTool)`
 /// ——真实内部 ID（`GrokBuild:*`）由工具自己报告，裸字符串不是契约。
 /// 形状由单测的 serialize → `AgentDefinition::from_json` 往返锁定。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
 pub(crate) fn chat_agent_profile() -> serde_json::Value {
     use xai_grok_tools::implementations::grok_build::{WebFetchTool, WebSearchTool};
     use xai_grok_tools::registry::types::ToolConfig;
     let web_search = ToolConfig::from(&WebSearchTool);
-    let web_fetch = ToolConfig::from(&WebFetchTool::default());
+    let web_fetch = ToolConfig::from(&WebFetchTool);
     serde_json::json!({
         "name": "wancode-chat",
         "description": "WanCode Chat 层：轻对话，不访问用户/项目文件系统",
@@ -108,8 +124,13 @@ pub(crate) fn chat_agent_profile() -> serde_json::Value {
         // 零自定义 MCP（第一版）：不带 server、不继承会话 MCP。
         "mcpServers": [],
         "mcpInheritance": "none",
-        // 冗余兜底（非主防线）：denylist 常见文件/执行/版本控制工具。
+        // hosted tools 裁剪（复核 P0：不设 tools 时 AgentDefinition.tools
+        // 为空 = 继承全部，引擎会把 x_search 等 hosted tools 视为允许）。
+        // typed toolConfig 仍是函数工具主防线；这里专门约束 hosted 面。
+        "tools": ["web_search", "web_fetch"],
+        // 冗余兜底（非主防线）：hosted x_search + 常见文件/执行工具。
         "disallowedTools": [
+            "x_search",
             "GrokBuild:run_terminal_cmd",
             "GrokBuild:read_file",
             "GrokBuild:write_file",
@@ -122,6 +143,8 @@ pub(crate) fn chat_agent_profile() -> serde_json::Value {
 
 /// Chat 的 startupHints（`_meta.startupHints` 载荷）：跳过 git 状态
 /// 注入。私有中性 cwd 才是边界，本 hint 只是降噪。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
 pub(crate) fn chat_startup_hints() -> serde_json::Value {
     serde_json::json!({ "skipGitStatus": true })
 }
@@ -129,6 +152,8 @@ pub(crate) fn chat_startup_hints() -> serde_json::Value {
 /// agent_type 冲突门：从 config.toml 文档判定模型是否可用于 Chat。
 /// `doc` = toml_edit 解析后的用户配置；`model_id` = catalog key。
 /// 返回 Ok(()) 仅当模型存在且未 pin agent_type。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
 pub(crate) fn ensure_chat_model_allowed(
     doc: &toml_edit::DocumentMut,
     model_id: &str,
@@ -154,6 +179,46 @@ pub(crate) fn ensure_chat_model_allowed(
     }
 }
 
+/// 全局 hooks 门（复核 P0）：用**引擎自己的 discovery**只读探测所有会
+/// 对 Chat 生效的全局/plugin hooks（git_root=None + untrusted ⇒ 仅全局
+/// 来源：~/.grok/hooks、hooks-paths、Claude/Cursor 全局），命中任意一个
+/// 即结构化阻塞。不能用空 hooks:{} 覆盖——空配置会退回磁盘 discovery。
+/// discovery 报错同样 fail-closed（无法确定 = 阻塞）。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
+pub(crate) fn ensure_no_global_hooks() -> Result<(), SurfacePolicyError> {
+    let (registry, errors) = xai_grok_shell::util::hooks::discover_hooks(
+        None,
+        &xai_grok_tools::types::compat::CompatConfig::default(),
+        false,
+    );
+    classify_global_hooks(registry.len(), &errors)
+}
+
+/// 纯判定内核（可测）：全局 hooks 数量/发现错误 → 门裁决。
+fn classify_global_hooks(
+    hook_count: usize,
+    errors: &[impl std::fmt::Display],
+) -> Result<(), SurfacePolicyError> {
+    if !errors.is_empty() {
+        return Err(SurfacePolicyError::GlobalHooksConflict {
+            hook_count,
+            detail: format!(
+                "hooks discovery 报错 {} 条（fail-closed）：{}",
+                errors.len(),
+                errors.first().map(|e| e.to_string()).unwrap_or_default()
+            ),
+        });
+    }
+    if hook_count > 0 {
+        return Err(SurfacePolicyError::GlobalHooksConflict {
+            hook_count,
+            detail: "全局/plugin hooks 会在 Chat 会话事件上执行命令".into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +238,16 @@ mod tests {
             ids,
             vec!["GrokBuild:web_search", "GrokBuild:web_fetch"],
             "工具集必须精确等于 web_search+web_fetch（限定名）"
+        );
+        // hosted tools allowlist（复核 P0：空 = 继承全部 = x_search 漏入）。
+        assert_eq!(
+            def.tools,
+            vec!["web_search".to_string(), "web_fetch".to_string()],
+            "AgentDefinition.tools 必须精确 = web_search+web_fetch（hosted 面）"
+        );
+        assert!(
+            def.disallowed_tools.contains(&"x_search".to_string()),
+            "x_search 必须在 denylist"
         );
         // 五关闭项。
         assert!(!def.inject_default_tools, "inject_default_tools 必须 false");
@@ -197,7 +272,7 @@ mod tests {
         use xai_grok_tools::registry::types::ToolConfig;
         assert_eq!(ToolConfig::from(&WebSearchTool).id, "GrokBuild:web_search");
         assert_eq!(
-            ToolConfig::from(&WebFetchTool::default()).id,
+            ToolConfig::from(&WebFetchTool).id,
             "GrokBuild:web_fetch"
         );
     }
@@ -234,6 +309,44 @@ mod tests {
         let msg = policy_blocked_message(&e);
         assert!(msg.starts_with("SURFACE_POLICY_BLOCKED: {"));
         assert!(msg.contains("\"code\":\"agent_type_conflict\""));
+    }
+
+    // 2c-5：全局 hooks 门判定内核（复核 P0-2）——三态：零 hooks 放行、
+    // 任意 hooks 阻塞、discovery 报错 fail-closed 阻塞。
+    #[test]
+    fn global_hooks_gate_three_states() {
+        let no_errs: &[String] = &[];
+        classify_global_hooks(0, no_errs).expect("零全局 hooks 放行");
+        match classify_global_hooks(2, no_errs) {
+            Err(SurfacePolicyError::GlobalHooksConflict { hook_count, .. }) => {
+                assert_eq!(hook_count, 2)
+            }
+            other => panic!("期望 GlobalHooksConflict，得到 {other:?}"),
+        }
+        // discovery 报错：即使计数为 0 也 fail-closed。
+        let errs = vec!["hook file unreadable".to_string()];
+        assert!(matches!(
+            classify_global_hooks(0, &errs),
+            Err(SurfacePolicyError::GlobalHooksConflict { .. })
+        ));
+        // 契约串。
+        let e = SurfacePolicyError::GlobalHooksConflict {
+            hook_count: 1,
+            detail: "d".into(),
+        };
+        assert!(policy_blocked_message(&e).contains("\"code\":\"global_hooks_conflict\""));
+    }
+
+    // 2c-6：生产探测函数在本机可执行（结果依机器状态而定，只断言
+    // 不 panic 且错误为结构化类型——真实门行为由 CI 干净环境与
+    // 后续请求体测试覆盖）。
+    #[test]
+    fn global_hooks_probe_runs() {
+        match ensure_no_global_hooks() {
+            Ok(()) => {}
+            Err(SurfacePolicyError::GlobalHooksConflict { .. }) => {}
+            Err(other) => panic!("探测只应产生 GlobalHooksConflict，得到 {other:?}"),
+        }
     }
 
     // 2c-4：startupHints 形状（skipGitStatus 为引擎 StartupHints 真实字段，
