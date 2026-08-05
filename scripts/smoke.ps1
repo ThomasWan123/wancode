@@ -46,10 +46,21 @@ Remove-Item $log -EA SilentlyContinue
 Set-Location $env:TEMP
 Write-Host "[smoke] launching with WANCODE_AUTOTEST=$fixture"
 $env:WANCODE_AUTOTEST = $fixture
+# v0.19-2a 复核 P0：GROK_HOME 一并隔离——此前只隔了 sidecar，会话本体仍写
+# 真实 ~/.grok，每跑一次 smoke 就在真实现场铸一个无归属孤儿（迁移标记后
+# 创建、binding 在隔离根里随夹具销毁）。整个引擎家目录指到夹具内，
+# 会话/搜索库/一切引擎态随夹具清理；模型配置复制真实 config.toml
+# （smoke 要打真实模型 API），密钥仍走进程内 keyring 注入不落盘。
+$grokHome = Join-Path $fixture "grok-home"
+New-Item -ItemType Directory -Force $grokHome | Out-Null
+$realConfig = Join-Path $env:USERPROFILE ".grok\config.toml"
+if (Test-Path $realConfig) { Copy-Item $realConfig (Join-Path $grokHome "config.toml") }
+$env:GROK_HOME = $grokHome
 $stderr = Join-Path $env:TEMP "wancode-smoke-stderr.log"
 Remove-Item $stderr -EA SilentlyContinue
 $proc = Start-Process -FilePath $exe -PassThru -RedirectStandardError $stderr
 $env:WANCODE_AUTOTEST = $null
+$env:GROK_HOME = $null
 
 # 轮询日志直到 SMOKE DONE（上限 8 分钟——含多次真实模型回合）
 $deadline = (Get-Date).AddMinutes(8)

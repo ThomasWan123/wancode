@@ -12,6 +12,7 @@ pub mod model_caps;
 pub mod updater_launch;
 mod updater_ops;
 pub mod surface;
+pub mod surface_gate;
 #[cfg(test)]
 mod compat_contracts;
 
@@ -132,6 +133,32 @@ pub fn run() {
         .manage(caps_snapshot::CapsState::init())
         .manage(updater_ops::PendingUpdate::default())
         .setup(|app| {
+            // ── v0.19-2a 迁移门：sidecar 落 app_data_dir()/surface-bindings/，
+            // 启动即触发迁移；agent_start（含 autotest 的 start_inner 路径）
+            // 都在 start_inner 顶部等待同一个门。
+            {
+                use tauri::Manager;
+                // autotest/smoke 用隔离 sidecar 根（工作区目录内），避免
+                // 开发分支的 smoke 反复改写真实用户的迁移状态与 binding。
+                let root = if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
+                    std::path::PathBuf::from(ws).join("surface-bindings")
+                } else {
+                    app.path()
+                        .app_data_dir()
+                        .map_err(|e| format!("app_data_dir 不可用: {e}"))?
+                        .join("surface-bindings")
+                };
+                app.manage(surface_gate::SurfaceState::new(root));
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<surface_gate::SurfaceState>();
+                    if let Err(e) = state.ensure_migrated().await {
+                        // 启动预热失败只记日志：真正的门在 start_inner，
+                        // 会话启动时会重试并把结构化错误给前端。
+                        tracing::warn!("surface 迁移预热失败（会话启动时将重试）：{e}");
+                    }
+                });
+            }
             if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
