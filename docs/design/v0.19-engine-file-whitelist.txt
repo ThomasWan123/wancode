@@ -1,0 +1,19 @@
+# v0.19 local_extensions_disabled —— 引擎侧允许改动的精确文件集
+#
+# 机器可解析清单（intentional-delta 审计模式读取本文件，不读 Markdown）。
+# 规则：一行一个仓库相对路径；# 开头为注释；空行忽略。
+# 脚本严格解析——重复条目报错；差异集出现清单外文件报错；
+# 清单内文件未被改动仅告警（须在 PR 描述说明）。
+# 落点依据：docs/design/v0.19-injection-surface-map.md §G
+crates/codegen/xai-grok-shell/src/session/handle.rs
+crates/codegen/xai-grok-shell/src/session/acp_session.rs
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/hooks_plugins.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/session_setup.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/slash_exec.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/hook_dispatch.rs
+crates/codegen/xai-grok-shell/src/extensions/plugins.rs
+crates/codegen/xai-grok-shell/src/extensions/hooks.rs
+crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
