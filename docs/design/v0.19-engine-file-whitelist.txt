@@ -19,6 +19,14 @@
 
 [product]
 
+# ── 测试足场的 feature 声明 ──
+# 引擎 --lib 单测在本 commit 基线即不可编译（WorkspaceOps::for_test、
+# 跨 crate 的 #[cfg(test)] MockEmbeddingProvider 等，实测 51 个错误），
+# 故本批测试必须是 integration target；而 integration target 链接的是
+# 不带 cfg(test) 的库，所以观测点只能由一个默认关闭的 feature 暴露。
+# 实测加此 feature 后 Cargo.lock 逐字节不变。
+crates/codegen/xai-grok-shell/Cargo.toml
+
 # ── 锁存与传播（策略位的存放与流动） ──
 # handle 直读 bool：供 broadcast 遍历与扩展端点无锁读取
 crates/codegen/xai-grok-shell/src/session/handle.rs
@@ -68,7 +76,15 @@ crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
 crates/codegen/xai-grok-shell/src/agent/mvp_agent/tests.rs
 crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
 
+# SubagentSpawnContext 字面量（cfg(test) 模块，非产品文件）。
+# 上一版漏登记：当时只 grep 了 `SessionHandle {`，没 grep
+# `SubagentSpawnContext {`，编译期才暴露。
+crates/codegen/xai-grok-shell/src/test_support/lsp_runtime.rs
+
 # 注：SessionActor 字面量实测 25 处 / 14 个测试文件，但本批**不给
 # SessionActor 加字段**（改用 AgentRebuildSpec），故这些文件全部无需改动。
 # 若实现中出现任何 acp_session_tests/* 或 compaction.rs 的改动，
 # 说明存储方案被偏离，应判红并停工。
+#
+# 新增文件（不入清单，由 A2 的「新增文件」判定放行）：
+#   crates/codegen/xai-grok-shell/tests/local_extensions_disabled.rs
