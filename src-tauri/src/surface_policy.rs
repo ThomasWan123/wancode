@@ -326,6 +326,23 @@ fn resolve_install_dir_like_engine(
     }
 }
 
+/// **唯一的生产边界入口**（复核十一定案）：Chat 启动前的插件面
+/// preflight。切片 2 的 `start_inner` 与集成探针**都只调这一个函数**
+/// ——生产与探针共用同一判定，杜绝「门与探针脱节」。
+///
+/// 刻意的可见性设计（复核二十三收口）：
+/// - `pub(crate)`：探针已是 lib 内 `#[cfg(test)]` 模块，同 crate 可达
+///   ——无需 `pub`，也不存在「pub 但非公共 API」这种自相矛盾的说法；
+/// - `ensure_no_plugin_extensions` / `scan_plugin_sources` /
+///   `resolve_install_dir_like_engine` 保持私有；
+/// - **不加 `cfg(test)` 或测试 feature**——生产与测试编译同一套行为；
+/// - 不注册为 Tauri command，前端无法调用绕过。
+pub(crate) fn enforce_chat_plugin_preflight(
+    cwd: &std::path::Path,
+) -> Result<(), SurfacePolicyError> {
+    ensure_no_plugin_extensions(cwd)
+}
+
 /// 判定内核（全输入注入，判别测试直击）。
 fn scan_plugin_sources(
     enabled: &[String],

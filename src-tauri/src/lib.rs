@@ -15,6 +15,8 @@ pub mod surface;
 pub mod surface_gate;
 pub mod surface_policy;
 #[cfg(test)]
+mod plugin_lifecycle_probe;
+#[cfg(test)]
 mod compat_contracts;
 
 use xai_grok_paths::AbsPathBuf;
