@@ -13,6 +13,9 @@ pub mod updater_launch;
 mod updater_ops;
 pub mod surface;
 pub mod surface_gate;
+pub mod surface_policy;
+#[cfg(test)]
+mod plugin_lifecycle_probe;
 #[cfg(test)]
 mod compat_contracts;
 

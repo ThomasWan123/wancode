@@ -1,0 +1,107 @@
+# v0.19 local_extensions_disabled —— 引擎侧允许改动的精确文件集
+#
+# 机器可解析清单（intentional-delta 审计模式读取本文件，不读 Markdown）。
+#
+# 格式：
+#   [product] 段 —— 允许**改动**的既有产品文件
+#   [tests]   段 —— 允许**改动**的既有测试文件（新增测试文件不在此列，
+#                   由 A2 的「新增文件」判定另行放行）
+#   一行一个仓库相对路径；# 开头为注释；空行忽略。
+#
+# 脚本严格解析：
+#   - 非注释非空行必须落在某个段内，且必须是仓库内已存在的相对路径；
+#   - 段内重复条目报错；跨段重复条目报错；未知段名报错；
+#   - 差异集里出现清单外的既有文件报错；
+#   - 清单内文件未被改动仅告警（须在 PR 描述说明）。
+#
+# 落点依据：docs/design/v0.19-injection-surface-map.md §G
+# 路径前缀统一为 crates/codegen/xai-grok-shell/
+
+[product]
+
+# ── 测试足场的 feature 声明 ──
+# 引擎 --lib 单测在本 commit 基线即不可编译（WorkspaceOps::for_test、
+# 跨 crate 的 #[cfg(test)] MockEmbeddingProvider 等，实测 51 个错误），
+# 故本批测试必须是 integration target；而 integration target 链接的是
+# 不带 cfg(test) 的库，所以观测点只能由一个默认关闭的 feature 暴露。
+# 实测加此 feature 后 Cargo.lock 逐字节不变。
+crates/codegen/xai-grok-shell/Cargo.toml
+
+# ── 锁存与传播（策略位的存放与流动） ──
+# handle 直读 bool：供 broadcast 遍历与扩展端点无锁读取
+crates/codegen/xai-grok-shell/src/session/handle.rs
+# AgentRebuildSpec +1 字段：actor 侧存储，使会话重建携带同一策略；
+# 同文件的 #[cfg(test)] test_rebuild_spec_default() 一并加默认值
+crates/codegen/xai-grok-shell/src/session/agent_rebuild.rs
+# 唯一构造点：参数传递 + hook registry 归零 + handle/rebuild_spec 构造
+# （允许明确的策略分支，见 §G 的审计约束）
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs
+# 会话能力 gate 由 rebuild_spec 读取策略位；plugins/hooks gate 派生处注释
+crates/codegen/xai-grok-shell/src/session/acp_session.rs
+
+# ── 入口与握手 ──
+# 入口最早解析（new:835 前 / load:1295 前）+ 驻留冲突比较上移
+# + MCP 四源归零 + D5 不调用 + 两个响应回显（:1251 / :2125）
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+# session_meta 解析(T11) + 本地 registry 传 None + D1/D3/D4 + E4
+# + LSP 整块跳过 + ensure_plugin_registry 调用计数(T16b)
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs
+# broadcast_plugin_registry_to_sessions 遍历跳过
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+
+# ── 子代理派生链（定位表 §I） ──
+# 读父 SessionHandle 的策略位；SubagentValidationContext(:280) 与
+# SubagentSpawnContext(:502) 的 plugin_registry 一并归零并携带策略位
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/subagent_coordinator.rs
+# SubagentSpawnContext / SubagentValidationContext +1 字段
+crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs
+# 继承策略位；AgentDefinition.hooks 不重建 registry；
+# AgentDefinition.mcp_servers（含 Inline）归零；转发给 spawn_session_on_thread
+crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
+
+# ── 会话内第二道防线 ──
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/hooks_plugins.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/session_setup.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/slash_exec.rs
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/hook_dispatch.rs
+
+# ── 测试通道（仅 feature 门控） ──
+# SessionCommand 新增一个变体，仅在 local-extensions-test-support 下编译。
+# 它只携带命令文本与响应通道，**不含任何策略判断**：actor 收到后用真实命令表
+# 以 all_enabled() 解析（绕过 advertisement gate），再直接调用生产的
+# execute_builtin_slash_command。
+# 为何必须扩容而不是就地取巧：替代方案只能证明「解析与分类函数认为应拒绝」，
+# 无法证明生产 dispatch 确实在任何副作用之前调用了守卫——守卫被删除、后移或
+# 出现第二条调用路径时，那种测试仍会全绿。
+crates/codegen/xai-grok-shell/src/session/commands.rs
+# SessionCommand 的**唯一真实消费点**。没有它，变体无人处理、match 不穷尽，
+# 方案 B 根本不可执行。只允许**一条** feature-gated match arm：用真实解析器
+# （与 turn.rs 同一入口，availability = all_enabled()）拿到 BuiltinAction 后
+# 直接调生产 execute_builtin_slash_command，随后回一个 () 表示 dispatch 已返回。
+# **不得包含任何策略判断，也不得构造拒绝载荷**——载荷只能来自生产的 gateway
+# 通知通道，测试通道不制造第二套结果表达。
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/run_loop.rs
+
+# ── 扩展端点 ──
+crates/codegen/xai-grok-shell/src/extensions/plugins.rs
+crates/codegen/xai-grok-shell/src/extensions/hooks.rs
+crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
+
+[tests]
+
+# SessionHandle 字面量（+1 字段的机械更新）——实测全仓仅此两处
+crates/codegen/xai-grok-shell/src/agent/mvp_agent/tests.rs
+crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
+
+# SubagentSpawnContext 字面量（cfg(test) 模块，非产品文件）。
+# 上一版漏登记：当时只 grep 了 `SessionHandle {`，没 grep
+# `SubagentSpawnContext {`，编译期才暴露。
+crates/codegen/xai-grok-shell/src/test_support/lsp_runtime.rs
+
+# 注：SessionActor 字面量实测 25 处 / 14 个测试文件，但本批**不给
+# SessionActor 加字段**（改用 AgentRebuildSpec），故这些文件全部无需改动。
+# 若实现中出现任何 acp_session_tests/* 或 compaction.rs 的改动，
+# 说明存储方案被偏离，应判红并停工。
+#
+# 新增文件（不入清单，由 A2 的「新增文件」判定放行）：
+#   crates/codegen/xai-grok-shell/tests/local_extensions_disabled.rs

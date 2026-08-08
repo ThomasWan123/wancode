@@ -30,7 +30,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+  const { surface, MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -317,9 +317,9 @@ export function Composer(props: Record<string, any>) {
                   <>
                     <div className="plus-backdrop" onClick={() => setPlusMenu(false)} />
                     <div className="plus-menu">
-                      <button className="plus-item" onClick={pickFolderAndConnect}>
+                      {surface === "code" && <button className="plus-item" onClick={pickFolderAndConnect}>
                         <IconFolder size={15} /> {t.menuOpenFolder}
-                      </button>
+                      </button>}
                       <button
                         className="plus-item"
                         disabled={!sessionId}
@@ -330,7 +330,7 @@ export function Composer(props: Record<string, any>) {
                       >
                         <IconFile size={15} /> {t.menuAddImage}
                       </button>
-                      <button
+                      {surface === "code" && <button
                         className="plus-item"
                         disabled={!sessionId}
                         onClick={() => {
@@ -341,8 +341,8 @@ export function Composer(props: Record<string, any>) {
                         }}
                       >
                         <IconClipboard size={15} /> {t.menuSlash}
-                      </button>
-                      <button
+                      </button>}
+                      {surface === "code" && <button
                         className="plus-item"
                         onClick={() => {
                           setPlusMenu(false);
@@ -352,12 +352,14 @@ export function Composer(props: Record<string, any>) {
                         }}
                       >
                         <IconGitBranch size={15} /> {t.menuMcp}
-                      </button>
+                      </button>}
                     </div>
                   </>
                 )}
               </div>
-              {sessionId ? (
+              {surface === "chat" ? (
+                <span className="ws-inline"><span className="dot" />Chat</span>
+              ) : sessionId ? (
                 <span className="ws-inline" title={workspace}>
                   <span className="dot" />
                   {workspace.split(/[\\/]/).filter(Boolean).pop()}
@@ -528,7 +530,7 @@ export function Composer(props: Record<string, any>) {
               </div>
             </div>
             <div className="composer-actions">
-              {sessionId && (
+              {surface === "code" && sessionId && (
                 <button
                   className="icon-btn"
                   title={lang === "zh" ? "终端" : "Terminal"}

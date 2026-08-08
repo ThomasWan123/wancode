@@ -7,7 +7,34 @@ import {
 } from "../../icons";
 
 export function Sidebar(props: Record<string, any>) {
-  const { sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t } = props;
+  const { surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t } = props;
+  if (surface === "chat") {
+    return (
+      <aside className="sidebar">
+        <button className="side-new" onClick={() => {
+          setSessionId("");
+          sessionIdRef.current = "";
+          setItems([]);
+        }}>
+          <IconPlus size={15} /> {t.sidebarNewSession}
+        </button>
+        <div className="sidebar-section-title">Chat</div>
+        <div className="session-list">
+          {sessions.length === 0 && <div className="sidebar-empty">{t.noSessions}</div>}
+          {sessions.map((s: any) => (
+            <button
+              key={s.session_id}
+              className={`session-item ${s.session_id === sessionId ? "active" : ""}`}
+              onClick={() => !starting && startSession(s.session_id)}
+            >
+              <div className="session-title">{s.title || t.untitledSession}</div>
+              <div className="session-meta">{s.updated_at.slice(0, 16).replace("T", " ")}</div>
+            </button>
+          ))}
+        </div>
+      </aside>
+    );
+  }
   return (
     <>
         <aside className="sidebar">

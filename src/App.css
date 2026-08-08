@@ -130,6 +130,29 @@ body {
   letter-spacing: 0.2px;
 }
 
+.surface-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg2);
+}
+
+.surface-switch button {
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.surface-switch button.active {
+  background: var(--bg3);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
 .topbar input,
 .topbar select {
   background: var(--bg2);
