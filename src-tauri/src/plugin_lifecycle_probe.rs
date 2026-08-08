@@ -1,10 +1,8 @@
-//! v0.19-2c 诊断探针：插件 registry 的 process-wide fan-out 是否会污染
-//! 活跃 Chat 会话（设计稿复核八/九/十的六条证据锁 + 三条证据纪律）。
+//! v0.19-2c 回归探针：process-wide fan-out 不得污染本地扩展已禁用的
+//! 活跃 Chat 会话。
 //!
-//! **这是诊断测试，不是回归门**：当前引擎无会话级 `plugins_disabled`，
-//! 源码路径显示 fan-out 会把插件快照重新合入既有会话——本测试**断言
-//! 污染确实发生**（绿 = 接口缺口证实）。将来引擎接口落地后，断言翻转
-//! 为「Chat hook/MCP 严格为零」，才接入常驻 CI 门禁。
+//! 原诊断已证明 fan-out 缺口；引擎现有会话级硬门，本测试翻转为严格
+//! 零贡献，并保留 Code 插件正常工作的正对照。
 //!
 //! 结构性防假绿（复核九）：
 //! - 单次 `spawn_grok_shell`：两次 spawn = 两套
@@ -38,7 +36,7 @@
 //! $env:WANCODE_PLUGIN_FANOUT_PROBE = "1"
 //! try {
 //!   cargo test --locked -p wancode --lib -- --ignored `
-//!     plugin_fanout_pollutes_active_chat_session_diagnostic `
+//!     plugin_fanout_cannot_pollute_extensions_disabled_chat `
 //!     --nocapture --test-threads=1
 //! } finally {
 //!   Remove-Item Env:\WANCODE_PLUGIN_FANOUT_PROBE -ErrorAction SilentlyContinue
@@ -49,17 +47,17 @@
 //!
 //! ```text
 //! WANCODE_PLUGIN_FANOUT_PROBE=1 cargo test --locked -p wancode --lib -- \\
-//!   --ignored plugin_fanout_pollutes_active_chat_session_diagnostic \\
+//!   --ignored plugin_fanout_cannot_pollute_extensions_disabled_chat \\
 //!   --nocapture --test-threads=1
 //! ```
 //!
-//! 缺环境开关即在动夹具前失败（防全量 `--ignored` 误触）；默认
-//! #[ignore]，不进普通 CI。
+//! 缺环境开关即在动夹具前失败。保留 `#[ignore]` 以确保独立进程与
+//! OnceLock 隔离，由 CI 专用步骤常驻执行。
 
 #[cfg(test)]
 mod probe {
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -534,8 +532,8 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "诊断探针：断言 fan-out 污染发生，非回归门；手动运行"]
-    async fn plugin_fanout_pollutes_active_chat_session_diagnostic() {
+    #[ignore = "独立进程回归门：由 CI 专用命令设置环境开关运行"]
+    async fn plugin_fanout_cannot_pollute_extensions_disabled_chat() {
         // 防误运行护栏（复核十五）：名称过滤只是操作约定——将来有人跑
         // 全量 `--ignored` 会把本探针和其他 ignored 测试一起拉起，
         // 静默改写环境变量（GROK_HOME/HOME/USERPROFILE）并起真引擎。
@@ -568,15 +566,18 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             });
         }
 
-        // ── 阶段 1：起 mock 模型端点 + 隔离 config（不含 [plugins]）──
+        // ── 阶段 1：起 mock + 落真实插件来源 ──────────────────────
         let model_mock = ModelMock::default();
         let model_port = serve_model_mock(model_mock.clone()).await;
         fx.write_base_config(model_port);
+        fx.write_plugin(mcp_port);
         fx.reset_sentinels(); // 清掉夹具自测记录，再取阶段基线
 
-        // 生产 preflight：此刻插件来源必须为空（Chat 起来之前）。
-        crate::surface_policy::enforce_chat_plugin_preflight(&fx.path("chat-cwd"))
-            .expect("阶段 1 前提：插件来源必须为空，否则隔离夹具失效");
+        // 旧 preflight 只作诊断；必须看见来源，防零贡献因无插件而假绿。
+        assert!(
+            crate::surface_policy::enforce_chat_plugin_preflight(&fx.path("chat-cwd")).is_err(),
+            "生产 preflight 没看见探针插件来源"
+        );
 
         let mut stages: Vec<serde_json::Value> = Vec::new();
         let base = StageBaseline::take(&fx, &mock, "", "");
@@ -613,6 +614,10 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
                 storage_mode: None,
             },
         );
+        // 全局 reload 从 AgentConfig 重建 registry；显式指向同一真实夹具，
+        // 避免会话 list 看得到、广播源却因启动快照为空而重建成空。
+        agent_config.plugins.cli_plugin_dirs =
+            vec![fx.path("plugin-src").join("probe-plugin")];
         agent_config.mode = xai_grok_shell::agent::config::AgentMode::Headless;
         agent_config.default_yolo_mode = false;
         let memory_config = agent_config.memory_config.clone();
@@ -853,6 +858,7 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
                 serde_json::json!({
                     "agentProfile": crate::surface_policy::chat_agent_profile(),
                     "startupHints": crate::surface_policy::chat_startup_hints(),
+                    "x.ai/localExtensionsDisabled": true,
                 })
                 .as_object()
                 .cloned()
@@ -863,17 +869,28 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
         .await
         .expect("创建 Chat 会话失败");
         let chat_sid = chat_resp.session_id.0.to_string();
+        assert_eq!(
+            chat_resp
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("localExtensionsDisabledApplied"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "引擎未回显 localExtensionsDisabledApplied=true"
+        );
 
         // ── chat_started_clean 的六条断言（复核二十一）──────────────
         // 全部通过之后才追加阶段记录——阶段名本身就是「该段证据已完成」
         // 的凭据，不是控制流到过的标记。
         assert!(!chat_sid.is_empty(), "Chat session ID 为空");
         assert!(
-            !fx.path("plugin-src").join("probe-plugin").join("plugin.json").is_file(),
-            "插件在 Chat 启动前就已写入：时序被破坏，负对照失效"
+            fx.path("plugin-src").join("probe-plugin").join("plugin.json").is_file(),
+            "预置插件夹具不存在，fan-out 回归测试失去正向对照"
         );
-        crate::surface_policy::enforce_chat_plugin_preflight(&chat_cwd)
-            .expect("Chat 启动后 preflight 仍必须为 Ok（来源仍为空）");
+        assert!(
+            crate::surface_policy::enforce_chat_plugin_preflight(&chat_cwd).is_err(),
+            "诊断 preflight 应看见插件来源；真正隔离必须由引擎策略位完成"
+        );
         assert_eq!(fx.hook_hits_for_session(&chat_sid), 0, "Chat 起始 hook 命中非 0");
         assert_eq!(mock.hits(), base.mcp_hits, "Chat 起始 MCP 命中非基线");
         // Chat cwd 必须是隔离私有目录（不是宿主/项目目录）。
@@ -956,11 +973,6 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             // 诊断字段（不参与判定）：该通知在本场景未到达，见复核二十四。
             "available_commands_seen": pumped.lock().unwrap().commands.len(),
         }));
-
-        // ── 阶段 3：落插件来源（Chat 已存活且证过 registry 为空之后）──
-        // 时序纪律：此刻之前 Chat 的 registry 已实证为空，之后出现的
-        // 任何 Chat 侧插件能力都只能来自 fan-out，不可能是初始携带。
-        fx.write_plugin(mcp_port);
 
         // ── 夹具自测（复核三十一）：**必须与 runner 同语义** ────────
         // 直接起 powershell.exe 证明不了 runner 路径可行——runner 走
@@ -1063,17 +1075,7 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             "Code registry 未加载探针插件（会话启动未重读磁盘配置？）：{code_json}"
         );
 
-        // ── 复核二十五（源码定位）：先 reload 才有运行态 ───────────
-        // `active_inline` 只证明 manifest 内容有效，**不证明**已进入该
-        // session 的 hook registry / MCP state：
-        //   - 会话初建的 hook registry 只发现磁盘 hooks（spawn.rs:1056）；
-        //   - plugin inline hooks 只在 reload/apply snapshot 时追加
-        //     （hooks_plugins.rs:832）；
-        //   - 首个 Chat 会话把共享插件 registry 初始化为空，后续 Code 的
-        //     MCP 初始合并仍读这份一次性空快照（agent_ops.rs:303）；
-        //   - reload 才重新合并 plugin MCP 并主动建连（hooks_plugins.rs:902）。
-        // 故 hook=0/MCP=0 完全符合实现——必须先在 Code 会话真实发送
-        // 文本 `/plugins reload`。
+        // ── 由 Code 会话触发真正的全局 reload/broadcast ───────────
         let pre_reload = StageBaseline::take(&fx, &mock, &chat_sid, &code_sid);
         // send_prompt（复核二十六）：**不再吞错**——返回结构化结果，
         // 外层有界超时。此前 `let _ = ... as Result<_,_>` 同时吞掉了
@@ -1101,31 +1103,25 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             }
         };
 
-        // `/plugins reload`：必须 Ok；不要求产生模型请求（斜杠命令本就
-        // 不打 provider）。完整 response 留存供诊断。
-        let reload_resp = send_prompt(code_resp.session_id.clone(), "/plugins reload").await;
-        let reload_dbg = format!("{reload_resp:?}");
-        // 注意：**绝不能**在同一 assert! 的格式参数里两次 lock 同一
-        // std::sync::Mutex——两个临时 guard 在整条表达式结束前都活着，
-        // 第二次 lock 自我死锁（断言通过时不求值，故只在失败瞬间暴露；
-        // 实测挂死 7.5h、CPU 静止）。一律先取单次快照。
-        let pump_dbg = Pumped::snapshot(&pumped);
-        assert!(
-            reload_resp.is_ok(),
-            "/plugins reload 未成功：{reload_dbg} {pump_dbg}"
-        );
-
-        // 以 reload 前快照为基线等 MCP 命中增加——证明 reload 真的把
-        // plugin MCP 合并进会话并主动建连（不是「文本发出去了」而已）。
-        let mcp_up = wait_until(Duration::from_secs(60), || {
-            mock.hits() > pre_reload.mcp_hits
-        }).await;
-        assert!(
-            mcp_up,
-            "Code /plugins reload 后 MCP 未建连：pre={} now={} reload_resp={reload_dbg}",
-            pre_reload.mcp_hits,
-            mock.hits()
-        );
+        let action_raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": code_sid,
+            "action": { "type": "reload" },
+        }))
+        .expect("static json");
+        let action_resp: agent_client_protocol::ExtResponse = tokio::time::timeout(
+            Duration::from_secs(60),
+            xai_acp_lib::acp_send(
+                agent_client_protocol::ExtRequest::new(
+                    "x.ai/plugins/action".to_string(),
+                    action_raw.into(),
+                ),
+                &acp_tx,
+            ),
+        )
+        .await
+        .expect("x.ai/plugins/action 超时")
+        .expect("x.ai/plugins/action 调用失败");
+        let action_dbg = action_resp.0.get().chars().take(300).collect::<String>();
 
         // ── hook 注册态实证（复核二十九）：x.ai/hooks/list ──────────
         // 直接读该 session 的 hook_registry（run_loop.rs:354），不再靠
@@ -1273,115 +1269,34 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             "code_plugins": code_plugins.len(),
         }));
 
-        // ── 负对照：文本 reload 只更新 Code，Chat 必须纹丝不动 ──────
-        // 先证 Code reload 确实生效（上面 MCP 增量 + hook 触发已证），
-        // 再断言 Chat 侧零变化——否则「Chat 不变」可能只是 reload 没跑。
-        let chat_list_raw2 = serde_json::value::to_raw_value(&serde_json::json!({
+        // 全局广播完成后，Chat actor 的 registry 必须仍为空。
+        let pre_broadcast = pre_reload;
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
             "sessionId": chat_sid,
         }))
         .expect("static json");
-        let chat_list2: agent_client_protocol::ExtResponse = tokio::time::timeout(
+        let list_after: agent_client_protocol::ExtResponse = tokio::time::timeout(
             Duration::from_secs(20),
             xai_acp_lib::acp_send(
                 agent_client_protocol::ExtRequest::new(
                     "x.ai/plugins/list".to_string(),
-                    chat_list_raw2.into(),
+                    raw.into(),
                 ),
                 &acp_tx,
             ),
         )
         .await
-        .expect("Chat plugins/list（负对照）超时")
-        .expect("Chat plugins/list（负对照）失败");
-        let chat_json2: serde_json::Value =
-            serde_json::from_str(chat_list2.0.get()).expect("非 JSON");
-        let chat_plugins2 = chat_json2
+        .expect("Chat plugins/list（广播后）超时")
+        .expect("Chat plugins/list（广播后）失败");
+        let list_json: serde_json::Value =
+            serde_json::from_str(list_after.0.get()).expect("非 JSON");
+        let chat_plugins_after = list_json
             .get("result")
-            .unwrap_or(&chat_json2)
+            .unwrap_or(&list_json)
             .get("plugins")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        assert!(
-            chat_plugins2.is_empty(),
-            "负对照失败：文本 /plugins reload 竟污染了 Chat registry：{chat_plugins2:?}"
-        );
-        assert_eq!(
-            fx.hook_hits_for_session(&chat_sid),
-            0,
-            "负对照失败：Chat 出现 hook 记录：{:?}",
-            fx.hook_records()
-        );
-        let after_neg = StageBaseline::take(&fx, &mock, &chat_sid, &code_sid);
-        stages.push(serde_json::json!({
-            "stage": "slash_reload_negative_control",
-            "chat_plugins": chat_plugins2.len(),
-            "chat_hook_hits": after_neg.chat_hits,
-            "code_hook_hits": after_neg.code_hits,
-            "mcp_hits": after_neg.mcp_hits,
-        }));
-
-        // ── 阶段 5：ACP 扩展广播（真正的 process-wide fan-out 入口）──
-        // 文本 /plugins reload 只更新当前会话（负对照已证）；
-        // x.ai/plugins/action{Reload} → broadcast_plugin_registry_to_sessions
-        // 才把快照发给既有会话（含 Chat）。
-        let pre_broadcast = StageBaseline::take(&fx, &mock, &chat_sid, &code_sid);
-        let action_raw = serde_json::value::to_raw_value(&serde_json::json!({
-            "sessionId": code_sid,
-            "action": { "type": "reload" },
-        }))
-        .expect("static json");
-        let action_resp: agent_client_protocol::ExtResponse = tokio::time::timeout(
-            Duration::from_secs(60),
-            xai_acp_lib::acp_send(
-                agent_client_protocol::ExtRequest::new(
-                    "x.ai/plugins/action".to_string(),
-                    action_raw.into(),
-                ),
-                &acp_tx,
-            ),
-        )
-        .await
-        .expect("x.ai/plugins/action 超时")
-        .expect("x.ai/plugins/action 调用失败");
-        let action_dbg = action_resp.0.get().chars().take(300).collect::<String>();
-
-        // 等 Chat registry 由空转非空——**污染的第一手证据**。
-        let mut chat_plugins_after: Vec<serde_json::Value> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while Instant::now() < deadline {
-            let raw = serde_json::value::to_raw_value(&serde_json::json!({
-                "sessionId": chat_sid,
-            }))
-            .expect("static json");
-            if let Ok(Ok(r)) = tokio::time::timeout(
-                Duration::from_secs(20),
-                xai_acp_lib::acp_send(
-                    agent_client_protocol::ExtRequest::new(
-                        "x.ai/plugins/list".to_string(),
-                        raw.into(),
-                    ),
-                    &acp_tx,
-                ),
-            )
-            .await
-            {
-                let j: serde_json::Value =
-                    serde_json::from_str(r.0.get()).unwrap_or(serde_json::Value::Null);
-                let arr = j
-                    .get("result")
-                    .unwrap_or(&j)
-                    .get("plugins")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                if !arr.is_empty() {
-                    chat_plugins_after = arr;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
         let fanout_observed = !chat_plugins_after.is_empty();
         stages.push(serde_json::json!({
             "stage": "acp_reload_broadcast",
@@ -1397,10 +1312,11 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
         const CHAT_PROMPT: &str = "probe-chat-turn-1";
         let chat_prompt_resp = send_prompt(chat_resp.session_id.clone(), CHAT_PROMPT).await;
         let chat_prompt_dbg = format!("{chat_prompt_resp:?}");
-        let chat_hook_polluted = wait_until(Duration::from_secs(60), || {
-            fx.hook_hits_for_session(&chat_sid) > 0
-        })
-        .await;
+        assert!(chat_prompt_resp.is_ok(), "Chat prompt 未成功：{chat_prompt_dbg}");
+        model_mock
+            .assert_single_main_turn(CHAT_PROMPT, ExpectTools::ChatExact)
+            .expect("Chat provider 请求工具集不精确");
+        let chat_hook_polluted = fx.hook_hits_for_session(&chat_sid) > 0;
         let chat_recs: Vec<serde_json::Value> = fx
             .hook_records()
             .into_iter()
@@ -1426,23 +1342,19 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
                 mock.hits().saturating_sub(pre_broadcast.mcp_hits),
         }));
 
-        // **诊断断言**（当前形态）：证实 fan-out 污染确实发生。
-        // 将来引擎接口落地后，此处翻转为「Chat hook/MCP 严格为零」。
         assert!(
-            fanout_observed || chat_hook_polluted,
-            "未观察到 fan-out 污染——若引擎行为已变更，需重新评估\
-             plugins_disabled 的必要性：chat_plugins={} chat_hooks={} \
-             action_resp={action_dbg} pump={}",
+            !fanout_observed,
+            "全局 fan-out 污染了禁用会话：chat_plugins={} action_resp={action_dbg}",
             chat_plugins_after.len(),
+        );
+        assert!(
+            !chat_hook_polluted && chat_recs.is_empty(),
+            "全局 fan-out 后 Chat 执行了本地 hook：chat_hooks={} \
+             action_resp={action_dbg} pump={}",
             fx.hook_hits_for_session(&chat_sid),
             Pumped::snapshot(&pumped)
         );
-        if chat_hook_polluted {
-            assert!(
-                chat_cwd_ok,
-                "Chat hook 记录的 cwd 不是 Chat 私有 cwd（归因存疑）：{chat_recs:?}"
-            );
-        }
+        assert!(chat_cwd_ok, "Chat cwd 归因异常：{chat_recs:?}");
 
         let chat_sid = chat_sid.as_str();
         let code_sid = code_sid.as_str();
@@ -1460,7 +1372,7 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
         // 填充（每阶段 hook/MCP 的相对增量 + 是否观察到 fan-out）。
         // `executed` 一致性守卫（复核十七：终态契约一次写死）。
         //
-        // REQUIRED_STAGES 是**最终六步的完整契约**，现在就固化——不是
+        // REQUIRED_STAGES 是完整契约——不是
         // 「有多少写多少」：否则将来接主体时忘记扩这个常量，只要填上
         // 两个会话 ID 就会错误转成 executed，一份半截报告被当完整证据。
         // 断言用**顺序完全相等**而非「包含全部」：缺失、重复、乱序、
@@ -1469,7 +1381,6 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             "baseline_after_reset",
             "chat_started_clean",
             "code_plugin_active",
-            "slash_reload_negative_control",
             "acp_reload_broadcast",
             "chat_post_broadcast_attribution",
         ];
@@ -1495,12 +1406,12 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
             "状态一致性破坏：executed 要求 ID 已解析且互异、阶段序列与契约完全相等"
         );
         let summary = serde_json::json!({
-            "probe": "plugin_fanout_diagnostic",
+            "probe": "plugin_fanout_regression",
             "status": status,
             "sessions": { "chat": chat_sid, "code": code_sid },
             "gate": {
-                "preflight_before_plugin": "ok",
-                "preflight_after_plugin": "blocked(plugins.paths)"
+                "preflight_with_plugin": "diagnostic(plugins.paths)",
+                "engine_policy_applied": true
             },
             "stages": stages,
             "fanout_observed": fanout_observed,

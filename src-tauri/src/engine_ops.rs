@@ -852,6 +852,11 @@ pub enum ModelSwitchError {
         requested: String,
         candidates: Vec<AmbiguousCandidate>,
     },
+    #[serde(rename = "surface_policy_blocked")]
+    #[serde(rename_all = "camelCase")]
+    SurfacePolicyBlocked {
+        error: crate::surface_policy::SurfacePolicyError,
+    },
     #[serde(rename = "error")]
     Other { message: String },
 }
@@ -899,13 +904,29 @@ pub async fn agent_set_model(
     state: State<'_, AgentState>,
     model: String,
 ) -> Result<(), ModelSwitchError> {
-    let (acp_tx, session_id) = {
+    let (acp_tx, session_id, surface_kind) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or_else(|| ModelSwitchError::Other {
             message: "会话未启动".to_owned(),
         })?;
-        (h.acp_tx.clone(), h.session_id.clone())
+        (h.acp_tx.clone(), h.session_id.clone(), h.surface_kind)
     };
+    // 必须在构造/发送 SetSessionModel 之前检查：pin agent_type 的模型会
+    // 覆盖 Chat profile，恢复完整工具面；拒绝热切换时 ACP 请求数必须为 0。
+    if surface_kind == crate::surface::SurfaceKind::Chat {
+        let (doc, issue) =
+            crate::caps_snapshot::load_config_doc(&crate::config_core::user_config_path());
+        if let Some(issue) = issue {
+            return Err(ModelSwitchError::SurfacePolicyBlocked {
+                error: crate::surface_policy::SurfacePolicyError::ModelUnresolvable {
+                    model_id: model,
+                    reason: format!("config.toml 不可判定：{}", issue.message),
+                },
+            });
+        }
+        crate::surface_policy::ensure_chat_model_allowed(&doc, &model)
+            .map_err(|error| ModelSwitchError::SurfacePolicyBlocked { error })?;
+    }
     let _: acp::SetSessionModelResponse = acp_send(
         acp::SetSessionModelRequest::new(
             session_id,

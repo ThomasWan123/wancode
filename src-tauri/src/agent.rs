@@ -40,6 +40,8 @@ pub struct AgentHandle {
     cancel: CancellationToken,
     /// 会话工作区。git 命令用它本地解析 gitRoot（见 session_git_root）。
     pub cwd: PathBuf,
+    /// Sidecar 解析出的真实层身份；热切换等活跃策略门只信这里。
+    pub(crate) surface_kind: crate::surface::SurfaceKind,
 }
 
 #[derive(Default)]
@@ -182,6 +184,27 @@ pub(crate) async fn start_inner(
     model: Option<String>,
     resume: Option<String>,
 ) -> Result<StartResult> {
+    start_inner_with_intent(
+        app,
+        state,
+        workspace,
+        model,
+        resume,
+        crate::surface_policy::NewSurfaceIntent::Code,
+    )
+    .await
+}
+
+/// 新会话的内部层意图入口。恢复会话刻意忽略 `new_intent`，只从
+/// sidecar 派生身份；公开 Tauri 命令在 2d 评审前仍固定 Code。
+pub(crate) async fn start_inner_with_intent(
+    app: AppHandle,
+    state: &State<'_, AgentState>,
+    workspace: String,
+    model: Option<String>,
+    resume: Option<String>,
+    new_intent: crate::surface_policy::NewSurfaceIntent,
+) -> Result<StartResult> {
     // Make WanCode-managed API keys (stored in the OS keyring) visible to the
     // engine's `env_key` resolution for this process.
     // ── 启动不变量（v0.12.2）：零模型绝不进入引擎 ─────────────────
@@ -223,10 +246,25 @@ pub(crate) async fn start_inner(
     }
 
     inject_managed_keys();
-    let cwd = PathBuf::from(&workspace);
-    if !cwd.is_dir() {
-        return Err(anyhow!("工作区目录不存在: {workspace}"));
-    }
+    let surface_kind = resumed_binding
+        .as_ref()
+        .map(|b| b.surface_kind)
+        .unwrap_or_else(|| new_intent.surface_kind());
+    let is_chat = surface_kind == crate::surface::SurfaceKind::Chat;
+    let cwd = if is_chat {
+        let path = app.path().app_data_dir()
+            .map_err(|e| anyhow!("解析 Chat 私有运行目录失败: {e}"))?
+            .join("chat-runtime");
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("创建 Chat 私有运行目录失败: {}", path.display()))?;
+        path
+    } else {
+        let path = PathBuf::from(&workspace);
+        if !path.is_dir() {
+            return Err(anyhow!("工作区目录不存在: {workspace}"));
+        }
+        path
+    };
 
     // 先拆掉旧会话。此前旧 handle 一直留到函数末尾才被替换——本次启动
     // 半路失败时它就成了僵尸：前端以为没会话/换了工作区，ext 调用却仍
@@ -264,6 +302,48 @@ pub(crate) async fn start_inner(
     agent_config.default_yolo_mode = false;
     agent_config.default_auto_mode =
         xai_grok_shell::util::config::effective_auto_for_launch(false, None, None);
+    if is_chat {
+        // 在任何引擎进程启动前确定 catalog key 并执行 agent_type 门。
+        let selected_model = if let Some(sid) = resume.as_deref() {
+            let summaries = xai_grok_shell::session::persistence::list_summaries(None)
+                .await
+                .map_err(|e| anyhow!("读取恢复会话模型失败: {e}"))?;
+            let summary = summaries.into_iter()
+                .find(|s| s.info.id.0.as_ref() == sid)
+                .ok_or_else(|| anyhow!("恢复会话不存在: {sid}"))?;
+            summary.catalog_model_id.map(|id| id.0.to_string()).ok_or_else(|| {
+                anyhow!("{}", crate::surface_policy::policy_blocked_message(
+                    &crate::surface_policy::SurfacePolicyError::ModelUnresolvable {
+                        model_id: summary.current_model_id.0.to_string(),
+                        reason: "会话缺少 catalog_model_id，不能安全判定 agent_type".into(),
+                    }))
+            })?
+        } else {
+            model.clone().or_else(|| agent_config.models.default.clone())
+                .ok_or_else(|| anyhow!("Chat 无法确定启动模型"))?
+        };
+        let (doc, issue) =
+            crate::caps_snapshot::load_config_doc(&crate::config_core::user_config_path());
+        if let Some(issue) = issue {
+            return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
+                &crate::surface_policy::SurfacePolicyError::ModelUnresolvable {
+                    model_id: selected_model,
+                    reason: format!("config.toml 不可判定：{}", issue.message),
+                })));
+        }
+        crate::surface_policy::ensure_chat_model_allowed(&doc, &selected_model)
+            .map_err(|e| anyhow!("{}", crate::surface_policy::policy_blocked_message(&e)))?;
+        crate::surface_policy::apply_chat_agent_config_overrides(&mut agent_config);
+        agent_config.default_auto_mode = false;
+
+        // 引擎硬门是权威边界；旧扫描器只作可见诊断，不再全局拒绝会话。
+        if let Err(e) = crate::surface_policy::enforce_chat_plugin_preflight(&cwd) {
+            tracing::warn!(error = %e, "Chat 发现本地插件来源；由引擎会话硬门隔离");
+        }
+        if let Err(e) = crate::surface_policy::ensure_no_disk_global_hooks() {
+            tracing::warn!(error = %e, "Chat 发现磁盘 hooks；由引擎会话硬门隔离");
+        }
+    }
 
     // NOTE: we deliberately do NOT grant_folder_trust() here.
     //
@@ -297,17 +377,25 @@ pub(crate) async fn start_inner(
         .as_object()
         .cloned();
 
+    let startup_hints = if is_chat {
+        let mut hints = crate::surface_policy::chat_startup_hints();
+        hints.as_object_mut().expect("static Chat hints")
+            .insert("nonInteractive".into(), serde_json::Value::Bool(true));
+        hints
+    } else {
+        serde_json::json!({
+            "nonInteractive": true,
+            "skipGitStatus": false,
+            "skipProjectLayout": false,
+        })
+    };
     let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(caps)
         .meta(
             serde_json::json!({
                 "clientType": "wancode",
                 "clientVersion": env!("CARGO_PKG_VERSION"),
-                "startupHints": {
-                    "nonInteractive": true,
-                    "skipGitStatus": false,
-                    "skipProjectLayout": false,
-                },
+                "startupHints": startup_hints,
             })
             .as_object()
             .cloned(),
@@ -352,15 +440,27 @@ pub(crate) async fn start_inner(
     }
 
     // ── Open session (new or resume-with-replay) ───────────────────
-    let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
-        &cwd,
-        &xai_grok_tools::types::compat::CompatConfig::default(),
-    );
+    let mcp_servers = if is_chat {
+        Vec::new()
+    } else {
+        xai_grok_shell::util::config::load_mcp_servers(
+            &cwd,
+            &xai_grok_tools::types::compat::CompatConfig::default(),
+        )
+    };
+    let session_meta = is_chat.then(|| serde_json::json!({
+        "agentProfile": crate::surface_policy::chat_agent_profile(),
+        "x.ai/localExtensionsDisabled": true,
+    }).as_object().cloned().expect("static Chat session meta"));
     let mut model_block: Option<serde_json::Value> = None;
     let (session_id, session_models) = if let Some(sid) = resume {
+        let mut req = acp::LoadSessionRequest::new(acp::SessionId::new(sid.clone()), cwd.clone())
+            .mcp_servers(mcp_servers);
+        if let Some(meta) = session_meta.clone() {
+            req = req.meta(Some(meta));
+        }
         let resp: acp::LoadSessionResponse = acp_send(
-            acp::LoadSessionRequest::new(acp::SessionId::new(sid.clone()), cwd.clone())
-                .mcp_servers(mcp_servers),
+            req,
             &acp_tx,
         )
         .await
@@ -370,14 +470,28 @@ pub(crate) async fn start_inner(
             .as_ref()
             .and_then(|m| m.get("x.ai/modelBlock"))
             .cloned();
+        if is_chat && !local_extensions_policy_applied(resp.meta.as_ref()) {
+            cancel.cancel();
+            return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
+                &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
+        }
         (acp::SessionId::new(sid), resp.models)
     } else {
+        let mut req = acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers);
+        if let Some(meta) = session_meta {
+            req = req.meta(Some(meta));
+        }
         let resp: acp::NewSessionResponse = acp_send(
-            acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers),
+            req,
             &acp_tx,
         )
         .await
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
+        if is_chat && !local_extensions_policy_applied(resp.meta.as_ref()) {
+            cancel.cancel();
+            return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
+                &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
+        }
         (resp.session_id, resp.models)
     };
     // ── v0.19-2a 最低身份事务链：引擎返回 ID → 写 binding → 成功后才
@@ -389,7 +503,7 @@ pub(crate) async fn start_inner(
         None => {
             let surface = app.state::<crate::surface_gate::SurfaceState>();
             match surface
-                .bind_new_session(&session_id.0, crate::surface::SurfaceKind::Code)
+                .bind_new_session(&session_id.0, surface_kind)
             {
                 Ok(b) => b,
                 Err(e) => {
@@ -452,13 +566,14 @@ pub(crate) async fn start_inner(
         session_id: session_id.clone(),
         cancel,
         cwd: cwd.clone(),
+        surface_kind: surface_binding.surface_kind,
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
     // 的 [skills].disabled 它看不见——引擎没有任何回灌路径。开一个会话就补
     // 发一次 refresh-baseline，让它立刻从磁盘配置重新同步。失败无所谓：
     // 最坏就是退回旧行为。
-    {
+    if !is_chat {
         let raw = serde_json::value::to_raw_value(&serde_json::json!({})).expect("static json");
         let _ = acp_send(
             acp::ExtRequest::new("x.ai/skills/refresh-baseline".to_string(), raw.into()),
@@ -481,6 +596,38 @@ pub(crate) async fn start_inner(
         policy_version: crate::surface::derive_effective_policy(surface_binding.surface_kind)
             .policy_version,
     })
+}
+
+fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    meta.and_then(|m| m.get("localExtensionsDisabledApplied"))
+        .and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+#[cfg(test)]
+mod local_extensions_handshake_tests {
+    use super::local_extensions_policy_applied;
+
+    #[test]
+    fn chat_requires_an_explicit_true_engine_acknowledgement() {
+        assert!(!local_extensions_policy_applied(None));
+
+        for value in [
+            serde_json::Value::Null,
+            serde_json::Value::Bool(false),
+            serde_json::Value::String("true".to_string()),
+        ] {
+            let mut meta = serde_json::Map::new();
+            meta.insert("localExtensionsDisabledApplied".to_string(), value);
+            assert!(!local_extensions_policy_applied(Some(&meta)));
+        }
+
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "localExtensionsDisabledApplied".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(local_extensions_policy_applied(Some(&meta)));
+    }
 }
 
 async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {

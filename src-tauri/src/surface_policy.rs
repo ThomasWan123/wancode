@@ -28,15 +28,12 @@ use serde::Serialize;
 /// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
 /// 重新归属。生产 agent_start 固定传 Code；Chat 仅测试/内部可达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 pub(crate) enum NewSurfaceIntent {
     Code,
+    #[allow(dead_code)] // 2c 暗接线内部测试使用；2d 才开放 UI 入口。
     Chat,
 }
 
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 impl NewSurfaceIntent {
     pub(crate) fn surface_kind(self) -> crate::surface::SurfaceKind {
         match self {
@@ -61,6 +58,8 @@ pub enum SurfacePolicyError {
     /// Chat 恢复/切换时无法确定模型的 agent_type（配置读不到、
     /// 模型不在 config）——fail-closed。
     ModelUnresolvable { model_id: String, reason: String },
+    /// 客户端要求引擎锁死本地扩展，但响应没有回显实际锁存状态。
+    LocalExtensionsPolicyNotApplied,
     /// 存在会对 Chat 会话生效的全局/plugin hooks（~/.grok/hooks、
     /// hooks-paths、Claude/Cursor 全局 hooks）。hooks 可在
     /// UserPromptSubmit/Stop 等事件执行命令、写任意路径，直接违反
@@ -82,6 +81,10 @@ impl std::fmt::Display for SurfacePolicyError {
             SurfacePolicyError::ModelUnresolvable { model_id, reason } => {
                 write!(f, "model_unresolvable: 模型 {model_id} 无法确定 agent_type：{reason}")
             }
+            SurfacePolicyError::LocalExtensionsPolicyNotApplied => write!(
+                f,
+                "local_extensions_policy_not_applied: 引擎未确认本地扩展禁用策略"
+            ),
             SurfacePolicyError::GlobalHooksConflict { hook_count, detail } => write!(
                 f,
                 "global_hooks_conflict: {hook_count} 个全局 hooks 会对 Chat 生效（{detail}）"
@@ -109,8 +112,6 @@ pub fn policy_blocked_message(e: &SurfacePolicyError) -> String {
 /// typed 构造：工具条目来自 `ToolConfig::from(&WebSearchTool/&WebFetchTool)`
 /// ——真实内部 ID（`GrokBuild:*`）由工具自己报告，裸字符串不是契约。
 /// 形状由单测的 serialize → `AgentDefinition::from_json` 往返锁定。
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 pub(crate) fn chat_agent_profile() -> serde_json::Value {
     use xai_grok_tools::implementations::grok_build::{WebFetchTool, WebSearchTool};
     use xai_grok_tools::registry::types::ToolConfig;
@@ -152,8 +153,6 @@ pub(crate) fn chat_agent_profile() -> serde_json::Value {
 
 /// Chat 的 startupHints（`_meta.startupHints` 载荷）：跳过 git 状态
 /// 注入。私有中性 cwd 才是边界，本 hint 只是降噪。
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 pub(crate) fn chat_startup_hints() -> serde_json::Value {
     serde_json::json!({ "skipGitStatus": true })
 }
@@ -161,8 +160,6 @@ pub(crate) fn chat_startup_hints() -> serde_json::Value {
 /// agent_type 冲突门：从 config.toml 文档判定模型是否可用于 Chat。
 /// `doc` = toml_edit 解析后的用户配置；`model_id` = catalog key。
 /// 返回 Ok(()) 仅当模型存在且未 pin agent_type。
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 pub(crate) fn ensure_chat_model_allowed(
     doc: &toml_edit::DocumentMut,
     model_id: &str,
@@ -201,8 +198,6 @@ pub(crate) fn ensure_chat_model_allowed(
 /// 加载面，零漏、只可能多拦。resolve_compat_config 为引擎私有且
 /// remote settings 不可达（G26），复现 resolved 反而引入分歧窗口；
 /// default=全开由测试 2c-7 钉死，上游翻转即红。
-// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
-#[allow(dead_code)]
 pub(crate) fn ensure_no_disk_global_hooks() -> Result<(), SurfacePolicyError> {
     let (registry, errors) = xai_grok_shell::util::hooks::discover_hooks(
         None,
@@ -406,8 +401,6 @@ fn scan_plugin_sources(
 /// 不触进程环境（env 方案有 Chat/Code 并发串线窗口，已否决删除）。
 /// mcp_servers=[] 不等于零 MCP：managed/plugin/热重载 MCP 都在会话
 /// 建立后另行合并——managed 由本覆盖关死，plugin 由插件门源头拦截。
-// 临时：切片 2（start_inner 接线）后移除。
-#[allow(dead_code)]
 pub(crate) fn apply_chat_agent_config_overrides(
     cfg: &mut xai_grok_shell::agent::config::Config,
 ) {
