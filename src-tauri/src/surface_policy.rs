@@ -26,11 +26,10 @@ use serde::Serialize;
 
 /// 新会话的层意图。**刻意不是 SurfaceKind**：恢复会话没有意图参数
 /// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
-/// 重新归属。生产 agent_start 固定传 Code；Chat 仅测试/内部可达。
+/// 重新归属。公开入口只接受 v0.19 已交付的 Chat/Code；Work/Cowork 拒绝。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewSurfaceIntent {
     Code,
-    #[allow(dead_code)] // 2c 暗接线内部测试使用；2d 才开放 UI 入口。
     Chat,
 }
 
@@ -43,11 +42,24 @@ impl NewSurfaceIntent {
     }
 }
 
+impl NewSurfaceIntent {
+    pub(crate) fn from_wire(value: Option<&str>) -> Result<Self, SurfacePolicyError> {
+        match value.unwrap_or("code") {
+            "code" => Ok(Self::Code),
+            "chat" => Ok(Self::Chat),
+            other => Err(SurfacePolicyError::UnsupportedSurface {
+                surface: other.to_string(),
+            }),
+        }
+    }
+}
+
 /// 策略执行层的结构化错误（serde tag=code，前端契约
 /// `SURFACE_POLICY_BLOCKED: {json}`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum SurfacePolicyError {
+    UnsupportedSurface { surface: String },
     /// Chat 只允许 agent_type 为空的模型：pin 了 agent_type 的模型
     /// （strict harness 与否）会压过/对抗 `_meta.agentProfile`，
     /// 静默恢复完整工具集——fail-closed 超集，一律拒绝。
@@ -74,6 +86,9 @@ pub enum SurfacePolicyError {
 impl std::fmt::Display for SurfacePolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SurfacePolicyError::UnsupportedSurface { surface } => {
+                write!(f, "unsupported_surface: v0.19 不支持层 {surface}")
+            }
             SurfacePolicyError::AgentTypeConflict { model_id, agent_type } => write!(
                 f,
                 "agent_type_conflict: 模型 {model_id} pin 了 agent_type={agent_type}，与 Chat 层 profile 冲突"
@@ -689,5 +704,18 @@ mod tests {
             chat_startup_hints(),
             serde_json::json!({ "skipGitStatus": true })
         );
+    }
+
+    #[test]
+    fn v019_wire_only_accepts_chat_and_code() {
+        assert_eq!(NewSurfaceIntent::from_wire(None), Ok(NewSurfaceIntent::Code));
+        assert_eq!(
+            NewSurfaceIntent::from_wire(Some("chat")),
+            Ok(NewSurfaceIntent::Chat)
+        );
+        assert!(matches!(
+            NewSurfaceIntent::from_wire(Some("work")),
+            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "work"
+        ));
     }
 }

@@ -158,6 +158,7 @@ pub async fn agent_start(
     workspace: String,
     model: Option<String>,
     resume: Option<String>,
+    surface: Option<String>,
 ) -> Result<StartResult, String> {
     // smoke 模式：前端不许动会话。debug 构建的 webview 若碰到活着的 dev
     // server 会加载完整前端并自动启动会话，把 autotest 的 handle 换成
@@ -171,7 +172,9 @@ pub async fn agent_start(
         old.cancel.cancel();
     }
 
-    let result = start_inner(app, &state, workspace, model, resume)
+    let intent = crate::surface_policy::NewSurfaceIntent::from_wire(surface.as_deref())
+        .map_err(|e| crate::surface_policy::policy_blocked_message(&e))?;
+    let result = start_inner_with_intent(app, &state, workspace, model, resume, intent)
         .await
         .map_err(|e| format!("{e:#}"))?;
     Ok(result)
