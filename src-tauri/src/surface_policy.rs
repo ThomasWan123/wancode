@@ -1,0 +1,725 @@
+//! v0.19-2c 暗接线：Chat 层策略的真实执行物料（设计稿 v2 终审版）。
+//!
+//! 本模块只产「策略 → 引擎输入」的映射与守门判定，不做 IO 接线
+//! （接线在 agent.rs 的 start_inner / agent_set_model）。
+//!
+//! 核心决策（评审定案）：
+//! - 工具裁剪杠杆 = NewSessionRequest `_meta.agentProfile` 内联完整
+//!   AgentDefinition：显式最小 tool_config（typed 构造，真实内部 ID
+//!   `GrokBuild:web_search` / `GrokBuild:web_fetch`），
+//!   inject_default_tools/agents_md/discover_skills 全关、
+//!   mcp_servers=[]、mcp_inheritance=none。`tools` 字符串 allowlist
+//!   不作主防线（引擎解析失败 fail-open）。
+//! - **私有中性 cwd 是安全边界不是性能优化**：agents_md=false 后引擎
+//!   builder 仍做 Git discover/gitignore 初始化——Chat 的 engine cwd
+//!   必须是 app_data_dir()/chat-runtime/（非 git、无项目配置可读），
+//!   另设 startupHints.skipGitStatus=true。
+//! - **agent_type 冲突门（fail-closed 超集）**：G26 禁止新增
+//!   xai-grok-agent 依赖（会改 Cargo.lock/清单哈希），引擎的
+//!   is_strict_harness_agent_type 不可达——收紧为「Chat 仅允许
+//!   agent_type 为空的模型」：任何 pin agent_type 的模型（strict 与否）
+//!   都与 wancode-chat profile 冲突，一律结构化阻塞，绝不静默回落
+//!   完整工具集。判定源 = config.toml `[model.X].agent_type`（与引擎
+//!   同源）。
+
+use serde::Serialize;
+
+/// 新会话的层意图。**刻意不是 SurfaceKind**：恢复会话没有意图参数
+/// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
+/// 重新归属。公开入口只接受 v0.19 已交付的 Chat/Code；Work/Cowork 拒绝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewSurfaceIntent {
+    Code,
+    Chat,
+}
+
+impl NewSurfaceIntent {
+    pub(crate) fn surface_kind(self) -> crate::surface::SurfaceKind {
+        match self {
+            NewSurfaceIntent::Code => crate::surface::SurfaceKind::Code,
+            NewSurfaceIntent::Chat => crate::surface::SurfaceKind::Chat,
+        }
+    }
+}
+
+impl NewSurfaceIntent {
+    pub(crate) fn from_wire(value: Option<&str>) -> Result<Self, SurfacePolicyError> {
+        match value.unwrap_or("code") {
+            "code" => Ok(Self::Code),
+            "chat" => Ok(Self::Chat),
+            other => Err(SurfacePolicyError::UnsupportedSurface {
+                surface: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// 策略执行层的结构化错误（serde tag=code，前端契约
+/// `SURFACE_POLICY_BLOCKED: {json}`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum SurfacePolicyError {
+    UnsupportedSurface { surface: String },
+    /// Chat 只允许 agent_type 为空的模型：pin 了 agent_type 的模型
+    /// （strict harness 与否）会压过/对抗 `_meta.agentProfile`，
+    /// 静默恢复完整工具集——fail-closed 超集，一律拒绝。
+    AgentTypeConflict {
+        model_id: String,
+        agent_type: String,
+    },
+    /// Chat 恢复/切换时无法确定模型的 agent_type（配置读不到、
+    /// 模型不在 config）——fail-closed。
+    ModelUnresolvable { model_id: String, reason: String },
+    /// 客户端要求引擎锁死本地扩展，但响应没有回显实际锁存状态。
+    LocalExtensionsPolicyNotApplied,
+    /// 存在会对 Chat 会话生效的全局/plugin hooks（~/.grok/hooks、
+    /// hooks-paths、Claude/Cursor 全局 hooks）。hooks 可在
+    /// UserPromptSubmit/Stop 等事件执行命令、写任意路径，直接违反
+    /// Chat 零文件/零执行承诺；私有 cwd 只隔项目 hooks 隔不了全局。
+    /// 空 hooks 配置会退回磁盘 discovery，故必须启动前探测阻塞。
+    GlobalHooksConflict { hook_count: usize, detail: String },
+    /// 存在可能向引擎贡献 hooks/MCP 的插件输入面。G26 下引擎插件
+    /// discovery 本体不可达，按输入面超集拦截（多拦不漏）。
+    PluginExtensionsConflict { sources: Vec<String> },
+}
+
+impl std::fmt::Display for SurfacePolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SurfacePolicyError::UnsupportedSurface { surface } => {
+                write!(f, "unsupported_surface: v0.19 不支持层 {surface}")
+            }
+            SurfacePolicyError::AgentTypeConflict { model_id, agent_type } => write!(
+                f,
+                "agent_type_conflict: 模型 {model_id} pin 了 agent_type={agent_type}，与 Chat 层 profile 冲突"
+            ),
+            SurfacePolicyError::ModelUnresolvable { model_id, reason } => {
+                write!(f, "model_unresolvable: 模型 {model_id} 无法确定 agent_type：{reason}")
+            }
+            SurfacePolicyError::LocalExtensionsPolicyNotApplied => write!(
+                f,
+                "local_extensions_policy_not_applied: 引擎未确认本地扩展禁用策略"
+            ),
+            SurfacePolicyError::GlobalHooksConflict { hook_count, detail } => write!(
+                f,
+                "global_hooks_conflict: {hook_count} 个全局 hooks 会对 Chat 生效（{detail}）"
+            ),
+            SurfacePolicyError::PluginExtensionsConflict { sources } => write!(
+                f,
+                "plugin_extensions_conflict: {} 个插件输入面非空（{}）",
+                sources.len(),
+                sources.join("; ")
+            ),
+        }
+    }
+}
+
+/// 策略错误 → 前端契约字符串。
+pub fn policy_blocked_message(e: &SurfacePolicyError) -> String {
+    format!(
+        "SURFACE_POLICY_BLOCKED: {}",
+        serde_json::to_string(e).unwrap_or_else(|_| e.to_string())
+    )
+}
+
+/// Chat 层的内联 AgentDefinition（`_meta.agentProfile` 载荷）。
+///
+/// typed 构造：工具条目来自 `ToolConfig::from(&WebSearchTool/&WebFetchTool)`
+/// ——真实内部 ID（`GrokBuild:*`）由工具自己报告，裸字符串不是契约。
+/// 形状由单测的 serialize → `AgentDefinition::from_json` 往返锁定。
+pub(crate) fn chat_agent_profile() -> serde_json::Value {
+    use xai_grok_tools::implementations::grok_build::{WebFetchTool, WebSearchTool};
+    use xai_grok_tools::registry::types::ToolConfig;
+    let web_search = ToolConfig::from(&WebSearchTool);
+    let web_fetch = ToolConfig::from(&WebFetchTool);
+    serde_json::json!({
+        "name": "wancode-chat",
+        "description": "WanCode Chat 层：轻对话，不访问用户/项目文件系统",
+        // 显式最小 tool_config——主防线。
+        "toolConfig": {
+            "tools": [web_search, web_fetch],
+        },
+        // 关掉 session 级可选工具叠加（memory/lsp/image_gen/OpenCode
+        // write 垫底/plan 工具等）——不叠加就没有渗漏面。
+        "injectDefaultTools": false,
+        // 不读 AGENTS.md/项目规则（私有 cwd 里本也没有，双保险）。
+        "agentsMd": false,
+        // 不做技能发现（技能可携带文件/执行指令面）。
+        "discoverSkills": false,
+        // 零自定义 MCP（第一版）：不带 server、不继承会话 MCP。
+        "mcpServers": [],
+        "mcpInheritance": "none",
+        // hosted tools 裁剪（复核 P0：不设 tools 时 AgentDefinition.tools
+        // 为空 = 继承全部，引擎会把 x_search 等 hosted tools 视为允许）。
+        // typed toolConfig 仍是函数工具主防线；这里专门约束 hosted 面。
+        "tools": ["web_search", "web_fetch"],
+        // 冗余兜底（非主防线）：hosted x_search + 常见文件/执行工具。
+        "disallowedTools": [
+            "x_search",
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuild:read_file",
+            "GrokBuild:write_file",
+            "GrokBuild:search_replace",
+            "GrokBuild:list_dir",
+            "GrokBuild:grep",
+        ],
+    })
+}
+
+/// Chat 的 startupHints（`_meta.startupHints` 载荷）：跳过 git 状态
+/// 注入。私有中性 cwd 才是边界，本 hint 只是降噪。
+pub(crate) fn chat_startup_hints() -> serde_json::Value {
+    serde_json::json!({ "skipGitStatus": true })
+}
+
+/// agent_type 冲突门：从 config.toml 文档判定模型是否可用于 Chat。
+/// `doc` = toml_edit 解析后的用户配置；`model_id` = catalog key。
+/// 返回 Ok(()) 仅当模型存在且未 pin agent_type。
+pub(crate) fn ensure_chat_model_allowed(
+    doc: &toml_edit::DocumentMut,
+    model_id: &str,
+) -> Result<(), SurfacePolicyError> {
+    let entry = doc
+        .get("model")
+        .and_then(|m| m.as_table())
+        .and_then(|t| t.get(model_id))
+        .and_then(|e| e.as_table_like());
+    let Some(entry) = entry else {
+        return Err(SurfacePolicyError::ModelUnresolvable {
+            model_id: model_id.to_string(),
+            reason: "config.toml 无此模型条目".into(),
+        });
+    };
+    match entry.get("agent_type").and_then(|v| v.as_str()) {
+        None => Ok(()),
+        Some(t) if t.trim().is_empty() => Ok(()),
+        Some(t) => Err(SurfacePolicyError::AgentTypeConflict {
+            model_id: model_id.to_string(),
+            agent_type: t.to_string(),
+        }),
+    }
+}
+
+/// 磁盘全局 hooks 门（复核三：**名实相符**——只覆盖磁盘全局 hooks：
+/// ~/.grok/hooks、hooks-paths、Claude/Cursor 全局；plugin 携带的文件型/
+/// inline hooks 由 [`ensure_no_plugin_extensions`] 在源头拦截）。
+/// 用**引擎自己的 discovery**只读探测（git_root=None + untrusted ⇒ 仅
+/// 全局来源），命中即阻塞；报错 fail-closed；空 hooks:{} 不可作覆盖
+/// （会退回磁盘 discovery）。
+///
+/// compat 面（复核三 P1）：用 `CompatConfig::default()`——VendorCompat
+/// 全字段 true（全 vendor 全面开启），是任何 compat_resolved（config +
+/// remote settings 只会**关闭**面）的**超集**：门的发现面 ≥ 引擎实际
+/// 加载面，零漏、只可能多拦。resolve_compat_config 为引擎私有且
+/// remote settings 不可达（G26），复现 resolved 反而引入分歧窗口；
+/// default=全开由测试 2c-7 钉死，上游翻转即红。
+pub(crate) fn ensure_no_disk_global_hooks() -> Result<(), SurfacePolicyError> {
+    let (registry, errors) = xai_grok_shell::util::hooks::discover_hooks(
+        None,
+        &xai_grok_tools::types::compat::CompatConfig::default(),
+        false,
+    );
+    classify_global_hooks(registry.len(), &errors)
+}
+
+/// 纯判定内核（可测）：全局 hooks 数量/发现错误 → 门裁决。
+fn classify_global_hooks(
+    hook_count: usize,
+    errors: &[impl std::fmt::Display],
+) -> Result<(), SurfacePolicyError> {
+    if !errors.is_empty() {
+        return Err(SurfacePolicyError::GlobalHooksConflict {
+            hook_count,
+            detail: format!(
+                "hooks discovery 报错 {} 条（fail-closed）：{}",
+                errors.len(),
+                errors.first().map(|e| e.to_string()).unwrap_or_default()
+            ),
+        });
+    }
+    if hook_count > 0 {
+        return Err(SurfacePolicyError::GlobalHooksConflict {
+            hook_count,
+            detail: "全局/plugin hooks 会在 Chat 会话事件上执行命令".into(),
+        });
+    }
+    Ok(())
+}
+
+/// 插件扩展门（复核六定版：引擎有效配置复用）。
+///
+/// 启动/配置面封锁：**直接调用引擎自己的解析**，不再手写镜像——
+/// - [`resolve_effective_plugins_config`]（pub，config/mod.rs:1354）：
+///   enabled/paths/cli_plugin_dirs 的有效值（managed_config.toml 合并
+///   层 user-wins、项目层、folder-trust 全在内）；
+/// - [`load_effective_config_disk_only`]（pub use :883）读
+///   `[plugins].install_dir`——与引擎 InstallRegistry 同一配置层；
+///   **读取/解析失败 fail-closed**；未配置回落
+///   `$GROK_HOME/installed-plugins`（引擎 resolve_install_dir 同序）；
+/// - 磁盘用户面照扫：`$GROK_HOME/plugins`、`~/.claude/plugins`（目录
+///   非空即拦，涵盖 installed_plugins.json/known_marketplaces.json）、
+///   `~/.claude/settings.json` enabledPlugins；
+/// - 项目 `.grok/.claude/plugins` 面由 Chat 私有中性 cwd 保证。
+///
+/// **生命周期边界未由本门解决**（复核六定性）：`/plugins` 的
+/// BuiltinGate::Plugins 是 `plugin_registry.is_some()` 的状态派生门，
+/// 不是可设置开关；引擎 process-wide reload fan-out 可把其他会话加载
+/// 的插件快照重新合入活跃 Chat。是否存在可靠客户端杠杆由真实链探针
+/// 裁决（设计稿复核六），本门只承诺启动/配置面。
+// 临时：切片 2（start_inner/agent_set_model 接线）后移除。
+#[allow(dead_code)]
+pub(crate) fn ensure_no_plugin_extensions(
+    cwd: &std::path::Path,
+) -> Result<(), SurfacePolicyError> {
+    let eff = xai_grok_shell::config::resolve_effective_plugins_config(cwd);
+    let grok_home = xai_grok_shell::util::grok_home::grok_home();
+    let raw_install = match xai_grok_shell::config::load_effective_config_disk_only() {
+        Ok(root) => root
+            .get("plugins")
+            .and_then(|p| p.get("install_dir"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        Err(e) => {
+            return Err(SurfacePolicyError::PluginExtensionsConflict {
+                sources: vec![format!("有效配置读取失败（fail-closed）：{e}")],
+            });
+        }
+    };
+    let install_dir = resolve_install_dir_like_engine(raw_install.as_deref(), &grok_home)?;
+    // ~/.claude 面：与引擎同源的 home 解析（std::env::home_dir，
+    // Windows = USERPROFILE + GetUserProfileDirectoryW 回退，与引擎
+    // dirs::home_dir 的 USERPROFILE 路径等价）；解析不到 fail-closed
+    // ——静默跳过 claude 扫描就是漏面（复核七 P1）。
+    let Some(home) = std::env::home_dir() else {
+        return Err(SurfacePolicyError::PluginExtensionsConflict {
+            sources: vec!["home 目录无法解析（fail-closed，~/.claude 面不可确认）".into()],
+        });
+    };
+    let claude_home = home.join(".claude");
+    scan_plugin_sources(
+        &eff.enabled,
+        &eff.paths,
+        &eff.cli_plugin_dirs,
+        &install_dir,
+        &grok_home,
+        Some(&claude_home),
+    )
+}
+
+/// install_dir 解析——与引擎 InstallRegistry::read_install_dir_from_config
+/// 逐分支一致（install_registry.rs:263）：
+/// - `~/x` → home_dir()/x（引擎用 dirs::home_dir，此处 std::env::home_dir，
+///   Windows 均以 USERPROFILE 为首选——home 不可解析时**fail-closed**，
+///   引擎侧 `?` 返回 None 会静默回落默认目录，这里更严）；
+/// - 绝对/其他路径原样 `PathBuf::from`；
+/// - 未配置 → `$GROK_HOME/installed-plugins`（resolve_install_dir 同序）。
+fn resolve_install_dir_like_engine(
+    raw: Option<&str>,
+    grok_home: &std::path::Path,
+) -> Result<std::path::PathBuf, SurfacePolicyError> {
+    match raw {
+        None => Ok(grok_home.join("installed-plugins")),
+        Some(value) => {
+            if let Some(stripped) = value.strip_prefix("~/") {
+                match std::env::home_dir() {
+                    Some(home) => Ok(home.join(stripped)),
+                    None => Err(SurfacePolicyError::PluginExtensionsConflict {
+                        sources: vec![format!(
+                            "install_dir={value} 的 ~ 展开失败（home 不可解析，fail-closed）"
+                        )],
+                    }),
+                }
+            } else {
+                Ok(std::path::PathBuf::from(value))
+            }
+        }
+    }
+}
+
+/// **唯一的生产边界入口**（复核十一定案）：Chat 启动前的插件面
+/// preflight。切片 2 的 `start_inner` 与集成探针**都只调这一个函数**
+/// ——生产与探针共用同一判定，杜绝「门与探针脱节」。
+///
+/// 刻意的可见性设计（复核二十三收口）：
+/// - `pub(crate)`：探针已是 lib 内 `#[cfg(test)]` 模块，同 crate 可达
+///   ——无需 `pub`，也不存在「pub 但非公共 API」这种自相矛盾的说法；
+/// - `ensure_no_plugin_extensions` / `scan_plugin_sources` /
+///   `resolve_install_dir_like_engine` 保持私有；
+/// - **不加 `cfg(test)` 或测试 feature**——生产与测试编译同一套行为；
+/// - 不注册为 Tauri command，前端无法调用绕过。
+pub(crate) fn enforce_chat_plugin_preflight(
+    cwd: &std::path::Path,
+) -> Result<(), SurfacePolicyError> {
+    ensure_no_plugin_extensions(cwd)
+}
+
+/// 判定内核（全输入注入，判别测试直击）。
+fn scan_plugin_sources(
+    enabled: &[String],
+    paths: &[String],
+    cli_plugin_dirs: &[std::path::PathBuf],
+    install_dir: &std::path::Path,
+    grok_home: &std::path::Path,
+    claude_home: Option<&std::path::Path>,
+) -> Result<(), SurfacePolicyError> {
+    let mut sources = Vec::new();
+    if !enabled.is_empty() {
+        sources.push("有效配置 [plugins].enabled".to_string());
+    }
+    if !paths.is_empty() {
+        sources.push("有效配置 [plugins].paths".to_string());
+    }
+    if !cli_plugin_dirs.is_empty() {
+        sources.push("有效配置 [plugins].cli_plugin_dirs".to_string());
+    }
+    let dir_non_empty = |p: &std::path::Path| {
+        std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_some())
+    };
+    if dir_non_empty(install_dir) {
+        sources.push(format!(
+            "install registry（有效 install_dir = {}）",
+            install_dir.display()
+        ));
+    }
+    if dir_non_empty(&grok_home.join("plugins")) {
+        sources.push("$GROK_HOME/plugins".into());
+    }
+    if let Some(claude) = claude_home {
+        if dir_non_empty(&claude.join("plugins")) {
+            sources.push("~/.claude/plugins".into());
+        }
+        if let Ok(text) = std::fs::read_to_string(claude.join("settings.json")) {
+            let enabled_non_empty = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    v.get("enabledPlugins")
+                        .map(|e| e.as_object().is_some_and(|o| !o.is_empty()))
+                })
+                .unwrap_or(false);
+            if enabled_non_empty {
+                sources.push("~/.claude/settings.json enabledPlugins".into());
+            }
+        }
+    }
+    if sources.is_empty() {
+        Ok(())
+    } else {
+        Err(SurfacePolicyError::PluginExtensionsConflict { sources })
+    }
+}
+
+/// Chat 的 managed MCP 关闭（复核四 P0-2 定案）：**会话实例级**——
+/// wancode 自建 AgentConfig（agent.rs new_from_toml_cfg →
+/// resolve_runtime_fields → spawn_grok_shell），Chat 分支在 resolve
+/// 后直接置 `managed_mcps_enabled=false` 与
+/// `managed_mcp_gateway_tools_enabled=false`，只约束本次 spawn，
+/// 不触进程环境（env 方案有 Chat/Code 并发串线窗口，已否决删除）。
+/// mcp_servers=[] 不等于零 MCP：managed/plugin/热重载 MCP 都在会话
+/// 建立后另行合并——managed 由本覆盖关死，plugin 由插件门源头拦截。
+pub(crate) fn apply_chat_agent_config_overrides(
+    cfg: &mut xai_grok_shell::agent::config::Config,
+) {
+    cfg.managed_mcps_enabled = false;
+    cfg.managed_mcp_gateway_tools_enabled = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_shell::agent::config::AgentDefinition;
+
+    /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下插件「来源/激活/
+    /// 重载」决策文件（agent 3 + shell 4+1）的联合 sha256。引擎升级后
+    /// 按测试指引重审并更新。注意（复核六）：漂移锁只防实现漂移，
+    /// 不能替代会话级执行隔离——后者由真实链探针裁决。
+    // v0.19 intentional-delta（engine 2f480062e）：14 个受监视文件中，
+    // discovery / marketplace / install registry / 配置合并与路径解析均未变；
+    // 仅会话装配、broadcast、reload、slash 与扩展端点加入了经审计的
+    // local_extensions_disabled 隔离。重审后更新本基线。
+    const PLUGIN_DISCOVERY_SOURCES_SHA256: &str =
+        "7c1ffe53db9e648d0cf7f61764c7498a41b30f1d2954f93351e8a5926185709b";
+
+    // 2c-1：`_meta.agentProfile` 形状锁定——serialize → 引擎
+    // AgentDefinition::from_json 往返，防形状漂移（终审硬约束 A）。
+    #[test]
+    fn chat_profile_round_trips_through_engine_parser() {
+        let profile = chat_agent_profile();
+        let def = AgentDefinition::from_json(&profile)
+            .expect("引擎必须能解析 Chat profile——解析失败即形状漂移");
+        assert_eq!(def.name, "wancode-chat");
+        // 主防线：显式最小 tool_config，真实内部 ID。
+        let ids: Vec<&str> = def.tool_config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["GrokBuild:web_search", "GrokBuild:web_fetch"],
+            "工具集必须精确等于 web_search+web_fetch（限定名）"
+        );
+        // hosted tools allowlist（复核 P0：空 = 继承全部 = x_search 漏入）。
+        assert_eq!(
+            def.tools,
+            vec!["web_search".to_string(), "web_fetch".to_string()],
+            "AgentDefinition.tools 必须精确 = web_search+web_fetch（hosted 面）"
+        );
+        assert!(
+            def.disallowed_tools.contains(&"x_search".to_string()),
+            "x_search 必须在 denylist"
+        );
+        // 五关闭项。
+        assert!(!def.inject_default_tools, "inject_default_tools 必须 false");
+        assert!(!def.agents_md, "agents_md 必须 false");
+        assert!(!def.discover_skills, "discover_skills 必须 false");
+        assert!(def.mcp_servers.is_empty(), "零自定义 MCP");
+        // McpInheritance 类型未经 shell re-export——用序列化形状断言
+        // （camelCase 字段 mcpInheritance == "none"），与引擎解析同源。
+        let back = serde_json::to_value(&def).expect("AgentDefinition 可序列化");
+        assert_eq!(
+            back.get("mcpInheritance").and_then(|v| v.as_str()),
+            Some("none"),
+            "MCP 继承必须 none"
+        );
+    }
+
+    // 2c-2：typed 构造的 ID 来源正确性——ToolConfig::from(&Tool) 的 id
+    // 与我们冗余 denylist 里的限定名风格一致（GrokBuild: 前缀）。
+    #[test]
+    fn typed_tool_ids_are_qualified() {
+        use xai_grok_tools::implementations::grok_build::{WebFetchTool, WebSearchTool};
+        use xai_grok_tools::registry::types::ToolConfig;
+        assert_eq!(ToolConfig::from(&WebSearchTool).id, "GrokBuild:web_search");
+        assert_eq!(
+            ToolConfig::from(&WebFetchTool).id,
+            "GrokBuild:web_fetch"
+        );
+    }
+
+    fn doc(text: &str) -> toml_edit::DocumentMut {
+        text.parse().unwrap()
+    }
+
+    // 2c-3：agent_type 冲突门——三态判定（终审硬约束 B 的判定内核）。
+    #[test]
+    fn chat_model_gate_three_states() {
+        // 无 agent_type：放行。
+        let d = doc("[model.glm]\nname=\"GLM\"\nmodel=\"glm-5.2\"\n");
+        ensure_chat_model_allowed(&d, "glm").expect("未 pin agent_type 须放行");
+        // pin 了 agent_type（无论是否 strict）：结构化拒绝。
+        let d = doc("[model.cdx]\nagent_type=\"codex\"\n");
+        match ensure_chat_model_allowed(&d, "cdx") {
+            Err(SurfacePolicyError::AgentTypeConflict { agent_type, .. }) => {
+                assert_eq!(agent_type, "codex")
+            }
+            other => panic!("期望 AgentTypeConflict，得到 {other:?}"),
+        }
+        // 模型不存在：fail-closed。
+        let d = doc("[model.glm]\n");
+        assert!(matches!(
+            ensure_chat_model_allowed(&d, "ghost"),
+            Err(SurfacePolicyError::ModelUnresolvable { .. })
+        ));
+        // 契约串可解析。
+        let e = SurfacePolicyError::AgentTypeConflict {
+            model_id: "m".into(),
+            agent_type: "codex".into(),
+        };
+        let msg = policy_blocked_message(&e);
+        assert!(msg.starts_with("SURFACE_POLICY_BLOCKED: {"));
+        assert!(msg.contains("\"code\":\"agent_type_conflict\""));
+    }
+
+    // 2c-5：全局 hooks 门判定内核（复核 P0-2）——三态：零 hooks 放行、
+    // 任意 hooks 阻塞、discovery 报错 fail-closed 阻塞。
+    #[test]
+    fn global_hooks_gate_three_states() {
+        let no_errs: &[String] = &[];
+        classify_global_hooks(0, no_errs).expect("零全局 hooks 放行");
+        match classify_global_hooks(2, no_errs) {
+            Err(SurfacePolicyError::GlobalHooksConflict { hook_count, .. }) => {
+                assert_eq!(hook_count, 2)
+            }
+            other => panic!("期望 GlobalHooksConflict，得到 {other:?}"),
+        }
+        // discovery 报错：即使计数为 0 也 fail-closed。
+        let errs = vec!["hook file unreadable".to_string()];
+        assert!(matches!(
+            classify_global_hooks(0, &errs),
+            Err(SurfacePolicyError::GlobalHooksConflict { .. })
+        ));
+        // 契约串。
+        let e = SurfacePolicyError::GlobalHooksConflict {
+            hook_count: 1,
+            detail: "d".into(),
+        };
+        assert!(policy_blocked_message(&e).contains("\"code\":\"global_hooks_conflict\""));
+    }
+
+    // 2c-6：生产探测函数在本机可执行（结果依机器状态而定，只断言
+    // 不 panic 且错误为结构化类型——真实门行为由 CI 干净环境与
+    // 后续请求体测试覆盖）。
+    #[test]
+    fn global_hooks_probe_runs() {
+        match ensure_no_disk_global_hooks() {
+            Ok(()) => {}
+            Err(SurfacePolicyError::GlobalHooksConflict { .. }) => {}
+            Err(other) => panic!("探测只应产生 GlobalHooksConflict，得到 {other:?}"),
+        }
+    }
+
+    // 2c-7：compat 超集面钉死——CompatConfig::default() 的 vendor hooks
+    // 面必须全 true（探测面 ≥ 引擎 resolved 面的前提）。上游翻转默认值
+    // 本测试即红，届时改为显式全开构造。
+    #[test]
+    fn default_compat_is_superset_for_hooks() {
+        let c = xai_grok_tools::types::compat::CompatConfig::default();
+        assert!(c.claude.hooks, "claude hooks 面必须默认开启（超集前提）");
+        assert!(c.cursor.hooks, "cursor hooks 面必须默认开启（超集前提）");
+    }
+
+    // 2c-8/2c-9（复核六）：判定内核全输入注入——有效配置数组、
+    // install_dir（含自定义外部目录判别样本）、磁盘用户面三态。
+    #[test]
+    fn plugin_gate_discriminates_all_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok = tmp.path().join("grok-home");
+        let claude = tmp.path().join("claude-home");
+        let install = tmp.path().join("default-install");
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&claude).unwrap();
+        let empty: &[String] = &[];
+        let no_cli: &[std::path::PathBuf] = &[];
+        // 全空：放行。
+        scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude))
+            .expect("全部来源为空须放行");
+        // 有效配置 enabled 非空：阻断。
+        let en = vec!["foo".to_string()];
+        assert!(matches!(
+            scan_plugin_sources(&en, empty, no_cli, &install, &grok, Some(&claude)),
+            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
+        ));
+        // 判别样本（复核五 P0-1）：自定义 install_dir 指向外部目录，
+        // 仅该处有 registry 条目——必须阻断。
+        let external = tmp.path().join("external-plugins");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("registry.json"), "{}").unwrap();
+        match scan_plugin_sources(empty, empty, no_cli, &external, &grok, Some(&claude)) {
+            Err(SurfacePolicyError::PluginExtensionsConflict { sources }) => {
+                assert!(
+                    sources.iter().any(|s| s.contains("install_dir")),
+                    "必须点名 install_dir 来源：{sources:?}"
+                );
+            }
+            other => panic!("外部 install_dir 必须阻断，得到 {other:?}"),
+        }
+        // 仅 $GROK_HOME/plugins 有插件：阻断。
+        std::fs::create_dir_all(grok.join("plugins").join("evil")).unwrap();
+        assert!(matches!(
+            scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude)),
+            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
+        ));
+        std::fs::remove_dir_all(grok.join("plugins")).unwrap();
+        // 仅 ~/.claude/plugins 非空：阻断。
+        std::fs::create_dir_all(claude.join("plugins")).unwrap();
+        std::fs::write(claude.join("plugins").join("installed_plugins.json"), "{}").unwrap();
+        assert!(matches!(
+            scan_plugin_sources(empty, empty, no_cli, &install, &grok, Some(&claude)),
+            Err(SurfacePolicyError::PluginExtensionsConflict { .. })
+        ));
+    }
+
+    // 2c-11（复核七 P0）：install_dir 解析与引擎逐分支一致——
+    // `~/x` 展开到 home、绝对路径原样、未配置回落默认。旧实现把
+    // `~/external-plugins` 当字面相对路径，本测试必红。
+    #[test]
+    fn install_dir_resolution_matches_engine_semantics() {
+        let grok = std::path::Path::new("G:/grok-home");
+        // 未配置 → $GROK_HOME/installed-plugins。
+        assert_eq!(
+            resolve_install_dir_like_engine(None, grok).unwrap(),
+            grok.join("installed-plugins")
+        );
+        // 绝对路径原样。
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("D:/external-plugins"), grok).unwrap(),
+            std::path::PathBuf::from("D:/external-plugins")
+        );
+        // ~/x → home_dir()/x（与引擎 dirs::home_dir 的 USERPROFILE 路径
+        // 等价；本测试环境必有 home）。
+        let home = std::env::home_dir().expect("测试环境必有 home");
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("~/external-plugins"), grok).unwrap(),
+            home.join("external-plugins"),
+            "~ 必须展开为 home，不得当字面相对路径"
+        );
+        // 非 ~/ 前缀的波浪线（如 ~x）不展开——引擎 strip_prefix 同语义。
+        assert_eq!(
+            resolve_install_dir_like_engine(Some("~x"), grok).unwrap(),
+            std::path::PathBuf::from("~x")
+        );
+    }
+
+    // 2c-10（复核四 P0-3 漂移锁）：镜像清单对齐的引擎 discovery 来源
+    // 文件字节哈希。引擎升级（lock bump）改动这些文件时本测试必红，
+    // 强制重审 scan_plugin_sources 的来源清单后更新哈希。
+    #[test]
+    fn plugin_discovery_source_drift_lock() {
+        use sha2::{Digest, Sha256};
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../grok-build/crates/codegen");
+        let mut hasher = Sha256::new();
+        // agent 侧：discovery 来源；shell 侧：有效配置合并、registry
+        // fan-out/reload、slash gate（复核五 P1 扩容清单）。
+        for f in [
+            "xai-grok-agent/src/plugins/discovery.rs",
+            "xai-grok-agent/src/plugins/marketplace.rs",
+            "xai-grok-agent/src/plugins/install_registry.rs",
+            "xai-grok-shell/src/config/mod.rs",
+            "xai-grok-shell/src/agent/config.rs",
+            "xai-grok-shell/src/session/slash_commands.rs",
+            "xai-grok-shell/src/session/acp_session_impl/hooks_plugins.rs",
+            "xai-grok-shell/src/agent/mvp_agent/agent_ops.rs",
+            // 复核七：有效配置合并语义与 GROK_HOME/home 路径语义。
+            "xai-grok-config/src/loader.rs",
+            "xai-grok-config/src/paths.rs",
+            // 复核十：fan-out 真实控制面——broadcast 本体、文本 /plugins
+            // 路径（仅当前会话）、两个 ACP 广播入口（x.ai/plugins/action
+            // 与 x.ai/plugins/reload，实测 plugins.rs:161 / session_admin.rs:51）。
+            "xai-grok-shell/src/agent/mvp_agent/mod.rs",
+            "xai-grok-shell/src/session/acp_session_impl/slash_exec.rs",
+            "xai-grok-shell/src/extensions/plugins.rs",
+            "xai-grok-shell/src/extensions/session_admin.rs",
+        ] {
+            let bytes = std::fs::read(crates.join(f))
+                .unwrap_or_else(|e| panic!("读引擎 {f} 失败：{e}"));
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        let digest = format!("{:x}", hasher.finalize());
+        assert_eq!(
+            digest, PLUGIN_DISCOVERY_SOURCES_SHA256,
+            "引擎插件 discovery 来源文件变了：重审 scan_plugin_sources \
+             镜像清单（discovery.rs 文档的来源序），确认后更新此哈希"
+        );
+    }
+
+    // 2c-4：startupHints 形状（skipGitStatus 为引擎 StartupHints 真实字段，
+    // serde camelCase）。
+    #[test]
+    fn chat_startup_hints_shape() {
+        assert_eq!(
+            chat_startup_hints(),
+            serde_json::json!({ "skipGitStatus": true })
+        );
+    }
+
+    #[test]
+    fn v019_wire_only_accepts_chat_and_code() {
+        assert_eq!(NewSurfaceIntent::from_wire(None), Ok(NewSurfaceIntent::Code));
+        assert_eq!(
+            NewSurfaceIntent::from_wire(Some("chat")),
+            Ok(NewSurfaceIntent::Chat)
+        );
+        assert!(matches!(
+            NewSurfaceIntent::from_wire(Some("work")),
+            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "work"
+        ));
+    }
+}

@@ -22,6 +22,7 @@ import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
+import { parseSurface, surfaceSwitchRequiresNewSession, type SurfaceKind } from "./surface";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -236,6 +237,11 @@ function buildSuggestions(
 
 function App() {
   const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
+  const [surface, setSurface] = useState<SurfaceKind>(() =>
+    parseSurface(localStorage.getItem("wancode-surface")),
+  );
+  const surfaceRef = useRef(surface);
+  surfaceRef.current = surface;
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
   // 结构化下拉选项（v0.18.7-B）：value=catalog key，显示 name+端点。
@@ -1104,10 +1110,14 @@ function App() {
     // 工作区可能在启动后才由恢复会话/文件夹选择器校正。只在首次挂载刷新会
     // 留下旧工作区的结果；更隐蔽的是一次较晚返回的旧请求会覆盖正确列表，
     // 于是磁盘和后端都有旧会话，侧栏却只剩刚创建的那一个。
-    if (workspace) refreshSessions(workspace);
+    if (surface === "code" && workspace) refreshSessions(workspace);
+    if (surface === "chat" && !sessionIdRef.current) {
+      setSessions([]);
+      setMcpServers([]);
+    }
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace]);
+  }, [workspace, surface]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1408,19 +1418,25 @@ function App() {
         current_model_id?: string;
         cwd: string;
         model_block?: unknown; model_options?: unknown; caps_config_issue?: unknown;
+        surface_kind: SurfaceKind;
+        policy_version: number;
       }>(
         "agent_start",
         {
           workspace: wsPath,
           model,
           resume: resume ?? null,
+          surface,
         },
       );
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
+      const resolvedSurface = parseSurface(r.surface_kind);
+      setSurface(resolvedSurface);
+      localStorage.setItem("wancode-surface", resolvedSurface);
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
       // 显示的是另一个仓库的改动，stash/丢弃会打错目标）。
-      if (r.cwd) {
+      if (r.cwd && resolvedSurface === "code") {
         setWorkspace(r.cwd);
         localStorage.setItem("wancode-workspace", r.cwd);
       }
@@ -1436,14 +1452,20 @@ function App() {
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
       // 加载结果一起回来，直接进选择器状态。
       setModelBlock(parseModelBlock(r.model_block));
-      refreshSessions(wsPath);
-      invoke<string[]>("list_workspace_files", { workspace: wsPath })
-        .then(setFileList)
-        .catch(() => {});
-      refreshGit();
-      refreshTasks();
-      refreshMcpLive();
-      refreshOtherRecent(wsPath);
+      refreshSessions(r.cwd || wsPath);
+      if (resolvedSurface === "code") {
+        invoke<string[]>("list_workspace_files", { workspace: wsPath })
+          .then(setFileList)
+          .catch(() => {});
+        refreshGit();
+        refreshTasks();
+        refreshMcpLive();
+        refreshOtherRecent(wsPath);
+      } else {
+        setFileList([]);
+        setGitInfo(null);
+        setMcpServers([]);
+      }
       // ↑ 历史（引擎按 cwd 维护，最近优先）
       invoke<string[]>("agent_prompt_history", { workspace: wsPath })
         .then((h) => {
@@ -1974,6 +1996,7 @@ function App() {
   };
 
   const toggleWorkbench = () => {
+    if (surface !== "code") return;
     const next = !showWorkbench;
     setShowWorkbench(next);
     if (next) refreshWorkbench();
@@ -1988,10 +2011,10 @@ function App() {
         setShowPalette((v) => !v);
       } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "d") {
         e.preventDefault();
-        paletteRef.current?.toggleWorkbench();
+        if (surfaceRef.current === "code") paletteRef.current?.toggleWorkbench();
       } else if (e.ctrlKey && e.key === "`") {
         e.preventDefault();
-        setShowTerminal((v) => !v);
+        if (surfaceRef.current === "code") setShowTerminal((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -2010,19 +2033,19 @@ function App() {
         setSidebarTab("sessions");
       },
     },
-    { id: "open-folder", label: t.sugOpenFolder, run: pickFolderAndConnect },
-    { id: "workbench", label: t.wbTooltip, hint: "Ctrl+Shift+D", disabled: !sessionId, run: toggleWorkbench },
+    { id: "open-folder", label: t.sugOpenFolder, disabled: surface !== "code", run: pickFolderAndConnect },
+    { id: "workbench", label: t.wbTooltip, hint: "Ctrl+Shift+D", disabled: surface !== "code" || !sessionId, run: toggleWorkbench },
     {
       id: "terminal",
       label: t.paletteTerminal,
       hint: "Ctrl+`",
-      disabled: !sessionId,
+      disabled: surface !== "code" || !sessionId,
       run: () => setShowTerminal((v) => !v),
     },
     {
       id: "git",
       label: t.git,
-      disabled: !sessionId,
+      disabled: surface !== "code" || !sessionId,
       run: () => {
         refreshGit();
         setShowGit(true);
@@ -2068,6 +2091,32 @@ function App() {
           <div className="brand-mark">W</div>
           <div className="brand-name">WanCode</div>
         </div>
+        <div className="surface-switch" role="group" aria-label={lang === "zh" ? "会话层" : "Session surface"}>
+          {(["chat", "code"] as const).map((next) => (
+            <button
+              key={next}
+              className={surface === next ? "active" : ""}
+              aria-pressed={surface === next}
+              onClick={() => {
+                if (surface === next) return;
+                if (surfaceSwitchRequiresNewSession(surface, next, sessionId)) {
+                  setSessionId("");
+                  sessionIdRef.current = "";
+                  setItems([]);
+                  setModelBlock(null);
+                  setShowGit(false);
+                  setShowWorkbench(false);
+                  setShowTerminal(false);
+                  setSidebarTab("sessions");
+                }
+                setSurface(next);
+                localStorage.setItem("wancode-surface", next);
+              }}
+            >
+              {next === "chat" ? "Chat" : "Code"}
+            </button>
+          ))}
+        </div>
         <div style={{ flex: 1 }} />
         {sessionId && (
           <span className="connected-pill">
@@ -2078,7 +2127,7 @@ function App() {
         {/* 只在真有后台活动时出现 —— 平时不占位置。
             定时任务也要算进来：否则只有定时任务时按钮不出现，面板打不开，
             等于这个功能不存在。 */}
-        {sessionId && bgTasks.length + subagents.length + worktrees.length + Object.keys(schedTasks).length > 0 && (
+        {surface === "code" && sessionId && bgTasks.length + subagents.length + worktrees.length + Object.keys(schedTasks).length > 0 && (
           <button
             className="icon-btn tasks-btn"
             title={t.tasksTitle}
@@ -2093,12 +2142,12 @@ function App() {
             </span>
           </button>
         )}
-        {sessionId && (
+        {surface === "code" && sessionId && (
           <button className="icon-btn" title={t.rewindTooltip} onClick={openRewind}>
             <IconRewind />
           </button>
         )}
-        {sessionId && (
+        {surface === "code" && sessionId && (
           <button
             className={`icon-btn ${showWorkbench ? "active" : ""}`}
             title={t.wbTooltip}
@@ -2111,7 +2160,7 @@ function App() {
             <IconColumns size={15} />
           </button>
         )}
-        {sessionId && (
+        {surface === "code" && sessionId && (
           <button
             className="icon-btn"
             title={t.git}
@@ -2210,28 +2259,28 @@ function App() {
 
       <SettingsModal {...{ showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, testModel, theme, updateMsg, version, workspace, hooks, t }} />
 
-      <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, prStatus, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />
+      {surface === "code" && <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, prStatus, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />}
 
 
-      <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t }} />
+      {surface === "code" && <TasksPanel {...{ bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t }} />}
 
 
 
 
       <div className="body-row">
-        <Sidebar {...{ sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang }} />
+        <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang }} />
 
         <div className="main-col">
       <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t }} />
 
       <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t }} />
 
-      <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />
+      {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
-        <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />
+        {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />}
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>
