@@ -432,8 +432,12 @@ mod tests {
     /// 重载」决策文件（agent 3 + shell 4+1）的联合 sha256。引擎升级后
     /// 按测试指引重审并更新。注意（复核六）：漂移锁只防实现漂移，
     /// 不能替代会话级执行隔离——后者由真实链探针裁决。
+    // v0.19 intentional-delta（engine 2f480062e）：14 个受监视文件中，
+    // discovery / marketplace / install registry / 配置合并与路径解析均未变；
+    // 仅会话装配、broadcast、reload、slash 与扩展端点加入了经审计的
+    // local_extensions_disabled 隔离。重审后更新本基线。
     const PLUGIN_DISCOVERY_SOURCES_SHA256: &str =
-        "3d433ecb531aa2b612c4d3b6426395b1d61bf0e23c9fedcfb64b134a90ec83be";
+        "7c1ffe53db9e648d0cf7f61764c7498a41b30f1d2954f93351e8a5926185709b";
 
     // 2c-1：`_meta.agentProfile` 形状锁定——serialize → 引擎
     // AgentDefinition::from_json 往返，防形状漂移（终审硬约束 A）。
