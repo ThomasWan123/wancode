@@ -1,11 +1,11 @@
-# #126 迁移等价审计（复核定案 P0-1/P1）：独立于 rust job 并行运行，
+# #126 引擎变更审计（等价迁移 / intentional delta）：独立于 rust job 并行运行，
 # 仅在引擎输入（lock/双 patch/Cargo.lock 覆盖）或 bootstrap/审计脚本变化时触发；
 # B1–B4/收尾每个迁移 PR 都会因 vendor/** 变化而必然执行。
 #
 # 两个断言步：
 #   1) 负向门测试——verify 的每种错误状态必须非零退出且错误原因命中（fail-closed 实证）；
-#   2) 迁移前后两树 compare——同一 materializer 构造 before(基分支 vendor 输入)/after(本 PR
-#      vendor 输入) 两棵临时树，逐字节比对并输出可留档 JSON 摘要（artifact）。
+#   2) 同一 materializer 构造 before/after 两棵临时树；默认逐字节等价，lock 显式登记
+#      intentional-delta 时改走白名单与供应链哈希六项审计，均输出可留档 JSON artifact。
 name: engine-migration-audit
 
 on:
@@ -22,6 +22,7 @@ on:
       - "scripts/effective_tree_lib.ps1"
       - "scripts/migration_audit.ps1"
       - "scripts/test_audit_negative.ps1"
+      - "docs/design/v0.19-engine-file-whitelist.txt"
       - ".github/workflows/engine-migration-audit.yml"
   workflow_dispatch:
     inputs:
@@ -44,13 +45,21 @@ jobs:
       - name: 负向门测试（verify 错误状态必须红且原因正确）
         shell: pwsh
         run: powershell -File scripts/test_audit_negative.ps1
-      - name: 迁移前后两树等价审计（同一 materializer）
+      - name: 引擎变更审计（等价迁移 / intentional delta）
         shell: pwsh
         run: |
           $before = "${{ github.event.pull_request.base.sha }}"
           if (-not $before) { $before = "${{ inputs.before_sha }}" }
           if (-not $before) { $before = (git rev-parse origin/main).Trim() }
-          powershell -File scripts/migration_audit.ps1 -BeforeSha $before -OutFile migration-audit-summary.json
+          $modeLine = Get-Content vendor/grok-build.lock | Where-Object { $_ -match '^migration_audit_mode=' }
+          $mode = if ($modeLine) { ($modeLine -split '=', 2)[1].Trim() } else { "equivalent" }
+          if ($mode -eq "intentional-delta") {
+            powershell -File scripts/migration_audit.ps1 -Mode intentional-delta -BeforeSha $before -Whitelist docs/design/v0.19-engine-file-whitelist.txt -OutFile migration-audit-summary.json
+          } elseif ($mode -eq "equivalent") {
+            powershell -File scripts/migration_audit.ps1 -Mode equivalent -BeforeSha $before -OutFile migration-audit-summary.json
+          } else {
+            throw "未知 migration_audit_mode：$mode"
+          }
       - name: 上传审计摘要 artifact
         uses: actions/upload-artifact@v4
         if: always()

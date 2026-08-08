@@ -19,9 +19,16 @@
 #   effective_tree_sha256  有效树规范化清单摘要（排除 .git/、target/；
 #                          相对路径+文件字节哈希 → 排序清单 → 整体 sha256），
 #                          由 audit_effective_tree.ps1 hash 模式复算。
+#
+# 【G26 例外 · v0.19 §1.3】local_extensions_disabled 安全接口
+#   批准依据：docs/design/v0.19-layered-surfaces.md §1.3
+#   实证：docs/evidence/v019-2c-fanout-probe.log（fan-out 污染六阶段）
+#   本批为有意行为变化：effective_tree_sha256 与 commit 变更，等价审计
+#   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
-commit=63d4edab0ef79dbbf26a1fac1da0b24f6c16fc9f
+commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
+migration_audit_mode=intentional-delta
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
 cargo_lock_sha256=8e4405b08a3e096bcf60a667fa5e342834bdb0b5115fe005c398639f2cf5fc30
-effective_tree_sha256=ccb057fb4054a354957c63c746f487f7dd34ca90c3b62d7dd369e9459053869f
+effective_tree_sha256=872f6f79e790165af9a6bd21fbd467d89e1071d53c3ccadb05e537926e13a0c4
