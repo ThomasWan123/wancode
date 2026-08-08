@@ -65,6 +65,16 @@ crates/codegen/xai-grok-shell/src/session/acp_session_impl/session_setup.rs
 crates/codegen/xai-grok-shell/src/session/acp_session_impl/slash_exec.rs
 crates/codegen/xai-grok-shell/src/session/acp_session_impl/hook_dispatch.rs
 
+# ── 测试通道（仅 feature 门控） ──
+# SessionCommand 新增一个变体，仅在 local-extensions-test-support 下编译。
+# 它只携带命令文本与响应通道，**不含任何策略判断**：actor 收到后用真实命令表
+# 以 all_enabled() 解析（绕过 advertisement gate），再直接调用生产的
+# execute_builtin_slash_command。
+# 为何必须扩容而不是就地取巧：替代方案只能证明「解析与分类函数认为应拒绝」，
+# 无法证明生产 dispatch 确实在任何副作用之前调用了守卫——守卫被删除、后移或
+# 出现第二条调用路径时，那种测试仍会全绿。
+crates/codegen/xai-grok-shell/src/session/commands.rs
+
 # ── 扩展端点 ──
 crates/codegen/xai-grok-shell/src/extensions/plugins.rs
 crates/codegen/xai-grok-shell/src/extensions/hooks.rs
