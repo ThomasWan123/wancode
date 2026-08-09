@@ -2,58 +2,66 @@
 
 # WanCode
 
-**多模型桌面 AI 编码助手 · Multi-model desktop AI coding agent**
+**A multi-model desktop AI coding agent with separate Chat and Code surfaces.**
 
-支持智谱 GLM-5 / DeepSeek / 任意 OpenAI 兼容端点
-Zhipu GLM-5 · DeepSeek · any OpenAI-compatible endpoint
+Use Zhipu GLM, DeepSeek, or any OpenAI-compatible endpoint from one native desktop app.
+
+[![Latest release](https://img.shields.io/github/v/release/ThomasWan123/wancode)](https://github.com/ThomasWan123/wancode/releases/latest)
+[![CI](https://github.com/ThomasWan123/wancode/actions/workflows/ci.yml/badge.svg)](https://github.com/ThomasWan123/wancode/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/ThomasWan123/wancode)](LICENSE)
 
 </div>
 
 ---
 
-## 简介 / Overview
+## Overview
 
-WanCode 是一个类 Claude Code 的桌面 GUI 编码助手：理解代码库、读写文件、执行命令、Git 与 MCP 扩展，**核心区别是可以自由接入国产与第三方大模型**。
+WanCode is a native desktop coding agent inspired by Claude Code. It can understand a repository, read and edit files, run commands, review diffs, work with Git, and connect to external tools through MCP.
 
-WanCode is a Claude-Code-style desktop coding agent — it understands your codebase, reads/writes files, runs commands, and extends via MCP. Its distinguishing feature is **first-class support for third-party / Chinese LLMs**.
+Unlike single-provider clients, WanCode treats model choice as a first-class feature. You can use Zhipu GLM, DeepSeek, local gateways, or other OpenAI-compatible services without changing the application architecture.
 
-Agent 引擎复用了开源的 [grok-build](https://github.com/ThomasWan123/grok-build)（Apache 2.0），GUI 用 Tauri 2 + React 重写，模型层抽象为 OpenAI 兼容 Provider。
+The desktop client is built with Tauri 2, React, and TypeScript. Its Rust agent runtime is based on the open-source [grok-build](https://github.com/ThomasWan123/grok-build) project and is pinned through a reproducible, audited vendor manifest.
 
-## 功能 / Features
+## Current release: v0.19.0
 
-- 🤖 **多模型**：智谱 GLM-5.2 / GLM-5-Turbo / GLM-4-Flash、DeepSeek V3 / R1，或任意 OpenAI 兼容端点（Ollama、One-API 等）
-- 💬 **流式对话**：Markdown 渲染、思考过程折叠、工具调用卡片
-- 🔐 **权限审批**：每次文件修改前弹窗询问（询问 / 本会话允许 / 拒绝）
-- 📝 **Diff 展示**：文件改动以 diff 呈现，批准后才落盘
-- ⏪ **时光机回滚**：三种模式（对话 + 文件 / 仅对话 / 仅文件），基于引擎快照
-- 📊 **上下文用量**：实时 token 用量条
-- 🗂️ **会话管理**：历史侧栏、一键恢复重放、重命名、删除
-- 🔌 **MCP 可视化配置**：设置页增删 MCP 服务器（stdio / HTTP）
-- 🧠 **项目记忆**：自动注入工作区根目录的 `AGENTS.md`（兼容 `CLAUDE.md`、`.grok/rules/*.md`）
-- 🚀 **一键配置**：首启向导选卡贴 Key 即可用；连接测试通过才保存，绝无半配置
-- 🔍 **默认联网搜索**：智谱系配置后自动启用 web-search / web-reader MCP（配置零明文）
-- 🌐 **中英双语界面**
+[WanCode v0.19.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0) introduces explicit **Chat** and **Code** session surfaces.
 
-## 快速开始 / Quick Start
+| Surface | Intended use | Local capabilities |
+|---|---|---|
+| **Chat** | General questions, research, and web-assisted conversations | Uses a private application runtime directory and built-in web tools. Local plugins, disk hooks, MCP servers, LSP servers, plugin skills, plugin commands, and extension-enabled subagents are disabled for the complete session lifetime. |
+| **Code** | Repository work and software development | Keeps the full coding toolchain, workspace access, Git integration, terminal access, hooks, skills, MCP, LSP, plugins, and subagents. |
 
-> ⚠️ 请使用 **v0.12.1 及以上**版本。更早的版本在全新安装（从未配置过模型）时无法启动。
-> Use **v0.12.1+**. Earlier versions fail to launch on a fresh install.
+Surface identity is bound when a session is created and stored in a fail-closed WanCode sidecar. Restored sessions must resolve to their original surface, and the engine must explicitly confirm that the requested policy was applied before WanCode exposes the session handle.
 
-四步开始干活（无需碰任何配置文件）：
+Work and Cowork surfaces remain on the roadmap. They were intentionally deferred so v0.19 could ship the Chat and Code security boundary with complete lifecycle coverage.
 
-1. 从 [Releases](https://github.com/ThomasWan123/wancode/releases) 下载 `-setup.exe`（或 `.msi`）安装并启动
-2. 首次启动自动弹出向导：**选择你的服务商卡片**（GLM Coding Plan / 智谱开放平台 / DeepSeek，或自定义 OpenAI 兼容端点）
-3. **粘贴 API Key** —— 自动测试连接，通过才保存；智谱系 Key 会同时自动启用联网搜索（web-search MCP）
-4. **打开一个项目文件夹**，开始对话
+## Highlights
 
-Four steps, no config files: install → pick your provider card in the first-run wizard → paste an API key (connection-tested before saving; Zhipu keys also enable web-search MCP automatically) → open a project folder.
+- **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints.
+- **Streaming conversations** — Markdown rendering, collapsible reasoning, and tool-call cards.
+- **Approval controls** — ask, allow for the current session, or reject sensitive actions.
+- **Inline diff review** — inspect proposed file changes before they are written.
+- **Checkpoint rewind** — restore conversation state, files, or both.
+- **Session management** — search, resume, rename, delete, and replay previous sessions.
+- **Project context** — loads `AGENTS.md` and supports compatible project instruction files.
+- **Developer tools** — file browser, terminal, Git helpers, MCP configuration, hooks, skills, and image input where supported by the selected model.
+- **Safe first-run setup** — provider credentials are saved only after a successful connection test.
+- **Automatic updates** — signed Windows updater artifacts are published with each release.
 
-**常见错误 / Common pitfall**：智谱 **Coding Plan**（包月订阅）与**开放平台**（按量计费）是不同端点、Key 不通用。向导里分成两张卡片——按你实际购买的类型选。
-Zhipu's monthly *Coding Plan* and pay-as-you-go *Open Platform* use different endpoints with non-interchangeable keys — pick the card that matches what you bought.
+## Quick start
 
-### 高级：手工配置 / Advanced: manual config
+Prebuilt releases currently target Windows x64.
 
-不想用向导也可以直接编辑 `%USERPROFILE%\.grok\config.toml`（示例接入 DeepSeek）：
+1. Download the NSIS `-setup.exe` or MSI package from [GitHub Releases](https://github.com/ThomasWan123/wancode/releases/latest).
+2. Launch WanCode and choose a provider in the first-run wizard.
+3. Paste your API key. WanCode tests the connection before saving the configuration.
+4. Choose **Chat** for a restricted conversation session, or open a project and choose **Code** for the complete development toolchain.
+
+> **Zhipu endpoint note:** the monthly GLM Coding Plan and the pay-as-you-go Open Platform use different endpoints and non-interchangeable API keys. Select the provider card that matches your subscription.
+
+### Manual model configuration
+
+The first-run wizard is recommended. Advanced users can edit `%USERPROFILE%\.grok\config.toml` directly:
 
 ```toml
 [models]
@@ -62,42 +70,71 @@ default = "deepseek-chat"
 [model.deepseek-chat]
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
-env_key = "DEEPSEEK_API_KEY"      # API Key 从环境变量读取，不落明文
+env_key = "DEEPSEEK_API_KEY"
 api_backend = "chat_completions"
 context_window = 65536
 ```
 
-然后设置对应的 `*_API_KEY` 环境变量。注意：删光所有模型后应用会回到首次运行向导。
+Set the referenced environment variable before launching WanCode. Removing every configured model returns the application to the first-run wizard.
 
-## 从源码构建 / Build from source
+## Security model
 
-需要：Rust (MSVC toolchain)、Node.js、[protoc](https://github.com/protocolbuffers/protobuf/releases)。引擎 `grok-build` 由 bootstrap 脚本自动克隆到本仓库的**兄弟目录**并固定到 `vendor/grok-build.lock` 指定的 commit（含 Windows protoc 补丁）：
+WanCode applies the active surface policy in the Rust backend; the frontend only displays the selected surface. Chat isolation is enforced per session inside the engine and covers initial setup, restore, reload, broadcast, hooks, MCP, LSP, plugin commands, and subagent creation.
+
+The policy is designed to fail closed on missing, corrupt, unsupported, or conflicting session bindings. It does not claim to protect against an attacker who already controls the local operating-system account.
+
+See [Security sandbox assessment](docs/security-sandbox-assessment.md) and the [v0.19 design](docs/design/v0.19-layered-surfaces.md) for the detailed threat model and acceptance criteria.
+
+## Build from source
+
+### Requirements
+
+- Rust with the MSVC toolchain
+- Node.js
+- [Protocol Buffers compiler (`protoc`)](https://github.com/protocolbuffers/protobuf/releases)
+- Visual Studio 2022 LLVM tools for `lld-link`
+
+The bootstrap script clones the engine into a sibling directory, checks out the exact commit registered in `vendor/grok-build.lock`, applies the audited wiring input, and validates the resulting effective tree.
 
 ```powershell
-powershell -File scripts/bootstrap.ps1    # 检查工具链 + 克隆/固定引擎 + npm install
+powershell -File scripts/bootstrap.ps1
 
-# Windows：用 lld-link（VS2022 LLVM 组件）绕过 MSVC PDB 上限，并扩大栈
-$env:RUSTFLAGS="-C link-arg=/STACK:16777216"
-$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="lld-link"
-npm run tauri build      # 出 MSI + NSIS 安装包
-# 开发调试：npm run tauri dev
-# 引擎冒烟：powershell -File scripts/smoke.ps1
+$env:RUSTFLAGS = "-C link-arg=/STACK:16777216"
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link"
+
+npm run tauri build
 ```
 
-## 技术栈 / Tech Stack
+Useful development commands:
 
-| 层 | 技术 |
+```powershell
+npm run tauri dev
+npm test
+powershell -File scripts/smoke.ps1
+```
+
+## Architecture
+
+| Layer | Technology |
 |---|---|
-| 桌面框架 | Tauri 2 |
-| 前端 | React 18 + TypeScript + Vite |
-| Agent 引擎 | [grok-build](https://github.com/ThomasWan123/grok-build) crates (Rust) |
-| 模型接入 | OpenAI 兼容 Provider 抽象层 |
-| 通信 | Agent Client Protocol (ACP) over in-process channel |
+| Desktop shell | Tauri 2 |
+| Frontend | React 18, TypeScript, Vite |
+| Agent runtime | [grok-build](https://github.com/ThomasWan123/grok-build) Rust crates |
+| Model integration | OpenAI-compatible provider abstraction |
+| Agent transport | Agent Client Protocol (ACP) over an in-process channel |
 
-## 致谢 / Acknowledgements
+## Project status
 
-核心 Agent 运行时基于 **[grok-build](https://github.com/ThomasWan123/grok-build)**，遵循 Apache License 2.0。详见 [NOTICE](NOTICE)。
+- **Latest stable release:** [v0.19.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0)
+- **Available surfaces:** Chat and Code
+- **Planned surfaces:** Work and Cowork
+- **Platform:** Windows x64
+- **License:** Apache License 2.0
 
-## 许可 / License
+## Acknowledgements
+
+WanCode's core agent runtime is based on [grok-build](https://github.com/ThomasWan123/grok-build), distributed under the Apache License 2.0. See [NOTICE](NOTICE) for attribution details.
+
+## License
 
 [Apache License 2.0](LICENSE) © WanCode contributors
