@@ -581,16 +581,12 @@ pub(crate) async fn start_inner_with_intent(
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
-    // 的 [skills].disabled 它看不见——引擎没有任何回灌路径。开一个会话就补
-    // 发一次 refresh-baseline，让它立刻从磁盘配置重新同步。失败无所谓：
-    // 最坏就是退回旧行为。
+    // 的 [skills].disabled 它看不见——引擎没有任何回灌路径。刷新只是
+    // best-effort 的后置维护，绝不能卡住已经完成的会话发布：真实 Windows
+    // 运行曾在会话已落盘、MCP 全健康后永久停在 UI "Starting…"，因为这里
+    // 同步等待一个未回包的 ext 请求。后台任务自身仍有硬超时，避免泄漏。
     if !is_chat {
-        let raw = serde_json::value::to_raw_value(&serde_json::json!({})).expect("static json");
-        let _ = acp_send(
-            acp::ExtRequest::new("x.ai/skills/refresh-baseline".to_string(), raw.into()),
-            &acp_tx,
-        )
-        .await as Result<acp::ExtResponse, _>;
+        schedule_skill_baseline_refresh(acp_tx.clone());
     }
 
     Ok(StartResult {
@@ -605,6 +601,47 @@ pub(crate) async fn start_inner_with_intent(
         policy_version: crate::surface::derive_effective_policy(surface_binding.surface_kind)
             .policy_version,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SkillBaselineRefreshOutcome {
+    Succeeded,
+    Failed(String),
+    TimedOut,
+}
+
+async fn refresh_skill_baseline_with_timeout(
+    acp_tx: AcpAgentTx,
+    timeout: std::time::Duration,
+) -> SkillBaselineRefreshOutcome {
+    let raw = serde_json::value::to_raw_value(&serde_json::json!({})).expect("static json");
+    match tokio::time::timeout(
+        timeout,
+        acp_send(
+            acp::ExtRequest::new("x.ai/skills/refresh-baseline".to_string(), raw.into()),
+            &acp_tx,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(_)) => SkillBaselineRefreshOutcome::Succeeded,
+        Ok(Err(error)) => SkillBaselineRefreshOutcome::Failed(error.to_string()),
+        Err(_) => SkillBaselineRefreshOutcome::TimedOut,
+    }
+}
+
+fn schedule_skill_baseline_refresh(acp_tx: AcpAgentTx) {
+    tauri::async_runtime::spawn(async move {
+        match refresh_skill_baseline_with_timeout(acp_tx, std::time::Duration::from_secs(5)).await {
+            SkillBaselineRefreshOutcome::Succeeded => {}
+            SkillBaselineRefreshOutcome::Failed(error) => {
+                tracing::warn!(%error, "post-start skill baseline refresh failed");
+            }
+            SkillBaselineRefreshOutcome::TimedOut => {
+                tracing::warn!("post-start skill baseline refresh timed out");
+            }
+        }
+    });
 }
 
 fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
@@ -636,6 +673,29 @@ mod local_extensions_handshake_tests {
             serde_json::Value::Bool(true),
         );
         assert!(local_extensions_policy_applied(Some(&meta)));
+    }
+}
+
+#[cfg(test)]
+mod post_start_refresh_tests {
+    use super::{
+        SkillBaselineRefreshOutcome, refresh_skill_baseline_with_timeout,
+    };
+    use xai_acp_lib::AcpAgentTx;
+
+    #[tokio::test]
+    async fn a_nonresponsive_refresh_is_bounded() {
+        let (tx, _receiver): (AcpAgentTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+
+        let outcome = refresh_skill_baseline_with_timeout(
+            tx,
+            std::time::Duration::from_millis(25),
+        )
+        .await;
+
+        assert_eq!(outcome, SkillBaselineRefreshOutcome::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
 
