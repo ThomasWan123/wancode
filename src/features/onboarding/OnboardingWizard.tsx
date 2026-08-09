@@ -16,7 +16,7 @@ export interface OnboardingProps {
 
 const PRESETS = [
   ["glm-coding", "GLM Coding Plan", "presetGlmCoding"],
-  ["glm-open", "智谱开放平台", "presetGlmOpen"],
+  ["glm-open", "Zhipu Open Platform", "presetGlmOpen"],
   ["deepseek", "DeepSeek", "presetDeepseek"],
 ] as const;
 

@@ -722,6 +722,16 @@ Remove the worktree?`,
 
 export const STRINGS: Record<Lang, typeof zh> = { zh, en };
 
+const LEGACY_UNTITLED_TITLES = new Set(["(未命名会话)", "(untitled session)"]);
+
+/** Render historic placeholder titles using the currently selected language. */
+export function displaySessionTitle(
+  title: string | null | undefined,
+  localizedUntitled: string,
+): string {
+  return !title || LEGACY_UNTITLED_TITLES.has(title) ? localizedUntitled : title;
+}
+
 export function loadLang(): Lang {
   return (localStorage.getItem("wancode-lang") as Lang) || "zh";
 }

@@ -1,6 +1,7 @@
 /* v0.13 拆分：左侧栏（导航/最近会话/文件树/搜索/工作区切换）。步 A 透传。
    红线：工作区标签以会话真实 cwd 为准（#83），不要自行从 localStorage 推导。 */
 import { invoke } from "@tauri-apps/api/core";
+import { displaySessionTitle } from "../../i18n";
 import {
   IconFolder, IconGitBranch, IconPlus, IconSearch, IconChevron,
   IconFile, IconFolderClosed, IconSettings,  IconPencil, IconTrash, IconClipboard,
@@ -27,7 +28,9 @@ export function Sidebar(props: Record<string, any>) {
               className={`session-item ${s.session_id === sessionId ? "active" : ""}`}
               onClick={() => !starting && startSession(s.session_id)}
             >
-              <div className="session-title">{s.title || t.untitledSession}</div>
+              <div className="session-title">
+                {displaySessionTitle(s.title, t.untitledSession)}
+              </div>
               <div className="session-meta">{s.updated_at.slice(0, 16).replace("T", " ")}</div>
             </button>
           ))}

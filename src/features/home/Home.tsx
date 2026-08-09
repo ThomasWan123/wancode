@@ -2,6 +2,7 @@
    步 A 透传。红线：首页跨项目列表刻意排除当前工作区——左栏已经列了，
    重复列就是两栏打架（踩过）。buildSuggestions/baseName 为 App 层纯函数，以 prop 注入。 */
 import { IconClipboard, IconGitBranch } from "../../icons";
+import { displaySessionTitle } from "../../i18n";
 
 export function Home(props: Record<string, any>) {
   const { buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t } = props;
@@ -47,7 +48,7 @@ export function Home(props: Record<string, any>) {
                 >
                   <span className="home-recent-proj">{baseName(s.path)}</span>
                   <span className="home-recent-title">
-                    {s.title || t.untitledSession}
+                    {displaySessionTitle(s.title, t.untitledSession)}
                   </span>
                   {s.branch && (
                     <span className="home-recent-branch">

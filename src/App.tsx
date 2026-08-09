@@ -1241,7 +1241,7 @@ function App() {
     unsubs.push(
       listen<any>("agent://permission", (e) => {
         const p = e.payload;
-        const title = p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "工具调用请求";
+        const title = p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "Tool call request";
         const toolKind = String(p.request?.toolCall?.kind ?? "");
         const options = (p.request?.options ?? []).map((o: any) => ({
           optionId: o.optionId,
@@ -1371,7 +1371,7 @@ function App() {
         setBusy(false);
         refreshTasks();
         if (e.payload && e.payload.ok === false) {
-          setError(String(e.payload.error ?? "未知错误"));
+          setError(String(e.payload.error ?? "Unknown error"));
         }
         refreshCtx();
       }),
@@ -1613,7 +1613,7 @@ function App() {
       const r = await invoke<any>("worktree_resume_session", { workspace });
       const newId = r?.sessionId;
       const cwd = r?.effectiveCwd || r?.worktreePath;
-      if (!newId || !cwd) throw new Error(`返回缺字段: ${JSON.stringify(r)}`);
+      if (!newId || !cwd) throw new Error(`Response is missing required fields: ${JSON.stringify(r)}`);
       setShowGit(false);
       setWorkspace(cwd);
       await startSession(newId, cwd);
