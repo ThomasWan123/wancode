@@ -1,0 +1,130 @@
+name: release-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      require_authenticode:
+        description: Fail unless every Windows artifact has a valid Authenticode signature
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-bundles:
+    name: Windows MSI and NSIS bundles
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -C link-arg=/STACK:16777216
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Materialize the pinned engine tree
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          powershell -File scripts/bootstrap.ps1 -Dest $engine
+          powershell -File scripts/audit_effective_tree.ps1 verify -Engine $engine
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the embedded frontend
+        run: npm run build
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "../grok-build -> target"
+
+      - name: Build Windows bundles
+        shell: pwsh
+        run: npm run tauri build
+
+      - name: Verify lockfile and bundle identities
+        id: verify
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          $engineLock = Join-Path $engine "Cargo.lock"
+          $vendorLock = Join-Path $PWD "vendor/grok-build-Cargo.lock"
+          $engineLockHash = (Get-FileHash $engineLock -Algorithm SHA256).Hash
+          $vendorLockHash = (Get-FileHash $vendorLock -Algorithm SHA256).Hash
+          if ($engineLockHash -ne $vendorLockHash) {
+            throw "Engine Cargo.lock changed during packaging."
+          }
+
+          $version = node -p "require('./package.json').version"
+          $bundleRoot = Join-Path $engine "target/release/bundle"
+          $artifacts = @(
+            Join-Path $bundleRoot "nsis/wancode_${version}_x64-setup.exe"
+            Join-Path $bundleRoot "msi/wancode_${version}_x64_en-US.msi"
+          )
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact)) {
+              throw "Expected bundle was not produced: $artifact"
+            }
+          }
+
+          $manifest = foreach ($artifact in $artifacts) {
+            $file = Get-Item -LiteralPath $artifact
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact
+            [ordered]@{
+              name = $file.Name
+              bytes = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+              authenticode_status = $signature.Status.ToString()
+              signer = if ($signature.SignerCertificate) {
+                $signature.SignerCertificate.Subject
+              } else {
+                $null
+              }
+            }
+          }
+
+          $summary = [ordered]@{
+            commit = "${{ github.sha }}"
+            version = $version
+            engine_lock_sha256 = $engineLockHash
+            require_authenticode = [bool]::Parse("${{ inputs.require_authenticode }}")
+            artifacts = @($manifest)
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release-candidate-manifest.json
+          $manifest | Format-Table -AutoSize
+
+          if ($summary.require_authenticode) {
+            $invalid = @($manifest | Where-Object { $_.authenticode_status -ne "Valid" })
+            if ($invalid.Count -gt 0) {
+              throw "Authenticode is required, but one or more artifacts are not validly signed."
+            }
+          }
+
+          "bundle_root=$bundleRoot" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Upload CI-only bundle evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: wancode-${{ steps.verify.outputs.version }}-windows-ci-only-${{ github.sha }}
+          path: |
+            ${{ steps.verify.outputs.bundle_root }}/nsis/*.exe
+            ${{ steps.verify.outputs.bundle_root }}/msi/*.msi
+            release-candidate-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
