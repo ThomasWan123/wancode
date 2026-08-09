@@ -1,7 +1,7 @@
 ﻿# 迁移前后有效树等价审计——可由仓库/CI 重演的 materializer（#126 B1 复核定案 P0-1）
 #
 # 用法：powershell -File scripts/migration_audit.ps1 -BeforeSha <迁移前 wancode commit>
-#                  [-Mode equivalent|intentional-delta]
+#                  [-Mode equivalent|intentional-delta|version-only]
 #                  [-Whitelist docs/design/v0.19-engine-file-whitelist.txt]
 #                  [-OutFile migration-audit-summary.json]
 #
@@ -19,7 +19,7 @@
 # 新 = grok-build-wiring.patch + grok-build-emergency.patch（B1 起）。
 param(
   [Parameter(Mandatory)][string]$BeforeSha,
-  [ValidateSet("equivalent", "intentional-delta")][string]$Mode = "equivalent",
+  [ValidateSet("equivalent", "intentional-delta", "version-only")][string]$Mode = "equivalent",
   [string]$Whitelist,
   [string]$OutFile = "migration-audit-summary.json"
 )
@@ -180,7 +180,7 @@ if ($Mode -eq "equivalent") {
   exit 0
 }
 
-# ── G26 intentional-delta：有意行为变化的白名单审计 ─────────────
+# ── 非等价模式共用：收集有效树差异 ─────────────────────────────
 $checks = [ordered]@{}
 $failures = [System.Collections.Generic.List[string]]::new()
 function Record-Check([string]$name, [bool]$ok, [string]$detail) {
@@ -188,7 +188,6 @@ function Record-Check([string]$name, [bool]$ok, [string]$detail) {
   if (-not $ok) { $script:failures.Add("${name}: $detail") }
 }
 
-$whitelistInfo = Read-DeltaWhitelist $Whitelist $treeBefore
 $beforeMap = Get-ManifestMap $linesBefore
 $afterMap = Get-ManifestMap $linesAfter
 $changed = [System.Collections.Generic.List[object]]::new()
@@ -203,12 +202,6 @@ foreach ($path in ($allPaths | Sort-Object)) {
   $changed.Add([ordered]@{ path = $path; change = $kind })
 }
 
-$outside = @($changed | Where-Object { $_.change -ne "added" -and -not $whitelistInfo.allowed.Contains($_.path) })
-$changedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-foreach ($entry in $changed) { [void]$changedPaths.Add($entry.path) }
-$unused = @($whitelistInfo.allowed | Where-Object { -not $changedPaths.Contains($_) } | Sort-Object)
-foreach ($path in $unused) { Write-Warning "白名单路径未改动：$path（须在 PR 描述说明）" }
-
 $beforeWiring = Join-Path $beforeDir "grok-build-wiring.patch"
 $afterWiring = Join-Path $root "vendor\grok-build-wiring.patch"
 $beforeCargo = Join-Path $beforeDir "grok-build-Cargo.lock"
@@ -217,6 +210,73 @@ $afterWiringSha = Get-FileSha $afterWiring
 $afterCargoSha = Get-FileSha $afterCargo
 $beforeWiringSha = if (Test-Path $beforeWiring) { Get-FileSha $beforeWiring } else { "missing" }
 $beforeCargoSha = Get-FileSha $beforeCargo
+
+# ── release version-only：只允许 Cargo.lock 的 wancode 版本变化 ─
+if ($Mode -eq "version-only") {
+  function Read-WanCodeLockVersion([string]$path) {
+    $raw = [System.IO.File]::ReadAllText($path)
+    $rx = [regex]'(?ms)(\[\[package\]\]\r?\nname = "wancode"\r?\nversion = ")([^"]+)(")'
+    $matches = $rx.Matches($raw)
+    if ($matches.Count -ne 1) { throw "Cargo.lock 中 wancode package 必须恰好一项：$path（实际 $($matches.Count)）" }
+    return [pscustomobject]@{
+      version = $matches[0].Groups[2].Value
+      normalized = $rx.Replace($raw, '${1}<WANCODE_VERSION>${3}')
+    }
+  }
+
+  $beforeLock = Read-WanCodeLockVersion $beforeCargo
+  $afterLock = Read-WanCodeLockVersion $afterCargo
+  $appVersion = (Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+  $onlyCargoLock = $changed.Count -eq 1 -and $changed[0].path -eq "Cargo.lock" -and $changed[0].change -eq "modified"
+
+  Record-Check "V1_engine_commit_unchanged" ($beforeCommit -eq $afterCommit) "before=$beforeCommit after=$afterCommit"
+  Record-Check "V2_only_cargo_lock_changed" $onlyCargoLock $(if ($changed.Count) { (($changed | ForEach-Object { "$($_.change):$($_.path)" }) -join ', ') } else { "无有效树差异" })
+  Record-Check "V3_lock_diff_is_only_wancode_version" ($beforeLock.normalized -ceq $afterLock.normalized -and $beforeLock.version -ne $afterLock.version) "before=$($beforeLock.version) after=$($afterLock.version)"
+  Record-Check "V4_lock_version_matches_app" ($afterLock.version -eq $appVersion) "lock=$($afterLock.version) app=$appVersion"
+  Record-Check "V5_wiring_unchanged" ($beforeWiringSha -eq $afterWiringSha -and $afterBuildManifest.wiring_patch_sha256 -eq $afterWiringSha) "before=$beforeWiringSha after=$afterWiringSha manifest=$($afterBuildManifest.wiring_patch_sha256)"
+  Record-Check "V6_effective_tree_registered" ($digestAfter -eq $afterBuildManifest.effective_tree_sha256 -and $afterBuildManifest.cargo_lock_sha256 -eq $afterCargoSha) "tree=$digestAfter manifest_tree=$($afterBuildManifest.effective_tree_sha256) lock=$afterCargoSha manifest_lock=$($afterBuildManifest.cargo_lock_sha256)"
+  Record-Check "V7_emergency_none" ($afterBuildManifest.emergency_patch_sha256 -eq "none" -and (Get-Item $afterEmergency).Length -eq 0) "manifest=$($afterBuildManifest.emergency_patch_sha256) bytes=$((Get-Item $afterEmergency).Length)"
+
+  $summary = [ordered]@{
+    mode                           = "version-only"
+    before_wancode_sha            = $before
+    after_wancode_sha             = $after
+    before_engine_commit          = $beforeCommit
+    after_engine_commit           = $afterCommit
+    before_version                = $beforeLock.version
+    after_version                 = $afterLock.version
+    file_count_before             = $linesBefore.Count
+    file_count_after              = $linesAfter.Count
+    before_effective_tree_sha256  = $digestBefore
+    after_effective_tree_sha256   = $digestAfter
+    changed_files                 = @($changed)
+    checks                        = $checks
+    pass                          = ($failures.Count -eq 0)
+  }
+  $summary | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 $OutFile
+  Write-Host "[migration-audit] version-only 摘要已写 $OutFile"
+  foreach ($name in $checks.Keys) {
+    $mark = if ($checks[$name].pass) { "PASS" } else { "FAIL" }
+    Write-Host "[migration-audit] $name=$mark — $($checks[$name].detail)"
+  }
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  if ($failures.Count) {
+    Write-Host "MIGRATION AUDIT FAIL：version-only 有 $($failures.Count) 项断言失败" -ForegroundColor Red
+    $failures | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+  }
+  Write-Host "MIGRATION AUDIT OK：version-only 七项全 PASS（$($beforeLock.version) → $($afterLock.version)）"
+  exit 0
+}
+
+# ── G26 intentional-delta：有意行为变化的白名单审计 ─────────────
+$whitelistInfo = Read-DeltaWhitelist $Whitelist $treeBefore
+
+$outside = @($changed | Where-Object { $_.change -ne "added" -and -not $whitelistInfo.allowed.Contains($_.path) })
+$changedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($entry in $changed) { [void]$changedPaths.Add($entry.path) }
+$unused = @($whitelistInfo.allowed | Where-Object { -not $changedPaths.Contains($_) } | Sort-Object)
+foreach ($path in $unused) { Write-Warning "白名单路径未改动：$path（须在 PR 描述说明）" }
 
 Record-Check "A1_engine_commit_changed" ($beforeCommit -ne $afterCommit) "before=$beforeCommit after=$afterCommit"
 Record-Check "A2_diff_within_whitelist" ($outside.Count -eq 0) $(if ($outside.Count) { ($outside.path -join ', ') } else { "$($changed.Count) 个差异文件均在白名单或为新增文件" })
