@@ -1,6 +1,10 @@
 name: release-candidate
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release-candidate.yml
   workflow_dispatch:
     inputs:
       require_authenticode:
@@ -101,7 +105,7 @@ jobs:
             commit = "${{ github.sha }}"
             version = $version
             engine_lock_sha256 = $engineLockHash
-            require_authenticode = [bool]::Parse("${{ inputs.require_authenticode }}")
+            require_authenticode = [bool]::Parse("${{ github.event_name == 'workflow_dispatch' && inputs.require_authenticode || false }}")
             artifacts = @($manifest)
           }
           $summary | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release-candidate-manifest.json
@@ -127,4 +131,3 @@ jobs:
             release-candidate-manifest.json
           if-no-files-found: error
           retention-days: 7
-
