@@ -2,6 +2,7 @@
    动作列表由 App 层组装传入（带 disabled 状态），这里只管过滤与选择。
    斜杠命令不进这里——输入框的 / 联想已有专门通路，两处重复会打架。 */
 import { useEffect, useRef, useState } from "react";
+import { ModalDialog } from "../dialogs/ModalDialog";
 
 export type PaletteAction = {
   id: string;
@@ -50,7 +51,7 @@ export function CommandPalette({
 
   return (
     <div className="modal-mask palette-mask" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+      <ModalDialog ariaLabel={t.paletteHint} className="palette">
         <input
           ref={inputRef}
           className="palette-input"
@@ -93,7 +94,7 @@ export function CommandPalette({
             </div>
           ))}
         </div>
-      </div>
+      </ModalDialog>
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { saveLang, type Lang } from "../../i18n";
 import { IconX, IconPencil } from "../../icons";
+import { ModalDialog } from "../dialogs/ModalDialog";
 
 import { parseResolvedCaps, type Cap } from "../../caps";
 
@@ -32,7 +33,11 @@ export function SettingsModal(props: Record<string, any>) {
     <>
       {showSettings && (
         <div className="modal-mask" onClick={() => setShowSettings(false)}>
-          <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog
+            ariaLabel={t.settingsTitle}
+            className="modal settings-modal"
+            onEscape={() => setShowSettings(false)}
+          >
             <nav className="settings-nav">
               <div className="settings-nav-title">{t.settingsTitle}</div>
               {([
@@ -553,7 +558,7 @@ export function SettingsModal(props: Record<string, any>) {
               <button onClick={() => setShowSettings(false)}>{t.close}</button>
             </div>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
     </>

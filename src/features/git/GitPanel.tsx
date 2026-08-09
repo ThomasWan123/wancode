@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { activateOnKeyboard } from "../../accessibility";
 import { IconGitBranch } from "../../icons";
+import { ModalDialog } from "../dialogs/ModalDialog";
 
 const baseName = (p: string) => p.split(/[\/]/).filter(Boolean).pop() ?? p;
 
@@ -13,7 +14,7 @@ export function GitPanel(props: Record<string, any>) {
     <>
       {showGit && (
         <div className="modal-mask" onClick={() => setShowGit(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog ariaLabel={t.git} onEscape={() => setShowGit(false)}>
             <div className="modal-title panel-title"><IconGitBranch size={16} /> {t.git}</div>
             {gitInfo?.isRepo === false || !gitInfo ? (
               <div className="modal-body">{t.gitNotRepo}</div>
@@ -264,7 +265,7 @@ export function GitPanel(props: Record<string, any>) {
               <span />
               <button onClick={() => setShowGit(false)}>{t.close}</button>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
     </>
