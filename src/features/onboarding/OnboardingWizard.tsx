@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 /// 首次运行向导（v0.12.1 引入，v0.13 拆分自 App.tsx）。
@@ -20,6 +20,9 @@ const PRESETS = [
   ["deepseek", "DeepSeek", "presetDeepseek"],
 ] as const;
 
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function OnboardingWizard({
   t,
   onConfigured,
@@ -32,6 +35,38 @@ export function OnboardingWizard({
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+  }, [step]);
+
+  function keepFocusInDialog(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [],
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   async function testAndSave() {
     setBusy(true);
@@ -55,8 +90,15 @@ export function OnboardingWizard({
 
   return (
     <div className="modal-mask">
-      <div className="modal ob-modal">
-        <div className="ob-title">{t.obWelcome}</div>
+      <div
+        ref={dialogRef}
+        className="modal ob-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="onboarding-title"
+        onKeyDown={keepFocusInDialog}
+      >
+        <div id="onboarding-title" className="ob-title">{t.obWelcome}</div>
         <div className="ob-sub">{step === 1 ? t.obStep1Sub : t.obStep2Sub}</div>
         {step === 1 && (
           <>
