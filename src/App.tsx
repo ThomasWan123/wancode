@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { activateOnKeyboard } from "./accessibility";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -120,7 +121,15 @@ function TreeView({ node, onPick, depth = 0 }: { node: TreeNode; onPick: (p: str
             <div
               className="tree-row"
               style={{ paddingLeft: 8 + depth * 12 }}
+              role="button"
+              tabIndex={0}
+              aria-expanded={isDir ? !!open[c.path] : undefined}
               onClick={() => (isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path))}
+              onKeyDown={(event) =>
+                activateOnKeyboard(event, () =>
+                  isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path),
+                )
+              }
             >
               <span className="tree-icon">{isDir ? <IconFolderClosed size={13} /> : <IconFile size={13} />}</span>
               <span className="tree-name">{c.name}</span>

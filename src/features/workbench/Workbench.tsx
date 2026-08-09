@@ -5,6 +5,7 @@
    - 引擎响应是 {result:{files:[...]}} 信封，先判 error 再取 result；
    - 超大 patch 前端截断显示（引擎侧传 maxPatchBytes 会把整个请求打死）。 */
 import { IconX } from "../../icons";
+import { activateOnKeyboard } from "../../accessibility";
 
 const PATCH_RENDER_LIMIT = 4000; // 行数上限：再大就只显示头部 + 提示
 
@@ -92,7 +93,15 @@ function FileTab(props: Record<string, any>) {
       {!wbFilePath ? (
         <div className="wb-body">
           {hits.slice(0, 400).map((p) => (
-            <div key={p} className="wb-file-row" title={p} onClick={() => openWbFile(p)}>
+            <div
+              key={p}
+              className="wb-file-row"
+              title={p}
+              role="button"
+              tabIndex={0}
+              onClick={() => openWbFile(p)}
+              onKeyDown={(event) => activateOnKeyboard(event, () => openWbFile(p))}
+            >
               {p}
             </div>
           ))}
@@ -100,7 +109,13 @@ function FileTab(props: Record<string, any>) {
         </div>
       ) : (
         <div className="wb-body">
-          <div className="wb-file-row wb-file-back" onClick={() => openWbFile(null)}>
+          <div
+            className="wb-file-row wb-file-back"
+            role="button"
+            tabIndex={0}
+            onClick={() => openWbFile(null)}
+            onKeyDown={(event) => activateOnKeyboard(event, () => openWbFile(null))}
+          >
             ← {wbFilePath}
           </div>
           {wbFileLoading && <div className="sidebar-empty">{t.loading}</div>}
@@ -331,7 +346,15 @@ export function Workbench(props: Record<string, any>) {
           const open = wbOpenPaths.has(f.path);
           return (
             <div key={f.path} className="wb-file">
-              <div className="wb-file-head" onClick={() => toggle(f.path)} title={f.path}>
+              <div
+                className="wb-file-head"
+                role="button"
+                tabIndex={0}
+                aria-expanded={open}
+                onClick={() => toggle(f.path)}
+                onKeyDown={(event) => activateOnKeyboard(event, () => toggle(f.path))}
+                title={f.path}
+              >
                 <span className={`wb-chev ${open ? "open" : ""}`}>▸</span>
                 <span className={`wb-badge ${f.type}`}>{(f.type ?? "?")[0].toUpperCase()}</span>
                 <span className="wb-file-path">{f.path}</span>

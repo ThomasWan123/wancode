@@ -2,6 +2,7 @@
    红线提醒：worktree apply 一律 merge 模式；所有 git 操作走显式 gitRoot 通道（#83）。 */
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { activateOnKeyboard } from "../../accessibility";
 import { IconGitBranch } from "../../icons";
 
 const baseName = (p: string) => p.split(/[\/]/).filter(Boolean).pop() ?? p;
@@ -54,7 +55,13 @@ export function GitPanel(props: Record<string, any>) {
                   <div
                     className={`git-pr-row ${String(prStatus.state ?? "").toLowerCase()}`}
                     title={prStatus.url}
+                    role={prStatus.url ? "link" : undefined}
+                    tabIndex={prStatus.url ? 0 : undefined}
                     onClick={() => prStatus.url && openUrl(prStatus.url).catch(() => {})}
+                    onKeyDown={(event) =>
+                      prStatus.url &&
+                      activateOnKeyboard(event, () => openUrl(prStatus.url).catch(() => {}))
+                    }
                   >
                     <span className="git-pr-badge">
                       PR #{prStatus.number} · {prStatus.state}

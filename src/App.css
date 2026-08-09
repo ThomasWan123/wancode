@@ -488,6 +488,17 @@ button.ghost.small {
   background: var(--bg2);
 }
 
+.tree-row:focus-visible,
+.wb-file-row:focus-visible,
+.wb-file-head:focus-visible,
+.session-item[role="button"]:focus-visible,
+.queue-text[role="button"]:focus-visible,
+.grep-file-head[role="button"]:focus-visible,
+.git-pr-row[role="link"]:focus-visible {
+  outline: 2px solid var(--accent, #58a6ff);
+  outline-offset: -2px;
+}
+
 .tree-icon {
   flex-shrink: 0;
   font-size: 12px;

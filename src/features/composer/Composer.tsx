@@ -4,6 +4,7 @@
    - ↑/↓ 历史调取只在无候选弹窗时接管，histIdxRef/draftRef 语义保持在 App 层。 */
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { activateOnKeyboard } from "../../accessibility";
 import { assertNever, type AmbiguousCandidate, type ModelBlock } from "../../modelBlock";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
@@ -150,7 +151,12 @@ export function Composer(props: Record<string, any>) {
                   <span
                     className="queue-text"
                     title={t.queueEdit}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setEditingQueueId(q.id)}
+                    onKeyDown={(event) =>
+                      activateOnKeyboard(event, () => setEditingQueueId(q.id))
+                    }
                   >
                     {q.text}
                   </span>

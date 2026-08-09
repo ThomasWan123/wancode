@@ -2,6 +2,7 @@
    红线：工作区标签以会话真实 cwd 为准（#83），不要自行从 localStorage 推导。 */
 import { invoke } from "@tauri-apps/api/core";
 import { displaySessionTitle } from "../../i18n";
+import { activateOnKeyboard } from "../../accessibility";
 import {
   IconFolder, IconGitBranch, IconPlus, IconSearch, IconChevron,
   IconFile, IconFolderClosed, IconSettings,  IconPencil, IconTrash, IconClipboard,
@@ -130,8 +131,18 @@ export function Sidebar(props: Record<string, any>) {
                       <div
                         className="grep-file-head"
                         title={f.path}
+                        role="button"
+                        tabIndex={0}
                         onClick={() =>
                           setInput((v: any) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + f.path + " ")
+                        }
+                        onKeyDown={(event) =>
+                          activateOnKeyboard(event, () =>
+                            setInput(
+                              (v: any) =>
+                                v + (v && !v.endsWith(" ") ? " " : "") + "@" + f.path + " ",
+                            ),
+                          )
                         }
                       >
                         <IconFile size={12} /> {f.name}

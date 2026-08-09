@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { IconCheck } from "../../icons";
+import { activateOnKeyboard } from "../../accessibility";
 
 export function Dialogs(props: Record<string, any>) {
   const { answers, doRewind, editingSkill, planApproval, planFeedback, question, refreshSkills, respondPlan, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setPlanFeedback, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t } = props;
@@ -32,7 +33,14 @@ export function Dialogs(props: Record<string, any>) {
                 const idx = p.promptIndex ?? p.prompt_index;
                 const files = p.numFileSnapshots ?? p.num_file_snapshots ?? 0;
                 return (
-                  <div key={idx} className="session-item" onClick={() => doRewind(idx)}>
+                  <div
+                    key={idx}
+                    className="session-item"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => doRewind(idx)}
+                    onKeyDown={(event) => activateOnKeyboard(event, () => doRewind(idx))}
+                  >
                     <div className="session-title">
                       #{idx} {p.promptPreview ?? p.prompt_preview ?? t.noPreview}
                     </div>
