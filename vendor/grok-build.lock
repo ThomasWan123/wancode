@@ -27,7 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=version-only
+migration_audit_mode=equivalent
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
 cargo_lock_sha256=232a04e24499f33f03972f0819bbdb3380d072d2982b73fd35b80df26060eaf8
