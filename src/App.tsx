@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { activateOnKeyboard } from "./accessibility";
+import { resolveCrashRecovery } from "./crashRecovery";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -17,6 +19,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
@@ -120,7 +123,15 @@ function TreeView({ node, onPick, depth = 0 }: { node: TreeNode; onPick: (p: str
             <div
               className="tree-row"
               style={{ paddingLeft: 8 + depth * 12 }}
+              role="button"
+              tabIndex={0}
+              aria-expanded={isDir ? !!open[c.path] : undefined}
               onClick={() => (isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path))}
+              onKeyDown={(event) =>
+                activateOnKeyboard(event, () =>
+                  isDir ? setOpen((o) => ({ ...o, [c.path]: !o[c.path] })) : onPick(c.path),
+                )
+              }
             >
               <span className="tree-icon">{isDir ? <IconFolderClosed size={13} /> : <IconFile size={13} />}</span>
               <span className="tree-name">{c.name}</span>
@@ -351,7 +362,7 @@ function App() {
       if (!/^https?:\/\//i.test(href)) return;
       e.preventDefault();
       e.stopPropagation();
-      import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href)).catch(() => {});
+      openUrl(href).catch(() => {});
     };
     document.addEventListener("click", onLinkClick, true);
     return () => document.removeEventListener("click", onLinkClick, true);
@@ -1241,7 +1252,7 @@ function App() {
     unsubs.push(
       listen<any>("agent://permission", (e) => {
         const p = e.payload;
-        const title = p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "工具调用请求";
+        const title = p.request?.toolCall?.title ?? p.request?.toolCall?.kind ?? "Tool call request";
         const toolKind = String(p.request?.toolCall?.kind ?? "");
         const options = (p.request?.options ?? []).map((o: any) => ({
           optionId: o.optionId,
@@ -1371,7 +1382,7 @@ function App() {
         setBusy(false);
         refreshTasks();
         if (e.payload && e.payload.ok === false) {
-          setError(String(e.payload.error ?? "未知错误"));
+          setError(String(e.payload.error ?? "Unknown error"));
         }
         refreshCtx();
       }),
@@ -1613,7 +1624,7 @@ function App() {
       const r = await invoke<any>("worktree_resume_session", { workspace });
       const newId = r?.sessionId;
       const cwd = r?.effectiveCwd || r?.worktreePath;
-      if (!newId || !cwd) throw new Error(`返回缺字段: ${JSON.stringify(r)}`);
+      if (!newId || !cwd) throw new Error(`Response is missing required fields: ${JSON.stringify(r)}`);
       setShowGit(false);
       setWorkspace(cwd);
       await startSession(newId, cwd);
@@ -2220,18 +2231,34 @@ function App() {
           <button
             onClick={async () => {
               const c = crashInfo;
-              setCrashInfo(null);
-              await invoke("crash_recovery_ack").catch(() => {});
-              if (c) startSession(c.sessionId, c.workspace || undefined);
+              if (!c) return;
+              try {
+                const resolved = await resolveCrashRecovery("restore", c, {
+                  startSession,
+                  acknowledge: () => invoke("crash_recovery_ack"),
+                });
+                if (resolved) setCrashInfo(null);
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           >
             {t.crashRestore}
           </button>
           <button
             className="ghost"
-            onClick={() => {
-              setCrashInfo(null);
-              invoke("crash_recovery_ack").catch(() => {});
+            onClick={async () => {
+              const c = crashInfo;
+              if (!c) return;
+              try {
+                await resolveCrashRecovery("dismiss", c, {
+                  startSession,
+                  acknowledge: () => invoke("crash_recovery_ack"),
+                });
+                setCrashInfo(null);
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           >
             {t.crashDismiss}

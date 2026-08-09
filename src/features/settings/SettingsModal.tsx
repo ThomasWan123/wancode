@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { saveLang, type Lang } from "../../i18n";
 import { IconX, IconPencil } from "../../icons";
+import { ModalDialog } from "../dialogs/ModalDialog";
 
 import { parseResolvedCaps, type Cap } from "../../caps";
 
@@ -21,9 +22,9 @@ function CapBadge({ label, cap }: { label: string; cap: Cap }) {
 
 const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: string }> = {
   DeepSeek: { name: "DeepSeek V3", model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" },
-  "智谱 GLM": { name: "智谱 GLM-4-Flash", model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+  "Zhipu GLM": { name: "Zhipu GLM-4-Flash", model: "glm-4-flash", base_url: "https://open.bigmodel.cn/api/paas/v4" },
   OpenAI: { name: "GPT-4o", model: "gpt-4o", base_url: "https://api.openai.com/v1" },
-  Ollama: { name: "Ollama (本地)", model: "qwen2.5-coder", base_url: "http://localhost:11434/v1" },
+  Ollama: { name: "Ollama (Local)", model: "qwen2.5-coder", base_url: "http://localhost:11434/v1" },
 };
 
 export function SettingsModal(props: Record<string, any>) {
@@ -32,7 +33,11 @@ export function SettingsModal(props: Record<string, any>) {
     <>
       {showSettings && (
         <div className="modal-mask" onClick={() => setShowSettings(false)}>
-          <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog
+            ariaLabel={t.settingsTitle}
+            className="modal settings-modal"
+            onEscape={() => setShowSettings(false)}
+          >
             <nav className="settings-nav">
               <div className="settings-nav-title">{t.settingsTitle}</div>
               {([
@@ -83,7 +88,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="preset-cards">
                 {([
                   ["glm-coding", "GLM Coding Plan", t.presetGlmCoding],
-                  ["glm-open", "智谱开放平台", t.presetGlmOpen],
+                  ["glm-open", "Zhipu Open Platform", t.presetGlmOpen],
                   ["deepseek", "DeepSeek", t.presetDeepseek],
                 ] as const).map(([id, label, hint]) => (
                   <button
@@ -553,7 +558,7 @@ export function SettingsModal(props: Record<string, any>) {
               <button onClick={() => setShowSettings(false)}>{t.close}</button>
             </div>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
     </>

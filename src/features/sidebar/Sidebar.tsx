@@ -1,6 +1,8 @@
 /* v0.13 拆分：左侧栏（导航/最近会话/文件树/搜索/工作区切换）。步 A 透传。
    红线：工作区标签以会话真实 cwd 为准（#83），不要自行从 localStorage 推导。 */
 import { invoke } from "@tauri-apps/api/core";
+import { displaySessionTitle } from "../../i18n";
+import { activateOnKeyboard } from "../../accessibility";
 import {
   IconFolder, IconGitBranch, IconPlus, IconSearch, IconChevron,
   IconFile, IconFolderClosed, IconSettings,  IconPencil, IconTrash, IconClipboard,
@@ -27,7 +29,9 @@ export function Sidebar(props: Record<string, any>) {
               className={`session-item ${s.session_id === sessionId ? "active" : ""}`}
               onClick={() => !starting && startSession(s.session_id)}
             >
-              <div className="session-title">{s.title || t.untitledSession}</div>
+              <div className="session-title">
+                {displaySessionTitle(s.title, t.untitledSession)}
+              </div>
               <div className="session-meta">{s.updated_at.slice(0, 16).replace("T", " ")}</div>
             </button>
           ))}
@@ -127,8 +131,18 @@ export function Sidebar(props: Record<string, any>) {
                       <div
                         className="grep-file-head"
                         title={f.path}
+                        role="button"
+                        tabIndex={0}
                         onClick={() =>
                           setInput((v: any) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + f.path + " ")
+                        }
+                        onKeyDown={(event) =>
+                          activateOnKeyboard(event, () =>
+                            setInput(
+                              (v: any) =>
+                                v + (v && !v.endsWith(" ") ? " " : "") + "@" + f.path + " ",
+                            ),
+                          )
                         }
                       >
                         <IconFile size={12} /> {f.name}
@@ -195,13 +209,18 @@ export function Sidebar(props: Record<string, any>) {
                 title={s.session_id}
               >
                 <div className="session-row">
-                  <div className="session-title">{s.title}</div>
+                  <div className="session-title">
+                    {displaySessionTitle(s.title, t.untitledSession)}
+                  </div>
                   <div className="session-actions">
                     <span
                       title={t.renameSession}
                       onClick={async (e) => {
                         e.stopPropagation();
-                        const title = window.prompt(t.renameSession, s.title);
+                        const title = window.prompt(
+                          t.renameSession,
+                          displaySessionTitle(s.title, t.untitledSession),
+                        );
                         if (!title?.trim()) return;
                         try {
                           if (!sessionId) await startSession();
@@ -222,7 +241,11 @@ export function Sidebar(props: Record<string, any>) {
                       title={t.deleteSession}
                       onClick={async (e) => {
                         e.stopPropagation();
-                        if (!window.confirm(t.deleteConfirm(s.title))) return;
+                        if (
+                          !window.confirm(
+                            t.deleteConfirm(displaySessionTitle(s.title, t.untitledSession)),
+                          )
+                        ) return;
                         try {
                           if (!sessionId) await startSession();
                           await invoke("agent_session_delete", {

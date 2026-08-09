@@ -8,7 +8,11 @@ function Get-NormalizedManifest([string]$dir) {
   $lines = [System.Collections.Generic.List[string]]::new()
   Get-ChildItem -Path $dir -Recurse -File -Force | ForEach-Object {
     $rel = $_.FullName.Substring($dir.Length).TrimStart('\', '/') -replace '\\', '/'
-    if ($rel -like '.git/*' -or $rel -like 'target/*' -or $rel -like '*/target/*' -or $rel -like '*.audit-tmp') { return }
+    # A normal clone has a `.git/` directory, while `git worktree add` creates a
+    # root `.git` pointer file. Both are Git metadata and must be excluded from
+    # the effective product tree. Without the exact-file check, byte-identical
+    # worktrees produce a different digest solely because of that pointer.
+    if ($rel -eq '.git' -or $rel -like '.git/*' -or $rel -like 'target/*' -or $rel -like '*/target/*' -or $rel -like '*.audit-tmp') { return }
     $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
     $lines.Add("$rel`t$h")
   }

@@ -21,6 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [features]
+custom-protocol = ["tauri/custom-protocol"]
 # 仅供 #129 更新验收：0.18.7-test 隔离构建用它把更新源指向 prerelease 的
 # latest-test.json。正式构建绝不启用——生产包不含任何更新地址覆盖能力
 # （编译期开关，非环境变量，无法在用户机器上被打开）。

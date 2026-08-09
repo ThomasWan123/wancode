@@ -7,14 +7,26 @@ import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { IconCheck } from "../../icons";
+import { activateOnKeyboard } from "../../accessibility";
+import { ModalDialog } from "./ModalDialog";
 
 export function Dialogs(props: Record<string, any>) {
   const { answers, doRewind, editingSkill, planApproval, planFeedback, question, refreshSkills, respondPlan, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setPlanFeedback, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t } = props;
+
+  async function rejectTrust() {
+    if (!trustReq) return;
+    const id = trustReq.id;
+    setTrustReq(null);
+    await invoke("agent_trust_respond", { id, trust: false }).catch((e) =>
+      setError(String(e)),
+    );
+  }
+
   return (
     <>
       {rewindPoints && (
         <div className="modal-mask" onClick={() => setRewindPoints(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog ariaLabel={t.rewindTitle} onEscape={() => setRewindPoints(null)}>
             <div className="modal-title">{t.rewindTitle}</div>
             <div className="modal-section">
               <div className="modal-label">{t.rewindWhat}</div>
@@ -32,7 +44,14 @@ export function Dialogs(props: Record<string, any>) {
                 const idx = p.promptIndex ?? p.prompt_index;
                 const files = p.numFileSnapshots ?? p.num_file_snapshots ?? 0;
                 return (
-                  <div key={idx} className="session-item" onClick={() => doRewind(idx)}>
+                  <div
+                    key={idx}
+                    className="session-item"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => doRewind(idx)}
+                    onKeyDown={(event) => activateOnKeyboard(event, () => doRewind(idx))}
+                  >
                     <div className="session-title">
                       #{idx} {p.promptPreview ?? p.prompt_preview ?? t.noPreview}
                     </div>
@@ -46,13 +65,17 @@ export function Dialogs(props: Record<string, any>) {
             <button className="ghost" onClick={() => setRewindPoints(null)}>
               {t.cancel}
             </button>
-          </div>
+          </ModalDialog>
         </div>
       )}
 
       {editingSkill && (
         <div className="modal-mask" onClick={() => setEditingSkill(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 620 }}>
+          <ModalDialog
+            ariaLabel={`${t.skillEditTitle} · ${editingSkill.name}`}
+            onEscape={() => setEditingSkill(null)}
+            style={{ width: 620 }}
+          >
             <div className="modal-title">{t.skillEditTitle} · {editingSkill.name}</div>
             <textarea
               className="skill-editor"
@@ -79,14 +102,18 @@ export function Dialogs(props: Record<string, any>) {
                 </button>
               </div>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
 
       {/* 文件夹信任：这个仓库自带 MCP/hooks/LSP 配置，未授权前引擎已挡住它们。 */}
       {trustReq && (
         <div className="modal-mask">
-          <div className="modal trust-modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog
+            ariaLabel={t.trustTitle}
+            className="modal trust-modal"
+            onEscape={() => void rejectTrust()}
+          >
             <div className="modal-title">{t.trustTitle}</div>
             <div className="trust-path">{trustReq.workspace || trustReq.cwd}</div>
             <div className="trust-body">
@@ -115,25 +142,24 @@ export function Dialogs(props: Record<string, any>) {
               </button>
               <button
                 className="ghost"
-                onClick={async () => {
-                  const id = trustReq.id;
-                  setTrustReq(null);
-                  await invoke("agent_trust_respond", { id, trust: false }).catch((e) =>
-                    setError(String(e)),
-                  );
-                }}
+                data-dialog-autofocus
+                onClick={() => void rejectTrust()}
               >
                 {t.trustNo}
               </button>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
 
       {/* 引擎主动提问。之前这个请求被兜底应答成空对象，用户根本看不到。 */}
       {question && (
         <div className="modal-mask">
-          <div className="modal question-modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog
+            ariaLabel={t.questionTitle}
+            className="modal question-modal"
+            onEscape={() => respondQuestion(false)}
+          >
             <div className="modal-title">{t.questionTitle}</div>
             <div className="question-body">
               {question.questions.map((q: any) => (
@@ -170,17 +196,25 @@ export function Dialogs(props: Record<string, any>) {
               >
                 {t.questionSubmit}
               </button>
-              <button className="ghost" onClick={() => respondQuestion(false)}>
+              <button
+                className="ghost"
+                data-dialog-autofocus
+                onClick={() => respondQuestion(false)}
+              >
                 {t.cancel}
               </button>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
 
       {planApproval && (
         <div className="modal-mask">
-          <div className="modal plan-approval-modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog
+            ariaLabel={t.planApprovalTitle}
+            className="modal plan-approval-modal"
+            onEscape={() => respondPlan("cancelled")}
+          >
             <div className="modal-title">{t.planApprovalTitle}</div>
             <div className="plan-approval-body">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
@@ -194,14 +228,18 @@ export function Dialogs(props: Record<string, any>) {
             />
             <div className="plan-approval-actions">
               <button onClick={() => respondPlan("approved")}>{t.planApprove}</button>
-              <button className="ghost" onClick={() => respondPlan("cancelled")}>
+              <button
+                className="ghost"
+                data-dialog-autofocus
+                onClick={() => respondPlan("cancelled")}
+              >
                 {t.planRequestChanges}
               </button>
               <button className="deny" onClick={() => respondPlan("abandoned")}>
                 {t.planAbandon}
               </button>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
     </>

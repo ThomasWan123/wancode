@@ -2,6 +2,7 @@
    定时任务视图由通知流重建（created 幂等 upsert，fired 只更新时间）。 */
 import { invoke } from "@tauri-apps/api/core";
 import { IconTerminal } from "../../icons";
+import { ModalDialog } from "../dialogs/ModalDialog";
 
 export function TasksPanel(props: Record<string, any>) {
   const { bgTasks, refreshTasks, schedTasks, setError, setShowTasks, showTasks, subagents, worktrees, openWorktree, t } = props;
@@ -9,7 +10,7 @@ export function TasksPanel(props: Record<string, any>) {
     <>
       {showTasks && (
         <div className="modal-mask" onClick={() => setShowTasks(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <ModalDialog ariaLabel={t.tasksTitle} onEscape={() => setShowTasks(false)}>
             <div className="modal-title panel-title">
               <IconTerminal size={16} /> {t.tasksTitle}
             </div>
@@ -148,7 +149,7 @@ export function TasksPanel(props: Record<string, any>) {
               <span />
               <button onClick={() => setShowTasks(false)}>{t.close}</button>
             </div>
-          </div>
+          </ModalDialog>
         </div>
       )}
     </>

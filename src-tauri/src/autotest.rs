@@ -34,10 +34,24 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         }};
     }
 
+    write("SMOKE BEGIN");
     let state: State<'_, AgentState> = app.state();
 
     // ── S1 会话启动（默认模型）──────────────────────────────────────
-    let started = start_inner(app.clone(), &state, workspace.clone(), None, None).await;
+    write("SMOKE S1-start BEGIN");
+    let started = match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        start_inner(app.clone(), &state, workspace.clone(), None, None),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            check!("S1-start", false, "timed out after 120 seconds");
+            write(&format!("SMOKE DONE pass={pass} fail={fail}"));
+            std::process::exit(1);
+        }
+    };
     let (sid, cwd) = match &started {
         Ok(r) => {
             check!("S1-start", true, format!("session={}", r.session_id));
