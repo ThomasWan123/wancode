@@ -11,8 +11,22 @@ param([switch]$SkipBuild)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
-# 工具链环境（与 release.ps1 一致）
-$env:Path = "$env:Path;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.protoc\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin"
+# 工具链环境（与 release.ps1 一致）。某些宿主会把 `Path` 与 `PATH`
+# 作为两个大小写不同的进程环境项传入；PowerShell 的 Start-Process 会把
+# 它们放进大小写无关字典并在启动前抛重复键。先合并、去重，再只发布
+# 一个规范的 `Path`，否则真实 smoke 会在应用启动前假失败。
+$processEnv = [Environment]::GetEnvironmentVariables('Process')
+$pathParts = @(
+  foreach ($entry in $processEnv.GetEnumerator()) {
+    if ([string]$entry.Key -ieq 'PATH') { ([string]$entry.Value) -split ';' }
+  }
+  "$env:USERPROFILE\.cargo\bin"
+  "$env:USERPROFILE\.protoc\bin"
+  "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin"
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+[Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+[Environment]::SetEnvironmentVariable('Path', $null, 'Process')
+[Environment]::SetEnvironmentVariable('Path', ($pathParts -join ';'), 'Process')
 $env:PROTOC = "$env:USERPROFILE\.protoc\bin\protoc.exe"
 $env:RUSTFLAGS = "-C link-arg=/STACK:16777216"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link"
@@ -22,7 +36,9 @@ if (-not $SkipBuild) {
   Set-Location "$root\src-tauri"
   # --locked：引擎 Cargo.lock 由 vendor/grok-build-Cargo.lock 覆盖而来，
   # 构建不得静默改写它（v0.18.9 曾漂移出 5 个未登记依赖）。
-  cargo build --locked -p wancode
+  # Standalone smoke must embed the frontend. A plain debug build uses Tauri's
+  # development protocol and waits for a dev server before `.setup()` runs.
+  cargo build --locked -p wancode --features custom-protocol
   if ($LASTEXITCODE -ne 0) { throw "build 失败" }
 }
 
@@ -58,7 +74,7 @@ if (Test-Path $realConfig) { Copy-Item $realConfig (Join-Path $grokHome "config.
 $env:GROK_HOME = $grokHome
 $stderr = Join-Path $env:TEMP "wancode-smoke-stderr.log"
 Remove-Item $stderr -EA SilentlyContinue
-$proc = Start-Process -FilePath $exe -PassThru -RedirectStandardError $stderr
+$proc = Start-Process -FilePath $exe -WorkingDirectory $env:TEMP -PassThru -RedirectStandardError $stderr
 $env:WANCODE_AUTOTEST = $null
 $env:GROK_HOME = $null
 
@@ -72,7 +88,7 @@ while ((Get-Date) -lt $deadline) {
 }
 
 Write-Host "──── wancode-autotest.log ────"
-if (Test-Path $log) { Get-Content $log } else { Write-Host "(无日志——启动失败？)" }
+if (Test-Path $log) { Get-Content $log } else { Write-Host "(无日志——应用未进入 autotest 入口)" }
 Write-Host "──────────────────────────────"
 if (Test-Path $stderr) { Write-Host "──── stderr ────"; Get-Content $stderr -Tail 20; Write-Host "────────────────" }
 
