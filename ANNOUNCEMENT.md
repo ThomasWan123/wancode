@@ -1,67 +1,36 @@
-# WanCode 发布公告 / Announcement
+# WanCode v0.19.0
 
-## 🎉 WanCode —— 你自己的多模型桌面 AI 编码助手
+WanCode is a multi-model desktop AI coding agent for Windows. It combines a native Tauri interface with a Rust agent runtime and supports Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints.
 
-> A Claude-Code-style desktop coding agent that runs **any** model — Zhipu GLM, DeepSeek, or any OpenAI-compatible endpoint.
+## What is new in v0.19
 
-**English below.**
+Version 0.19 introduces two explicit session surfaces:
 
----
+- **Chat** is designed for general questions and research. It runs from a private application directory, exposes only the built-in web tools, and disables local plugins, disk hooks, MCP, LSP, plugin skills, plugin commands, and extension-enabled subagents for the complete session lifetime.
+- **Code** is the full development environment. It retains repository access, terminal commands, Git workflows, hooks, skills, MCP, LSP, plugins, and subagents.
 
-### 中文
+The selected surface is not a frontend preference. WanCode binds it to the session identity, persists it in a fail-closed sidecar, derives the current policy in the Rust backend, and requires an explicit engine handshake before exposing the session to the UI.
 
-**WanCode** 是一个对标 Claude Code 的桌面 GUI 编码助手，最大的不同是：**不绑定单一模型**——智谱 GLM、DeepSeek，或任意 OpenAI 兼容端点（含本地 Ollama）都能用。
+## Core capabilities
 
-Agent 引擎复用了开源的 [grok-build](https://github.com/ThomasWan123/grok-build)（Apache 2.0），GUI 用 Tauri 2 + React 重写，体积仅约 25MB。
+- Configure multiple model providers without editing source code.
+- Read and edit project files with inline diff review and approval controls.
+- Run terminal commands and multi-step tool workflows.
+- Search, restore, rename, branch, and rewind sessions.
+- Use Git helpers, MCP servers, hooks, skills, project instructions, and model-supported image input in Code sessions.
+- Store provider credentials in the operating-system keyring.
+- Receive signed in-app updates on Windows.
 
-#### ✨ 核心能力
+## Release quality
 
-- **多模型**：在设置里可视化添加模型 + API Key，一键**测试连接**确认可用；密钥存进系统钥匙串，不落明文
-- **完整 Agent**：读写文件、执行命令、多轮工具调用、思考流
-- **每次修改都要你批准**：diff 内联审批，改动落盘前你说了算
-- **计划模式**：只读探索、先出计划再执行（含审批握手）
-- **时光机回滚**：对话 / 文件 / 两者，三种模式
-- **文件树 + @文件引用 + slash 命令 + 终端面板**
-- **Git 助手 · MCP 可视化配置 · Hooks · Skills 系统**
-- **项目记忆**（AGENTS.md）· 会话搜索/恢复/重命名 · 图片输入（视觉模型）
-- **中英双语 · 亮/暗主题 · 应用内自动更新**
+The v0.19 release passed the full frontend and Rust CI suite, engine routing and identity-chain tests, Chat extension fan-out regression tests, reproducible effective-tree audits, signed installer validation, and both fresh-install and existing-configuration GUI smoke tests.
 
-#### 📦 下载
+Work and Cowork surfaces remain planned. They were intentionally deferred so the Chat and Code lifecycle boundary could ship as a complete, testable contract.
 
-从 [Releases](https://github.com/ThomasWan123/wancode/releases/latest) 下载 `.msi` 或 `-setup.exe`，安装后在 ⚙ 设置里填入你的模型和 API Key 即可。
+## Download
 
-#### 🙏 致谢
+Download the signed Windows x64 installer or MSI package from the [WanCode v0.19.0 release page](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0).
 
-核心 Agent 运行时基于 [grok-build](https://github.com/ThomasWan123/grok-build)（SpaceXAI，Apache 2.0）。
+## Credits
 
----
-
-### English
-
-**WanCode** is a Claude-Code-style desktop coding agent. The key difference: it's **not tied to one model** — use Zhipu GLM, DeepSeek, or any OpenAI-compatible endpoint (including local Ollama).
-
-The agent runtime reuses the open-source [grok-build](https://github.com/ThomasWan123/grok-build) (Apache 2.0); the GUI is a fresh Tauri 2 + React build, ~25MB.
-
-#### ✨ Highlights
-
-- **Multi-model**: add models + API keys visually in Settings, with a one-click **Test connection**; keys live in the OS keyring, never in plain text
-- **Full agent**: read/write files, run commands, multi-turn tool use, thinking stream
-- **Every edit needs your approval**: inline diff review before anything hits disk
-- **Plan mode**: read-only exploration, plan first then execute (with an approval handshake)
-- **Time-travel rewind**: conversation / files / both
-- **File tree · @-file mentions · slash commands · terminal panel**
-- **Git helper · visual MCP config · hooks · skills system**
-- **Project memory** (AGENTS.md) · session search/resume/rename · image input (vision models)
-- **Bilingual (zh/en) · light/dark theme · in-app auto-update**
-
-#### 📦 Download
-
-Grab the `.msi` or `-setup.exe` from [Releases](https://github.com/ThomasWan123/wancode/releases/latest), install, then add your model + API key in ⚙ Settings.
-
-#### 🙏 Credits
-
-Agent runtime based on [grok-build](https://github.com/ThomasWan123/grok-build) by SpaceXAI (Apache 2.0).
-
----
-
-*WanCode is Apache 2.0 licensed. Contributions welcome.*
+WanCode uses the open-source [grok-build](https://github.com/ThomasWan123/grok-build) agent runtime under the Apache License 2.0. The WanCode desktop application is also licensed under Apache 2.0.

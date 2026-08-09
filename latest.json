@@ -1,11 +1,11 @@
 {
-  "version": "0.10.0",
-  "notes": "忙时可继续输入并排队（引擎 FIFO 依次执行，可移除/清空）；/compact 改为真正的上下文压缩，入口做在上下文条上。",
-  "pub_date": "2026-07-18T00:00:00Z",
+  "version": "0.19.0",
+  "notes": "WanCode v0.19.0 introduces separate Chat and Code surfaces with session-bound, fail-closed local-extension isolation for Chat.",
+  "pub_date": "2026-08-09T00:12:12Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFhSTEhGLzN0ZW9ydzdZVjkrSUFPaTFlL1F4ZlpwRjc2Z2dVemIycWR3cVhYWlZqQWk4R1RHRE1LMjhQQlc3VFZINWJsM1piR24waEIrSHMzdzY2Q0F3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0Mzc4OTgwCWZpbGU6d2FuY29kZV8wLjEwLjBfeDY0LXNldHVwLmV4ZQovbFp0SFNZZThZY2tubE0zYTZ2UEZERUpsaUpVNEc2K2RKT3ZFOThMSGhoSUdTbCt3emRFZG9iTmRhZzc4aUVPVlFLWFB3VmZIdTdwSDUwUU84M2VDQT09Cg==",
-      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.10.0/wancode_0.10.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQnRxdlFKTjZ5ZFJOWFVyV2c5U2FQeEJuclZDcUJzSDltRkhpenBFVkNscU9CRHZ6TnU5U2x2MndOdHI5QThJTnJqRDVqdE43dmFIN0ozUkUwclZUbVdzd1FwUHp5M2dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MjM0MzMyCWZpbGU6d2FuY29kZV8wLjE5LjBfeDY0LXNldHVwLmV4ZQpWN2sxZW0rRG94VHJTMUZidG1Pd3dGeTYxTVQyU2NxVlRKQkNtZ09rMjA5ekYzaUFJeFRwQWIzT3gyaVlobXVnRGxMUVI5V2VPWUwvNFkzaE9RbDZDdz09Cg==",
+      "url": "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/download/v0.19.0/wancode_0.19.0_x64-setup.exe"
     }
   }
 }
