@@ -118,7 +118,7 @@ powershell -File scripts/smoke.ps1
 | Layer | Technology |
 |---|---|
 | Desktop shell | Tauri 2 |
-| Frontend | React 18, TypeScript, Vite |
+| Frontend | React 19, TypeScript, Vite |
 | Agent runtime | [grok-build](https://github.com/ThomasWan123/grok-build) Rust crates |
 | Model integration | OpenAI-compatible provider abstraction |
 | Agent transport | Agent Client Protocol (ACP) over an in-process channel |
@@ -130,6 +130,8 @@ powershell -File scripts/smoke.ps1
 - **Planned surfaces:** Work and Cowork
 - **Platform:** Windows x64
 - **License:** Apache License 2.0
+- **Quality plan:** [v0.19+ professional test strategy](docs/quality/v0.19-product-test-plan.md)
+- **Current release evidence:** [v0.19.0 quality scorecard](docs/golden-runs/v0.19.0.md)
 
 ## Acknowledgements
 
