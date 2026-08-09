@@ -12,7 +12,13 @@ $auditScript = Join-Path $PSScriptRoot "audit_effective_tree.ps1"
 $fx = Join-Path ([System.IO.Path]::GetTempPath()) ("audit-negative-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $fxRoot = Join-Path $fx "root"          # 夹具 wancode 根（vendor/ + src-tauri/tauri.conf.json）
 $eng = Join-Path $fx "engine"           # 微型引擎仓库
-New-Item -ItemType Directory -Path (Join-Path $fxRoot "vendor"), (Join-Path $fxRoot "src-tauri"), $eng | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $fxRoot "vendor"), (Join-Path $fxRoot "src-tauri"), $eng, (Join-Path $fx "xdg") | Out-Null
+# The gate must not inherit the caller's global ignore/configuration. Besides
+# making results machine-dependent, an unreadable user config can turn a valid
+# fixture into a PowerShell NativeCommandError before any assertion executes.
+$env:GIT_CONFIG_GLOBAL = Join-Path $fx "gitconfig"
+$env:XDG_CONFIG_HOME = Join-Path $fx "xdg"
+[System.IO.File]::WriteAllBytes($env:GIT_CONFIG_GLOBAL, @())
 Set-Content -Path (Join-Path $fxRoot "src-tauri\tauri.conf.json") -Value '{"version":"0.18.9"}' -Encoding ascii
 
 function W([string]$path, [string]$content) {
@@ -54,8 +60,8 @@ Write-FixtureLock (Get-FileSha $wiring) "none" $digest
 
 # ── 场景执行器：跑子进程 verify，断言退出码与错误文本 ──
 $script:pass = 0; $script:fail = 0
-function Assert-Verify([string]$name, [int]$expectZero, [string]$pattern) {
-  $out = (& powershell -NoProfile -File $auditScript verify -Engine $eng -Root $fxRoot 2>&1 | Out-String)
+function Assert-Verify([string]$name, [int]$expectZero, [string]$pattern, [string]$enginePath = $eng) {
+  $out = (& powershell -NoProfile -File $auditScript verify -Engine $enginePath -Root $fxRoot 2>&1 | Out-String)
   $code = $LASTEXITCODE
   $codeOk = if ($expectZero) { $code -eq 0 } else { $code -ne 0 }
   $msgOk = ($out -match [regex]::Escape($pattern))
@@ -70,6 +76,22 @@ function Assert-Verify([string]$name, [int]$expectZero, [string]$pattern) {
 
 # 0) 正向对照：夹具本身必须绿（否则后续红全是假阴性）
 Assert-Verify "正向对照" 1 "VERIFY OK"
+
+# 0b) Git worktree 正向对照：worktree 根是 `.git` 指针文件而非目录。
+#     它属于 Git 元数据，不能改变有效树摘要；否则合法的并行审计/基线树会
+#     被误报为字节漂移。必须走完整 verify，而不是只测一个过滤表达式。
+$worktreeEng = Join-Path $fx "engine-worktree"
+git -C $eng worktree add -q --detach $worktreeEng $engCommit
+if ($LASTEXITCODE -ne 0) { throw "夹具自身有问题：创建 Git worktree 失败" }
+git -C $worktreeEng apply $wiring
+if ($LASTEXITCODE -ne 0) { throw "夹具自身有问题：worktree wiring patch 应用失败" }
+Copy-Item $overlay (Join-Path $worktreeEng "Cargo.lock") -Force
+if (-not (Test-Path -LiteralPath (Join-Path $worktreeEng ".git") -PathType Leaf)) {
+  throw "夹具自身有问题：worktree 根应包含 .git 指针文件"
+}
+Assert-Verify "Git worktree正向对照" 1 "VERIFY OK" $worktreeEng
+git -C $eng worktree remove --force $worktreeEng
+if ($LASTEXITCODE -ne 0) { throw "夹具自身有问题：移除 Git worktree 失败" }
 
 # 1) wiring 哈希错误
 Write-FixtureLock ("0" * 64) "none" $digest
