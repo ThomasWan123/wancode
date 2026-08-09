@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
+import { resolveCrashRecovery } from "./crashRecovery";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -2230,18 +2231,34 @@ function App() {
           <button
             onClick={async () => {
               const c = crashInfo;
-              setCrashInfo(null);
-              await invoke("crash_recovery_ack").catch(() => {});
-              if (c) startSession(c.sessionId, c.workspace || undefined);
+              if (!c) return;
+              try {
+                const resolved = await resolveCrashRecovery("restore", c, {
+                  startSession,
+                  acknowledge: () => invoke("crash_recovery_ack"),
+                });
+                if (resolved) setCrashInfo(null);
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           >
             {t.crashRestore}
           </button>
           <button
             className="ghost"
-            onClick={() => {
-              setCrashInfo(null);
-              invoke("crash_recovery_ack").catch(() => {});
+            onClick={async () => {
+              const c = crashInfo;
+              if (!c) return;
+              try {
+                await resolveCrashRecovery("dismiss", c, {
+                  startSession,
+                  acknowledge: () => invoke("crash_recovery_ack"),
+                });
+                setCrashInfo(null);
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           >
             {t.crashDismiss}

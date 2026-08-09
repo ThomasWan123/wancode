@@ -519,6 +519,14 @@ pub(crate) async fn start_inner_with_intent(
             }
         }
     };
+    // Crash recovery is part of the same publication transaction as the
+    // immutable surface binding. A session without a durable dirty marker must
+    // never become the active, send-capable handle: otherwise a crash can make
+    // the only recovery pointer disappear while the UI reported a valid start.
+    if let Err(error) = write_session_marker(&session_id.0, &cwd.to_string_lossy(), false) {
+        cancel.cancel();
+        return Err(anyhow!("CRASH_RECOVERY_MARKER_FAILED: {error}"));
+    }
     // #127-2 聊天目录链：同一世代快照 + config 文档，逐 option 出能力。
     // 配置读取/解析失败不阻止会话启动，但必须作为结构化诊断随
     // StartResult 返回——禁止 unwrap_or_default 静默降级为全员 unknown。
@@ -584,8 +592,6 @@ pub(crate) async fn start_inner_with_intent(
         )
         .await as Result<acp::ExtResponse, _>;
     }
-
-    write_session_marker(&session_id.0, &cwd.to_string_lossy(), false);
 
     Ok(StartResult {
         session_id: session_id.0.to_string(),
