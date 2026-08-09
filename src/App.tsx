@@ -18,6 +18,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
 import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
@@ -360,7 +361,7 @@ function App() {
       if (!/^https?:\/\//i.test(href)) return;
       e.preventDefault();
       e.stopPropagation();
-      import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href)).catch(() => {});
+      openUrl(href).catch(() => {});
     };
     document.addEventListener("click", onLinkClick, true);
     return () => document.removeEventListener("click", onLinkClick, true);
