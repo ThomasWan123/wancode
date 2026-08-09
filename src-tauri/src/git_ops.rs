@@ -213,6 +213,15 @@ pub async fn worktree_precheck(
 /// 有了它，force 删除才谈得上"可反悔"。
 #[tauri::command]
 pub async fn worktree_snapshot(worktree_path: String) -> Result<serde_json::Value, String> {
+    let snapshot_dir =
+        xai_grok_shell::util::grok_home::grok_home().join("wancode-wt-snapshots");
+    worktree_snapshot_into(worktree_path, snapshot_dir).await
+}
+
+async fn worktree_snapshot_into(
+    worktree_path: String,
+    snapshot_dir: std::path::PathBuf,
+) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
         let repo = git2::Repository::open(&worktree_path)
             .map_err(|e| format!("打不开 worktree: {e}"))?;
@@ -243,8 +252,7 @@ pub async fn worktree_snapshot(worktree_path: String) -> Result<serde_json::Valu
         if patch.trim().is_empty() {
             return Ok(serde_json::Value::Null);
         }
-        let dir = xai_grok_shell::util::grok_home::grok_home().join("wancode-wt-snapshots");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -253,7 +261,7 @@ pub async fn worktree_snapshot(worktree_path: String) -> Result<serde_json::Valu
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "worktree".into());
-        let file = dir.join(format!("{base}-{ts}.patch"));
+        let file = snapshot_dir.join(format!("{base}-{ts}.patch"));
         let header = format!(
             "# WanCode worktree snapshot\n# source: {worktree_path}\n# 恢复：git apply <本文件>\n\n"
         );
@@ -565,18 +573,29 @@ mod worktree_safety_tests {
         repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
 
         // 干净树 → null
-        let clean = super::worktree_snapshot(dir.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let snapshot_dir = dir.join("snapshots");
+        let clean = super::worktree_snapshot_into(
+            dir.to_string_lossy().into_owned(),
+            snapshot_dir.clone(),
+        )
+        .await
+        .unwrap();
         assert!(clean.is_null(), "干净树不应产生快照: {clean:?}");
 
         // 改跟踪文件 + 加未跟踪文件 → 快照含两者
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
-        let snap = super::worktree_snapshot(dir.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let snap = super::worktree_snapshot_into(
+            dir.to_string_lossy().into_owned(),
+            snapshot_dir.clone(),
+        )
+        .await
+        .unwrap();
         let path = snap.get("path").and_then(|p| p.as_str()).expect("应返回 path");
+        assert!(
+            std::path::Path::new(path).starts_with(&snapshot_dir),
+            "快照必须留在测试隔离目录: {path}"
+        );
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("changed"), "patch 缺跟踪文件改动");
         assert!(content.contains("brand new"), "patch 缺未跟踪文件内容");
