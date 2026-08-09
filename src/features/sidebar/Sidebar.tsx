@@ -198,13 +198,18 @@ export function Sidebar(props: Record<string, any>) {
                 title={s.session_id}
               >
                 <div className="session-row">
-                  <div className="session-title">{s.title}</div>
+                  <div className="session-title">
+                    {displaySessionTitle(s.title, t.untitledSession)}
+                  </div>
                   <div className="session-actions">
                     <span
                       title={t.renameSession}
                       onClick={async (e) => {
                         e.stopPropagation();
-                        const title = window.prompt(t.renameSession, s.title);
+                        const title = window.prompt(
+                          t.renameSession,
+                          displaySessionTitle(s.title, t.untitledSession),
+                        );
                         if (!title?.trim()) return;
                         try {
                           if (!sessionId) await startSession();
@@ -225,7 +230,11 @@ export function Sidebar(props: Record<string, any>) {
                       title={t.deleteSession}
                       onClick={async (e) => {
                         e.stopPropagation();
-                        if (!window.confirm(t.deleteConfirm(s.title))) return;
+                        if (
+                          !window.confirm(
+                            t.deleteConfirm(displaySessionTitle(s.title, t.untitledSession)),
+                          )
+                        ) return;
                         try {
                           if (!sessionId) await startSession();
                           await invoke("agent_session_delete", {
