@@ -91,6 +91,19 @@ const sendButton = () => screen.getByTitle(new RegExp(`${t.send}|${t.ambiguousBl
 beforeEach(() => invokeMock.mockReset());
 
 describe("模型阻塞的 UI 状态机", () => {
+  it("新建 Code 会话保留已选工作区，不伪装成未连接", () => {
+    renderComposer({ modelBlock: null, sessionId: "", workspace: "D:/proj" });
+
+    expect(screen.getByTitle("D:/proj")).toHaveTextContent("proj");
+    expect(screen.queryByText(t.openWorkspace)).not.toBeInTheDocument();
+  });
+
+  it("只有确实没有工作区时才显示打开工作区按钮", () => {
+    renderComposer({ modelBlock: null, sessionId: "", workspace: "" });
+
+    expect(screen.getByText(t.openWorkspace)).toBeInTheDocument();
+  });
+
   it("歧义恢复时列出全部候选及其端点，并禁用发送", () => {
     renderComposer();
     expect(screen.getByText("智谱开放平台")).toBeInTheDocument();

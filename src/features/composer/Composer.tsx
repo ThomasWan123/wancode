@@ -365,7 +365,7 @@ export function Composer(props: Record<string, any>) {
               </div>
               {surface === "chat" ? (
                 <span className="ws-inline"><span className="dot" />Chat</span>
-              ) : sessionId ? (
+              ) : workspace ? (
                 <span className="ws-inline" title={workspace}>
                   <span className="dot" />
                   {workspace.split(/[\\/]/).filter(Boolean).pop()}
