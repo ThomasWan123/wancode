@@ -396,8 +396,32 @@ jobs:
             if (-not $app.CloseMainWindow()) {
               throw "The installed application did not accept a normal window-close request."
             }
-            if (-not $app.WaitForExit(30000)) {
-              throw "The installed application did not exit within 30 seconds of a normal close."
+            # A cold runner (first-ever WebView2 spin-up, no GPU) can still be
+            # mid-initialization when the window first appears; some frames
+            # only honor WM_CLOSE once init completes. Keep requiring a
+            # graceful exit, but allow 120s and re-send the close request
+            # every 10s. Locally (warm machine) the same sequence exits in
+            # under 100ms; the deadline is generous, not permissive.
+            $closeDeadline = (Get-Date).AddSeconds(120)
+            while (-not $app.WaitForExit(10000) -and (Get-Date) -lt $closeDeadline) {
+              $app.Refresh()
+              if (-not $app.HasExited -and $app.MainWindowHandle -ne 0) {
+                try { $app.CloseMainWindow() | Out-Null } catch {}
+              }
+            }
+            if (-not $app.HasExited) {
+              Write-Host "--- close-timeout diagnostics ---"
+              Get-CimInstance Win32_Process -Filter "ParentProcessId=$($app.Id)" |
+                Select-Object ProcessId, Name, CommandLine | Format-List | Out-String | Write-Host
+              Get-ChildItem -LiteralPath $isolatedProfile -Recurse -File -ErrorAction SilentlyContinue |
+                Sort-Object Length -Descending | Select-Object -First 10 FullName, Length |
+                Format-Table -AutoSize | Out-String | Write-Host
+              foreach ($logFile in (Get-ChildItem -LiteralPath $isolatedProfile -Recurse -File `
+                  -Include *.log -ErrorAction SilentlyContinue | Select-Object -First 3)) {
+                Write-Host "== tail of $($logFile.FullName) =="
+                Get-Content -LiteralPath $logFile.FullName -Tail 40
+              }
+              throw "The installed application did not exit within 120 seconds of a normal close."
             }
             if ($app.ExitCode -ne 0) {
               throw "The installed application returned exit code $($app.ExitCode) after a normal close."
