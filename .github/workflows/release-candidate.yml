@@ -212,6 +212,7 @@ jobs:
 
           $artifactName = "wancode-$version-windows-ci-only-${{ github.sha }}"
           "bundle_root=$bundleRoot" >> $env:GITHUB_OUTPUT
+          "exe_path=$(Join-Path $engine 'target/release/wancode.exe')" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
 
@@ -220,7 +221,7 @@ jobs:
         with:
           name: ${{ steps.verify.outputs.artifact_name }}
           path: |
-            ../grok-build/target/release/wancode.exe
+            ${{ steps.verify.outputs.exe_path }}
             ${{ steps.verify.outputs.bundle_root }}/nsis/*.exe
             ${{ steps.verify.outputs.bundle_root }}/msi/*.msi
             release-candidate-manifest.json
