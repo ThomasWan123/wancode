@@ -1,0 +1,468 @@
+name: release-candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release-candidate.yml
+  workflow_dispatch:
+    inputs:
+      require_authenticode:
+        description: Fail unless every Windows artifact has a valid Authenticode signature
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-bundles:
+    name: Windows MSI and NSIS bundles
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.verify.outputs.version }}
+      artifact_name: ${{ steps.verify.outputs.artifact_name }}
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -C link-arg=/STACK:16777216
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Materialize the pinned engine tree
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          powershell -File scripts/bootstrap.ps1 -Dest $engine
+          powershell -File scripts/audit_effective_tree.ps1 verify -Engine $engine
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the embedded frontend
+        run: npm run build
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "../grok-build -> target"
+
+      - name: Import the production Authenticode certificate
+        id: codesign
+        if: github.event_name == 'workflow_dispatch' && inputs.require_authenticode
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CODESIGN_SUBJECT: ${{ vars.WINDOWS_CODESIGN_SUBJECT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            throw "WINDOWS_CERTIFICATE is required when Authenticode is required."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD is required when Authenticode is required."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_SUBJECT)) {
+            throw "Repository variable WINDOWS_CODESIGN_SUBJECT must pin the publisher subject."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            throw "Repository variable WINDOWS_TIMESTAMP_URL is required."
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "wancode-codesign.pfx"
+          try {
+            [IO.File]::WriteAllBytes(
+              $pfxPath,
+              [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+            )
+          } catch {
+            throw "WINDOWS_CERTIFICATE is not valid base64: $($_.Exception.Message)"
+          }
+
+          $password = ConvertTo-SecureString `
+            -String $env:WINDOWS_CERTIFICATE_PASSWORD `
+            -AsPlainText `
+            -Force
+          $imported = @(
+            try {
+              Import-PfxCertificate `
+                -FilePath $pfxPath `
+                -CertStoreLocation Cert:\CurrentUser\My `
+                -Password $password
+            } finally {
+              Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+            }
+          )
+          "thumbprints=$(($imported.Thumbprint | Sort-Object -Unique) -join ',')" >> $env:GITHUB_OUTPUT
+
+          $leaf = @(
+            $imported | Where-Object {
+              $_.HasPrivateKey -and
+              $_.NotAfter -gt (Get-Date) -and
+              ($_.EnhancedKeyUsageList.ObjectId -contains "1.3.6.1.5.5.7.3.3")
+            }
+          )
+          if ($leaf.Count -ne 1) {
+            throw "Expected exactly one unexpired code-signing certificate with a private key; found $($leaf.Count)."
+          }
+          if ($leaf[0].Subject -cne $env:WINDOWS_CODESIGN_SUBJECT) {
+            throw "Certificate subject does not match WINDOWS_CODESIGN_SUBJECT."
+          }
+
+          $signingConfig = Join-Path $env:RUNNER_TEMP "tauri-signing.json"
+          [ordered]@{
+            bundle = [ordered]@{
+              windows = [ordered]@{
+                certificateThumbprint = $leaf[0].Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $signingConfig -Encoding utf8
+
+          "enabled=true" >> $env:GITHUB_OUTPUT
+          "config=$signingConfig" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows bundles
+        shell: pwsh
+        run: |
+          if ("${{ steps.codesign.outputs.enabled }}" -eq "true") {
+            npm run tauri build -- --config "${{ steps.codesign.outputs.config }}"
+          } else {
+            npm run tauri build
+          }
+
+      - name: Verify lockfile and bundle identities
+        id: verify
+        shell: pwsh
+        run: |
+          $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
+          $engineLock = Join-Path $engine "Cargo.lock"
+          $vendorLock = Join-Path $PWD "vendor/grok-build-Cargo.lock"
+          $engineLockHash = (Get-FileHash $engineLock -Algorithm SHA256).Hash
+          $vendorLockHash = (Get-FileHash $vendorLock -Algorithm SHA256).Hash
+          if ($engineLockHash -ne $vendorLockHash) {
+            throw "Engine Cargo.lock changed during packaging."
+          }
+
+          $version = node -p "require('./package.json').version"
+          $bundleRoot = Join-Path $engine "target/release/bundle"
+          $artifacts = @(
+            Join-Path $engine "target/release/wancode.exe"
+            Join-Path $bundleRoot "nsis/wancode_${version}_x64-setup.exe"
+            Join-Path $bundleRoot "msi/wancode_${version}_x64_en-US.msi"
+          )
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact)) {
+              throw "Expected bundle was not produced: $artifact"
+            }
+          }
+
+          $manifest = foreach ($artifact in $artifacts) {
+            $file = Get-Item -LiteralPath $artifact
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact
+            [ordered]@{
+              name = $file.Name
+              bytes = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+              authenticode_status = $signature.Status.ToString()
+              signer = if ($signature.SignerCertificate) {
+                $signature.SignerCertificate.Subject
+              } else {
+                $null
+              }
+            }
+          }
+
+          $summary = [ordered]@{
+            commit = "${{ github.sha }}"
+            version = $version
+            engine_lock_sha256 = $engineLockHash
+            require_authenticode = [bool]::Parse("${{ github.event_name == 'workflow_dispatch' && inputs.require_authenticode || false }}")
+            artifacts = @($manifest)
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release-candidate-manifest.json
+          $manifest | Format-Table -AutoSize
+
+          if ($summary.require_authenticode) {
+            $invalid = @($manifest | Where-Object { $_.authenticode_status -ne "Valid" })
+            if ($invalid.Count -gt 0) {
+              throw "Authenticode is required, but one or more artifacts are not validly signed."
+            }
+            $unexpectedSigner = @(
+              $manifest | Where-Object { $_.signer -cne "${{ vars.WINDOWS_CODESIGN_SUBJECT }}" }
+            )
+            if ($unexpectedSigner.Count -gt 0) {
+              throw "One or more artifacts were signed by an unexpected publisher."
+            }
+          }
+
+          $artifactName = "wancode-$version-windows-ci-only-${{ github.sha }}"
+          "bundle_root=$bundleRoot" >> $env:GITHUB_OUTPUT
+          "exe_path=$(Join-Path $engine 'target/release/wancode.exe')" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+
+      - name: Stage bundle evidence as a flat payload
+        shell: pwsh
+        run: |
+          # upload-artifact with mixed absolute/relative paths keeps the common
+          # ancestor as directory structure; the clean-install jobs require a
+          # flat candidate/ layout, so stage everything into one directory.
+          New-Item -ItemType Directory -Force rc-payload | Out-Null
+          Copy-Item -LiteralPath "${{ steps.verify.outputs.exe_path }}" rc-payload/
+          Copy-Item "${{ steps.verify.outputs.bundle_root }}/nsis/*.exe" rc-payload/
+          Copy-Item "${{ steps.verify.outputs.bundle_root }}/msi/*.msi" rc-payload/
+          Copy-Item -LiteralPath release-candidate-manifest.json rc-payload/
+
+      - name: Upload CI-only bundle evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verify.outputs.artifact_name }}
+          path: rc-payload
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove the imported signing certificates
+        if: always() && steps.codesign.outputs.thumbprints != ''
+        shell: pwsh
+        env:
+          IMPORTED_THUMBPRINTS: ${{ steps.codesign.outputs.thumbprints }}
+        run: |
+          foreach ($thumbprint in ($env:IMPORTED_THUMBPRINTS -split ',')) {
+            if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
+              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction Stop
+            }
+          }
+
+  clean-install:
+    name: Clean ${{ matrix.kind }} install and uninstall
+    needs: windows-bundles
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [nsis, msi]
+    permissions:
+      contents: read
+    steps:
+      - name: Download the exact bundle evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.windows-bundles.outputs.artifact_name }}
+          path: candidate
+
+      - name: Install, verify identity, and uninstall
+        shell: pwsh
+        run: |
+          $version = "${{ needs.windows-bundles.outputs.version }}"
+          $kind = "${{ matrix.kind }}"
+          $pattern = if ($kind -eq "nsis") { "*.exe" } else { "*.msi" }
+          $bundle = @(
+            Get-ChildItem -LiteralPath candidate -Recurse -File -Filter $pattern |
+              Where-Object { $_.Name -ne "wancode.exe" }
+          )
+          if ($bundle.Count -ne 1) {
+            throw "Expected exactly one $kind bundle; found $($bundle.Count)."
+          }
+          $manifest = Get-Content -Raw -LiteralPath candidate/release-candidate-manifest.json |
+            ConvertFrom-Json
+          $bundleRecord = @(
+            $manifest.artifacts | Where-Object { $_.name -ceq $bundle[0].Name }
+          )
+          if ($bundleRecord.Count -ne 1) {
+            throw "The selected bundle has no unique manifest record."
+          }
+          $bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundle[0].FullName).Hash
+          if ($bundleHash -cne $bundleRecord[0].sha256) {
+            throw "The downloaded bundle hash does not match its build manifest."
+          }
+
+          $log = Join-Path $env:RUNNER_TEMP "wancode-$kind-install.log"
+          if ($kind -eq "nsis") {
+            $process = Start-Process `
+              -FilePath $bundle[0].FullName `
+              -ArgumentList "/S" `
+              -PassThru `
+              -Wait
+          } else {
+            $process = Start-Process `
+              -FilePath msiexec.exe `
+              -ArgumentList @(
+                "/i", $bundle[0].FullName,
+                "/qn", "/norestart",
+                "/l*v", $log
+              ) `
+              -PassThru `
+              -Wait
+          }
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 200 }
+            throw "$kind install failed with exit code $($process.ExitCode)."
+          }
+
+          $candidateRoots = @(
+            Join-Path $env:LOCALAPPDATA "wancode"
+            Join-Path $env:ProgramFiles "wancode"
+          )
+          if (${env:ProgramFiles(x86)}) {
+            $candidateRoots += Join-Path ${env:ProgramFiles(x86)} "wancode"
+          }
+          $installed = @(
+            foreach ($root in ($candidateRoots | Select-Object -Unique)) {
+              if (Test-Path -LiteralPath $root) {
+                Get-ChildItem -LiteralPath $root -Recurse -File -Filter wancode.exe
+              }
+            }
+          )
+          if ($installed.Count -ne 1) {
+            throw "Expected one installed wancode.exe; found $($installed.Count)."
+          }
+          $installRoot = $installed[0].Directory.FullName
+          # Byte-identity between the installed exe and the uploaded raw build
+          # exe is structurally impossible: the tauri bundler patches the exe
+          # with per-bundle-type information before packing each installer
+          # ("Patching wancode.exe with bundle type information: msi/nsis"),
+          # so the msi payload, nsis payload, and final on-disk exe are three
+          # different byte variants of the same reviewed build. Integrity is
+          # carried by the bundle-hash-vs-manifest assertion above (same-job
+          # provenance); record the installed hash as evidence instead.
+          $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installed[0].FullName).Hash
+          $builtExecutable = @(Get-ChildItem -LiteralPath candidate -File -Filter wancode.exe)
+          if ($builtExecutable.Count -eq 1) {
+            $builtHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtExecutable[0].FullName).Hash
+            Write-Host "installed exe sha256: $installedHash"
+            Write-Host "raw build exe sha256: $builtHash (differs by bundle-type patch; informational)"
+          }
+          if ($installed[0].VersionInfo.ProductVersion -ne $version) {
+            throw "Installed product version does not match the bundle version."
+          }
+
+          $requireAuthenticode = [bool]::Parse("${{ github.event_name == 'workflow_dispatch' && inputs.require_authenticode || false }}")
+          if ($requireAuthenticode) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $installed[0].FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Installed executable does not have valid Authenticode."
+            }
+            if ($signature.SignerCertificate.Subject -cne "${{ vars.WINDOWS_CODESIGN_SUBJECT }}") {
+              throw "Installed executable publisher does not match the pinned subject."
+            }
+          }
+
+          $isolatedProfile = Join-Path $env:RUNNER_TEMP "wancode-$kind-profile"
+          $isolatedGrokHome = Join-Path $isolatedProfile "grok-home"
+          $isolatedAppData = Join-Path $isolatedProfile "appdata"
+          $isolatedLocalAppData = Join-Path $isolatedProfile "localappdata"
+          New-Item -ItemType Directory -Force `
+            $isolatedGrokHome, $isolatedAppData, $isolatedLocalAppData | Out-Null
+
+          $startInfo = [Diagnostics.ProcessStartInfo]::new($installed[0].FullName)
+          $startInfo.UseShellExecute = $false
+          $startInfo.WorkingDirectory = $env:RUNNER_TEMP
+          $startInfo.Environment["GROK_HOME"] = $isolatedGrokHome
+          $startInfo.Environment["APPDATA"] = $isolatedAppData
+          $startInfo.Environment["LOCALAPPDATA"] = $isolatedLocalAppData
+          $app = [Diagnostics.Process]::Start($startInfo)
+          try {
+            $windowDeadline = (Get-Date).AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 250
+              $app.Refresh()
+            } while (
+              -not $app.HasExited -and
+              $app.MainWindowHandle -eq 0 -and
+              (Get-Date) -lt $windowDeadline
+            )
+            if ($app.HasExited) {
+              throw "The installed application exited during startup with code $($app.ExitCode)."
+            }
+            if ($app.MainWindowHandle -eq 0) {
+              throw "The installed application did not create a main window within 30 seconds."
+            }
+            if (-not $app.CloseMainWindow()) {
+              throw "The installed application did not accept a normal window-close request."
+            }
+            # A cold runner (first-ever WebView2 spin-up, no GPU) can still be
+            # mid-initialization when the window first appears; some frames
+            # only honor WM_CLOSE once init completes. Keep requiring a
+            # graceful exit, but allow 120s and re-send the close request
+            # every 10s. Locally (warm machine) the same sequence exits in
+            # under 100ms; the deadline is generous, not permissive.
+            $closeDeadline = (Get-Date).AddSeconds(120)
+            while (-not $app.WaitForExit(10000) -and (Get-Date) -lt $closeDeadline) {
+              $app.Refresh()
+              if (-not $app.HasExited -and $app.MainWindowHandle -ne 0) {
+                try { $app.CloseMainWindow() | Out-Null } catch {}
+              }
+            }
+            if (-not $app.HasExited) {
+              Write-Host "--- close-timeout diagnostics ---"
+              Get-CimInstance Win32_Process -Filter "ParentProcessId=$($app.Id)" |
+                Select-Object ProcessId, Name, CommandLine | Format-List | Out-String | Write-Host
+              Get-ChildItem -LiteralPath $isolatedProfile -Recurse -File -ErrorAction SilentlyContinue |
+                Sort-Object Length -Descending | Select-Object -First 10 FullName, Length |
+                Format-Table -AutoSize | Out-String | Write-Host
+              foreach ($logFile in (Get-ChildItem -LiteralPath $isolatedProfile -Recurse -File `
+                  -Include *.log -ErrorAction SilentlyContinue | Select-Object -First 3)) {
+                Write-Host "== tail of $($logFile.FullName) =="
+                Get-Content -LiteralPath $logFile.FullName -Tail 40
+              }
+              throw "The installed application did not exit within 120 seconds of a normal close."
+            }
+            if ($app.ExitCode -ne 0) {
+              throw "The installed application returned exit code $($app.ExitCode) after a normal close."
+            }
+          } finally {
+            if (-not $app.HasExited) {
+              $app.Kill($true)
+              $app.WaitForExit()
+            }
+          }
+
+          if ($kind -eq "nsis") {
+            $uninstaller = @(
+              Get-ChildItem -LiteralPath $installRoot -File -Filter "uninstall*.exe"
+            )
+            if ($uninstaller.Count -ne 1) {
+              throw "Expected one NSIS uninstaller; found $($uninstaller.Count)."
+            }
+            $remove = Start-Process `
+              -FilePath $uninstaller[0].FullName `
+              -ArgumentList "/S" `
+              -PassThru `
+              -Wait
+          } else {
+            $remove = Start-Process `
+              -FilePath msiexec.exe `
+              -ArgumentList @("/x", $bundle[0].FullName, "/qn", "/norestart") `
+              -PassThru `
+              -Wait
+          }
+          if ($remove.ExitCode -ne 0) {
+            throw "$kind uninstall failed with exit code $($remove.ExitCode)."
+          }
+
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Test-Path -LiteralPath $installRoot) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path -LiteralPath $installed[0].FullName) {
+            throw "$kind uninstall left the installed executable behind."
+          }
+          if (Get-Process wancode -ErrorAction SilentlyContinue) {
+            throw "$kind lifecycle left a wancode process behind."
+          }
