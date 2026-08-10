@@ -6,8 +6,10 @@ before opening or reviewing any PR. Summary:
 - Default roles: Claude Code implements (Draft PRs, comments prefixed `[cc]`);
   Codex reviews (numbered P0/P1/P2 findings, comments prefixed `[codex]`, one
   `VERDICT:` line per round). Roles may swap per-PR if stated in the PR.
-- Verdicts bind to the reviewed head SHA. Final `VERDICT: ACCEPT` requires all
-  required checks green on that exact head; earlier rounds end with
+- Review rounds open with exactly `[codex] Reviewed head: <sha>`; the verdict
+  binds to that SHA. Final `VERDICT: ACCEPT` requires all required checks green
+  on that exact head. P0/P1 findings issue `VERDICT: BLOCK` immediately — they
+  never wait for CI; only a no-blocker round waiting solely on checks ends with
   `PRELIMINARY — no verdict`. Any push after ACCEPT invalidates the verdict and
   any merge authorization; the label reverts to `needs-codex-review`. The four
   workflow labels are mutually exclusive.

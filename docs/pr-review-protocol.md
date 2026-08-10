@@ -33,17 +33,21 @@ which are authoritative under this protocol.
    mandatory), adds label `needs-codex-review`, and posts `[cc] READY FOR REVIEW`
    when CI is green (or explains why review should start before green).
 2. **Reviewer** posts one complete review comment per round:
-   - First line states the reviewed head SHA (`Reviewed head: <sha>`). The
-     verdict binds to that SHA and to nothing else.
-   - Prefix `[codex]`, findings numbered and severity-tagged **P0 / P1 / P2**.
+   - First line is exactly `[codex] Reviewed head: <sha>` — role prefix, then
+     the reviewed head SHA. The verdict binds to that SHA and to nothing else.
+   - Findings numbered and severity-tagged **P0 / P1 / P2**.
    - Each finding names file/line or test, states the failure scenario, and where
      possible how to verify.
    - Ends with exactly one verdict line:
      `VERDICT: ACCEPT` | `VERDICT: BLOCK (P0=n, P1=n)` | `VERDICT: NEEDS-USER (reason)`.
    - **A final `VERDICT: ACCEPT` requires all required checks green on the exact
-     reviewed head.** Reviewing earlier is allowed and encouraged, but such a
-     round ends with `PRELIMINARY — no verdict (checks pending on <sha>)`
-     instead of a verdict line, and carries no label transition.
+     reviewed head.** Reviewing before checks finish is allowed and encouraged,
+     and splits two ways: a round that finds any **P0/P1 issues
+     `VERDICT: BLOCK` immediately** — blocking findings never wait for CI. Only
+     a review with no blocking findings, whose sole remaining condition is
+     pending checks, ends with
+     `PRELIMINARY — no verdict (checks pending on <sha>)` and carries no label
+     transition.
 3. **Implementer** independently verifies every finding before accepting it
    (verify-then-agree — never adopt a finding unchecked; both agents have been
    wrong). Replies per-finding: `confirmed + fix` / `refuted + evidence` /
