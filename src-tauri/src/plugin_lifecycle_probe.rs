@@ -234,7 +234,9 @@ mod probe {
                 "hooks": {
                     "hooks": {
                         "UserPromptSubmit": [
-                            { "hooks": [ { "type": "command", "command": cmd } ] }
+                            // A clean Windows runner can spend more than five seconds on the
+                            // first PowerShell start. This changes only the fixture budget.
+                            { "hooks": [ { "type": "command", "command": cmd, "timeout": 20 } ] }
                         ]
                     }
                 },
