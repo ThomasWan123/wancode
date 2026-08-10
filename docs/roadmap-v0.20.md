@@ -5,11 +5,14 @@ Decision owner: user. Execution: task split in §4.
 
 ## 0. Where we stand (2026-08-10)
 
-Shipped and verified: v0.19.1 public (honest-unsigned, full gate evidence),
+Shipped and verified: v0.19.1 public — an **approved honest-unsigned release**
+(all five checklist gates + upgrade E2E passed; Authenticode explicitly open as
+QA-019-007),
 Chat/Code layered surfaces with local-extension hard isolation, model-identity
-hardening (catalog-key routing end to end), professional QA system (PR #29,
-pending merge), Windows release-candidate bundle gate (PR #31, in flight),
-GitHub-native CC⇄Codex review protocol (merged, already caught real defects in
+hardening (catalog-key routing end to end), professional QA system (PR #29 — still Draft, its scorecard bound to the
+withdrawn v0.19.0 candidate and reading NO-GO, so it must be reconciled to the
+v0.19.1 evidence before merge), Windows release-candidate bundle gate
+(PR #31 — merged 2026-08-10), audit-mode restore (PR #35 — merged), GitHub-native CC⇄Codex review protocol (merged, already caught real defects in
 its own first three uses).
 
 Open debts: Authenticode signing (QA-019-007), competitive benchmarks NOT-RUN,
@@ -26,22 +29,22 @@ structurally cannot follow.
 
 | # | Item | Why | Exit criterion |
 |---|---|---|---|
-| A1 | Code signing | Unsigned = SmartScreen wall for every new user; the one gate v0.19.1 shipped without | User obtains cert (Azure Trusted Signing or OV); release pipeline signs exe+msi+nsis; `require_authenticode` gate flipped on; first signed release |
+| A1 | Code signing | Unsigned = SmartScreen wall for every new user; the one gate v0.19.1 shipped without | User obtains cert (Azure Trusted Signing or OV); release pipeline signs exe+msi+nsis; `require_authenticode` gate flipped on; first signed release. **Policy: v0.20 public distribution is signed-only** — feature work continues on main, but the public release waits for the cert. Sole exception: an emergency security patch, released unsigned only with explicit per-instance user authorization and the same honest disclosure as v0.19.1 |
 | A2 | Merge QA system (PR #29) + bundle gate (PR #31) | Both are finished evidence institutions sitting in Draft | Merged; scorecard becomes the standing release template |
-| A3 | Multi-mirror updater failover | gh-proxy is a single point of failure with a recorded zero-byte incident; retry ≠ failover | Updater tries ordered mirror list, falls back to origin; failure surfaced in UI; covered by update E2E |
+| A3 | Multi-mirror updater failover | gh-proxy is a single point of failure with a recorded zero-byte incident; retry ≠ failover | Mirrors are **transport-only, never trust roots**: the same minisign-signed manifest and artifact identity must verify under the pinned updater key regardless of source; signature/hash/version mismatch fails closed and advances to the next source without executing bytes; downloaded bytes are re-verified before launch. Ordered mirror list with origin fallback; failure surfaced in UI. E2E covers positive origin/mirror controls plus zero-byte, truncation, corruption, stale-manifest, timeout, mismatched-signature, and origin-fallback cases |
 
 ## 2. Track B — Prove "better" (measurement, not claims)
 
 | # | Item | Why | Exit criterion |
 |---|---|---|---|
-| B1 | Competitive calibration run | The QA plan defines it; it has never run. "Better than X" stays a claim until measured | Same task set (real-repo bugfix, multi-file refactor, long-session resume, provider switch) on WanCode / Claude Code / Codex; scorecard (success, wall time, token cost, interventions) in docs/evidence; repeat per release |
+| B1 | Competitive calibration run | The QA plan defines it; it has never run. "Better than X" stays a claim until measured | **Step 1: a committed benchmark protocol** (codex-reviewed before any run): frozen repo snapshots + task specs; disclosed product/model/version/settings; equivalent permissions and tool access; intervention-counting rules; multiple trials or stated uncertainty; raw transcripts archived; cost normalization; failure adjudication independent of the product under test; NOT-RUN/missing access can never score as a win. **Step 2:** run it on WanCode / Claude Code / Codex; publish favorable and unfavorable results alike in docs/evidence; repeat per release |
 | B2 | Public provider compatibility matrix | Our compliance suite (4a/4b) is evidence nobody else publishes; converts "OpenAI-compatible" from slogan to contract | docs page generated from CI compliance summaries; per-provider rows with evidence links; linked from README |
 
 ## 3. Track C — Differentiate (where competitors can't follow)
 
 | # | Item | Why | Exit criterion |
 |---|---|---|---|
-| C1 | Windows AI-process governance phase 2 | Job-Object tree control shipped; ETW file-write audit PoC validated. Neither Claude Code nor Codex sandboxes on Windows at all | ETW-based write audit of the AI process tree behind a feature flag; audit log viewable in-app; design doc first, codex-reviewed |
+| C1 | Windows AI-process governance phase 2 | Job-Object tree control shipped; ETW file-write audit PoC validated. As of 2026-08 our dated comparison matrix (docs/roadmap-vs-claude-code-codex.md) records no equivalent in-app auditable process-tree file-write governance on Windows in either competitor; the claim is scoped to that capability, dated, and must be re-verified before any marketing use | ETW-based write audit of the AI process tree behind a feature flag; audit log viewable in-app; design doc first, codex-reviewed; implementation by cc after design ACCEPT |
 | C2 | Reasoning-effort selector | Both competitors have it; we don't; engine exposes it | Per-model effort selector where the provider supports it; capability-gated (unknown ≠ advertised) |
 | C3 | Memory edit/refresh wiring | `memory/flush`, `memory/rewrite` engine methods exist unwired | Settings surface for project memory; engine round-trip test |
 | C4 | Dogfooding cadence | The best defect source we have; every fielded bug this cycle came from real use | Fixed weekly hours using WanCode on real work; defects → ledger → priority by frequency×severity |
@@ -52,7 +55,13 @@ structurally cannot follow.
 |---|---|---|
 | **cc** (implementer default) | A3, B1 harness + run, B2 generator, C2, C3, CI lane split (§5) | Draft PRs per protocol |
 | **codex** (reviewer default + QA owner) | Reviews of all of the above; A2 finalization (owns PR #29/#31); B1 scorecard adjudication; C1 design review before any code | Verdicts per protocol |
-| **user** | A1 cert application (identity/payment — only you can); competitor accounts for B1; merge/release authorizations | A1 is the critical path for the next release |
+| **user** | A1 cert application (identity/payment — only you can); competitor accounts for B1; merge/release authorizations | A1 is the critical path for the next public release |
+
+Debt assignments (no orphans): QA-019-002 reused-target collision — owner cc,
+Week 2, exit = unique lib/integration artifacts + a reused-target regression
+check in CI. QA-019-004 engine warnings — explicitly deferred, owner codex
+(QA backlog), trigger = next Rust toolchain upgrade; revisit date 2026-09-15.
+C1 implementer after the codex-reviewed design: cc.
 
 Role swaps per-PR remain allowed and stated in the PR.
 
@@ -60,18 +69,28 @@ Role swaps per-PR remain allowed and stated in the PR.
 
 - PR review protocol, evidence tables, NOT-RUN discipline, mutation testing
   where assertions need teeth: unchanged.
-- **CI lane split** (new): PR lane = wancode lib tests + frontend + clippy +
-  migration-audit (target < 10 min feedback); full engine battery moves to a
-  merge gate / nightly lane. A ~35-minute round-trip on every push is the
-  single largest drag on iteration speed measured this cycle.
+- **CI lane split** (new, guarded): prerequisite is a **required pre-merge
+  gate** — a branch ruleset on `main` requiring PRs and green checks on the
+  exact head (none existed as of 2026-08-11; being created as part of this
+  plan). Then: fast lane (wancode lib + frontend + clippy + migration-audit,
+  target < 10 min) required on every PR; the full engine battery (routing,
+  compaction, model-identity, canary, Chat fan-out) stays **required before
+  merge** — routed by a path-impact matrix whose fallback is fail-safe: any
+  engine/vendor/build/CI/security-touching change, or any unmatched path,
+  runs the full battery. The full battery remains required for every merge
+  until the routing itself has mutation/negative evidence. Nightly runs may
+  duplicate the full lane as drift detection; they never replace a merge
+  gate. A ~35-minute round-trip on every push is the single largest measured
+  drag, but speed never buys removal of a safety gate.
 
 ## 6. Sequence (indicative)
 
 - **Week 1**: merge #29/#31/#35; user starts A1 application; CI lane split;
   A3 design.
 - **Weeks 2–3**: B1 first full run + scorecard; A3 implementation; C2.
-- **Weeks 3–6**: C1 design → implementation; B2 page; C3; v0.20 release —
-  signed if the cert has arrived, honest-unsigned fallback otherwise.
+- **Weeks 3–6**: C1 design (codex-reviewed) → implementation (cc); B2 page;
+  C3; **v0.20 public release ships signed-only** (see A1 policy; emergency
+  exception requires explicit user authorization per instance).
 
 ## 7. Explicitly not doing (and why)
 
