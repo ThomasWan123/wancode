@@ -71,9 +71,13 @@ Role swaps per-PR remain allowed and stated in the PR.
 - PR review protocol, evidence tables, NOT-RUN discipline, mutation testing
   where assertions need teeth: unchanged.
 - **CI lane split** (new, guarded): prerequisite is a **required pre-merge
-  gate** — a branch ruleset on `main` requiring PRs and green checks on the
-  exact head (none existed as of 2026-08-11; being created as part of this
-  plan). Then: fast lane (wancode lib + frontend + clippy + migration-audit,
+  gate** — ruleset 20669729 is RATIFIED and ACTIVE (PRs + versions/frontend/
+  rust green on head, no bypass). Latest-base enforcement is **PENDING**:
+  PR #37 (merge_group trigger) must merge, the merge-queue rule be added,
+  and a real queued-PR probe prove all three checks run on the synthetic
+  merge-group SHA — captured with ruleset URL, group SHA, and a rollback/
+  deadlock recovery note. **No CI lane split lands before that probe is
+  green.** Then: fast lane (wancode lib + frontend + clippy + migration-audit,
   target < 10 min) required on every PR; the full engine battery (routing,
   compaction, model-identity, canary, Chat fan-out) stays **required before
   merge** — routed by a path-impact matrix whose fallback is fail-safe: any
