@@ -33,11 +33,17 @@ which are authoritative under this protocol.
    mandatory), adds label `needs-codex-review`, and posts `[cc] READY FOR REVIEW`
    when CI is green (or explains why review should start before green).
 2. **Reviewer** posts one complete review comment per round:
+   - First line states the reviewed head SHA (`Reviewed head: <sha>`). The
+     verdict binds to that SHA and to nothing else.
    - Prefix `[codex]`, findings numbered and severity-tagged **P0 / P1 / P2**.
    - Each finding names file/line or test, states the failure scenario, and where
      possible how to verify.
    - Ends with exactly one verdict line:
      `VERDICT: ACCEPT` | `VERDICT: BLOCK (P0=n, P1=n)` | `VERDICT: NEEDS-USER (reason)`.
+   - **A final `VERDICT: ACCEPT` requires all required checks green on the exact
+     reviewed head.** Reviewing earlier is allowed and encouraged, but such a
+     round ends with `PRELIMINARY — no verdict (checks pending on <sha>)`
+     instead of a verdict line, and carries no label transition.
 3. **Implementer** independently verifies every finding before accepting it
    (verify-then-agree — never adopt a finding unchecked; both agents have been
    wrong). Replies per-finding: `confirmed + fix` / `refuted + evidence` /
@@ -45,9 +51,32 @@ which are authoritative under this protocol.
    `[cc] READY FOR REVIEW`.
 4. Repeat. On `VERDICT: ACCEPT`, reviewer swaps the label to `codex-accepted`;
    implementer flips the PR to Ready and posts `[cc] REQUESTING MERGE AUTHORIZATION`
-   with the final evidence summary.
+   with the final evidence summary and the accepted head SHA.
 5. **User** authorizes merge (a PR comment `批准合并` / `approve merge`, or via
    chat). Implementer merges (squash by default), deletes the branch.
+
+### Staleness: verdicts die with the head they reviewed
+
+Any push after a `READY FOR REVIEW` invalidates the round in progress; any push
+after `VERDICT: ACCEPT` — including typo-only follow-ups — invalidates that
+verdict **and any merge authorization already granted on it**. Whoever pushes
+removes `codex-accepted`, restores `needs-codex-review`, and the new head goes
+through a fresh round (which may be short, but its changed bytes get reviewed
+and its checks must pass). A merge may only ever execute the exact SHA the user
+authorized.
+
+### Label state machine
+
+The four labels are **mutually exclusive** — at most one on a PR at any time.
+
+| Transition | Trigger | Who |
+|---|---|---|
+| — → `needs-codex-review` | Draft PR opened / `READY FOR REVIEW` posted | implementer |
+| `needs-codex-review` → `codex-blocked` | `VERDICT: BLOCK` | reviewer |
+| `codex-blocked` → `needs-codex-review` | fixes pushed + new `READY FOR REVIEW` | implementer |
+| `needs-codex-review` → `codex-accepted` | `VERDICT: ACCEPT` (checks green on head) | reviewer |
+| `codex-accepted` → `needs-codex-review` | any push after ACCEPT | whoever pushes |
+| any → `needs-user-decision` | deadlock / scope question | either agent |
 
 ## Authorization points (user only — agents must stop and ask)
 
