@@ -333,14 +333,20 @@ jobs:
             throw "Expected one installed wancode.exe; found $($installed.Count)."
           }
           $installRoot = $installed[0].Directory.FullName
-          $builtExecutable = @(Get-ChildItem -LiteralPath candidate -File -Filter wancode.exe)
-          if ($builtExecutable.Count -ne 1) {
-            throw "Expected one built wancode.exe for payload comparison; found $($builtExecutable.Count)."
-          }
+          # Byte-identity between the installed exe and the uploaded raw build
+          # exe is structurally impossible: the tauri bundler patches the exe
+          # with per-bundle-type information before packing each installer
+          # ("Patching wancode.exe with bundle type information: msi/nsis"),
+          # so the msi payload, nsis payload, and final on-disk exe are three
+          # different byte variants of the same reviewed build. Integrity is
+          # carried by the bundle-hash-vs-manifest assertion above (same-job
+          # provenance); record the installed hash as evidence instead.
           $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installed[0].FullName).Hash
-          $builtHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtExecutable[0].FullName).Hash
-          if ($installedHash -cne $builtHash) {
-            throw "The installed executable is not byte-identical to the reviewed build payload."
+          $builtExecutable = @(Get-ChildItem -LiteralPath candidate -File -Filter wancode.exe)
+          if ($builtExecutable.Count -eq 1) {
+            $builtHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtExecutable[0].FullName).Hash
+            Write-Host "installed exe sha256: $installedHash"
+            Write-Host "raw build exe sha256: $builtHash (differs by bundle-type patch; informational)"
           }
           if ($installed[0].VersionInfo.ProductVersion -ne $version) {
             throw "Installed product version does not match the bundle version."
