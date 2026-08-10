@@ -3,7 +3,7 @@
 Status: PROPOSED (cc draft, awaiting codex review). Horizon: ~4–6 weeks.
 Decision owner: user. Execution: task split in §4.
 
-## 0. Where we stand (2026-08-10)
+## 0. Where we stand (2026-08-11)
 
 Shipped and verified: v0.19.1 public — an **approved honest-unsigned release**
 (all five checklist gates + upgrade E2E passed; Authenticode explicitly open as
@@ -29,8 +29,8 @@ structurally cannot follow.
 
 | # | Item | Why | Exit criterion |
 |---|---|---|---|
-| A1 | Code signing | **DEFERRED by user scope ruling (2026-08-11): WanCode is currently a personal-use product.** Authenticode is a distribution-trust signal, not an operator security control; the update chain is already minisign-verified independently. Cost/friction (annual fee, identity validation, per-release OTP) buys ~nothing at personal scale. Note: Azure Trusted Signing individuals are US/CA-only, so the live option when triggered is a Certum-style individual cloud cert | Reactivation triggers (any one): public promotion push, a real external user base, marketplace/store distribution, or strict-EDR environments. Until then releases follow the v0.19.1 honest-unsigned pattern (explicit disclosure + SHA-256 + minisign chain). `require_authenticode` stays available behind workflow_dispatch for the day it flips |
-| A2 | Merge QA system (PR #29) + bundle gate (PR #31) | Both are finished evidence institutions sitting in Draft | Merged; scorecard becomes the standing release template |
+| A1 | Code signing | **DEFERRED by user scope ruling (2026-08-11): WanCode is currently a personal-use product.** Authenticode is a distribution-trust signal, not an operator security control; the update chain is already minisign-verified independently, which covers this owner's present personal-use threat model. Provider selection and cost data live in the dated research note in project memory, not in this strategic doc | Reactivation triggers (any one): public promotion push, a real external user base, marketplace/store distribution, or strict-EDR environments. Until then releases follow the v0.19.1 honest-unsigned pattern (explicit disclosure + SHA-256 + minisign chain). `require_authenticode` stays available behind workflow_dispatch for the day it flips |
+| A2 | Reconcile + merge QA system (PR #29) | PR #31 merged 2026-08-10; PR #29 remains Draft with its scorecard bound to the withdrawn v0.19.0 candidate (NO-GO) | #29 reconciled to the v0.19.1 evidence/decision, then merged; scorecard becomes the standing release template |
 | A3 | Multi-mirror updater failover | gh-proxy is a single point of failure with a recorded zero-byte incident; retry ≠ failover | Mirrors are **transport-only, never trust roots**: the same minisign-signed manifest and artifact identity must verify under the pinned updater key regardless of source; signature/hash/version mismatch fails closed and advances to the next source without executing bytes; downloaded bytes are re-verified before launch. Ordered mirror list with origin fallback; failure surfaced in UI. E2E covers positive origin/mirror controls plus zero-byte, truncation, corruption, stale-manifest, timeout, mismatched-signature, and origin-fallback cases |
 
 ## 2. Track B — Prove "better" (measurement, not claims)
@@ -59,8 +59,9 @@ structurally cannot follow.
 
 Debt assignments (no orphans): QA-019-002 reused-target collision — owner cc,
 Week 2, exit = unique lib/integration artifacts + a reused-target regression
-check in CI. QA-019-004 engine warnings — explicitly deferred, owner codex
-(QA backlog), trigger = next Rust toolchain upgrade; revisit date 2026-09-15.
+check in CI. QA-019-004 engine warnings — explicitly deferred; codex = QA owner/reviewer,
+cc = remediation implementer when the trigger fires (next Rust toolchain
+upgrade); revisit date 2026-09-15.
 C1 implementer after the codex-reviewed design: cc.
 
 Role swaps per-PR remain allowed and stated in the PR.
