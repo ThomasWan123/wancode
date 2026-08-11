@@ -133,11 +133,6 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     let sentinel_ok = fs::read(sentinel).map(|b| b == before).unwrap_or(false)
         && sentinel.exists();
 
-    let items: Vec<String> = results.iter().map(|(v, p, d)| {
-        format!("{{\"vector\":\"{}\",\"predicate\":\"{}\",\"detail\":\"{}\"}}",
-            v, p, d.replace('\\', "/").replace('"', "'"))
-    }).collect();
-
     // 谓词能力面(必要非充分):三逃逸向量各自是否被谓词识别。
     let escapes: Vec<&(String, String, String)> = results.iter()
         .filter(|(v, _, _)| v != "in_worktree_control").collect();
@@ -151,19 +146,25 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     // 无调用点会咨询客户端谓词(工具/MCP 策略只在 NewSession 构造期设,
     // PromptRequest 无逐操作钩子)。因此**无论谓词多强,档位都是 B**——
     // 谓词能识别逃逸 ≠ 有地方在写发生前拦下它。这正是探针要钉死的结论。
-    let tier = "B"; // 由执行点缺失决定,非由谓词能力决定
-    let tier_reason = if predicate_catches_all {
-        "谓词可识别全部受测逃逸向量,但客户端无写前执行点调用它(PR #39 G26 缺口)→ 档 B"
-    } else {
-        "谓词未能识别全部逃逸,且无写前执行点 → 档 B(更强的理由)"
-    };
+    // 收窄(codex R1-F1/F3):本 spike 只测【客户端谓词能否识别逃逸】,
+    // 不驱动真实引擎会话、无真实 tool_call、不观测结构化拒绝。因此它
+    // **不产出档位裁定**,也不宣称执行点是否存在——那是 C1 完整阶段
+    // (full-MvpAgent)的事。这里只报谓词能力面。
+    // F2:每个逃逸向量都必须被谓词识别(WOULD_BLOCK)才算成功,
+    //     任一 ESCAPED/ERROR/SKIPPED → 失败。
+    let all_vectors_blocked = escapes.len() == 3
+        && escapes.iter().all(|(_, p, _)| p == "WOULD_BLOCK");
 
-    println!("C1_EVIDENCE {{\"lever\":\"canonicalize+starts_with predicate\",\"sentinel_intact\":{},\"predicate_catches_all_tested\":{},\"control_allows\":{},\"enforcement_point_exists\":false,\"tier_ruling\":\"{}\",\"tier_reason\":\"{}\",\"vectors\":[{}]}}",
-        sentinel_ok, predicate_catches_all, control_ok, tier, tier_reason, items.join(","));
+    // 合法 JSON 产物(F4):写入文件,控制台标记分离
+    let json = build_json(&results, sentinel_ok, predicate_catches_all,
+        control_ok, all_vectors_blocked);
+    std::fs::write("c1-evidence.json", &json).ok();
 
+    println!("C1 predicate-spike: vectors_blocked={} control_ok={} sentinel_intact={} (NOT full C1 evidence)",
+        all_vectors_blocked, control_ok, sentinel_ok);
     let _ = fs::remove_dir_all(base);
-    // 成功 = 哨兵完好 + 正对照通过(证明测试装置有效);档位恒为 B 是预期产出。
-    std::process::exit(if sentinel_ok && control_ok { 0 } else { 1 });
+    // 成功 = 谓词识别全部三向量 + 正对照 + 哨兵完好。缺一即失败。
+    std::process::exit(if sentinel_ok && control_ok && all_vectors_blocked { 0 } else { 1 });
 }
 
 #[cfg(windows)]
@@ -198,3 +199,27 @@ fn make_junction(target: &Path, link: &Path) -> bool {
 
 #[cfg(not(windows))]
 fn make_junction(_t: &Path, _l: &Path) -> bool { false }
+
+/// 合法 JSON 产物(codex R1-F4);正确转义。
+fn build_json(results: &[(String, String, String)], sentinel_ok: bool,
+    predicate_catches_all: bool, control_ok: bool, all_blocked: bool) -> String {
+    let items: Vec<String> = results.iter().map(|(v, p, d)|
+        format!("{{\"vector\":{},\"predicate\":{},\"detail\":{}}}",
+            js(v), js(p), js(d))).collect();
+    format!("{{\"artifact\":\"c1-escape-predicate-spike\",\"scope\":\"client predicate capability ONLY — not full C1 evidence (no engine session, no real tool_calls, no observed rejection); produces NO tier ruling\",\"sentinel_intact\":{},\"predicate_catches_all_tested\":{},\"control_allows\":{},\"all_three_vectors_blocked\":{},\"vectors\":[{}]}}",
+        sentinel_ok, predicate_catches_all, control_ok, all_blocked, items.join(","))
+}
+
+fn js(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\n"), '\r' => o.push_str("\r"),
+            '\t' => o.push_str("\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"'); o
+}
