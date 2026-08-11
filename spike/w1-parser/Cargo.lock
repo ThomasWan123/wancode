@@ -783,6 +783,7 @@ version = "0.0.0"
 dependencies = [
  "docx-rs",
  "lopdf",
+ "serde_json",
  "zip 2.4.2",
 ]
 

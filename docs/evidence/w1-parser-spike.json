@@ -1,1 +1,58 @@
-{"artifact":"w1-parser-spike","scope":"safety-face (partial; numeric caps + extraction NOT covered)","pure_rust_deflate_only":true,"native_binary":false,"all_safe":true,"probes":[{"probe":"pdf_truncated","outcome":"REJECTED","detail":"拒绝:Invalid cross-reference table (invalid start value)"},{"probe":"pdf_garbage","outcome":"REJECTED","detail":"拒绝:Invalid file header"},{"probe":"pdf_encrypted","outcome":"REJECTED","detail":"加密文档解析拒绝:Invalid cross-reference table (invalid start value)"},{"probe":"pdf_valid_control","outcome":"OK","detail":"正对照解析成功,页数=1"},{"probe":"docx_zip_path_traversal","outcome":"REJECTED","detail":"enclosed_name()对 ../ 返回 None:落盘只走该安全 API"},{"probe":"docx_zip_over_cap_rejected","outcome":"REJECTED","detail":"声明解压大小=2000000 > CAP=1000000,解压前拒绝(fail-closed)"},{"probe":"xml_entity_expansion","outcome":"REJECTED","detail":"检出 DOCTYPE/ENTITY:生产 XML 读取须禁 DTD,含实体声明即拒"},{"probe":"crash_containment","outcome":"CONTAINED","detail":"子进程崩溃退出(success=false),父进程存活=true"}]}
+{
+  "all_safe": true,
+  "artifact": "w1-parser-spike",
+  "compression_stack": "pure-rust deflate (miniz_oxide); no separately-shipped native binary",
+  "probes": [
+    {
+      "detail": "Invalid cross-reference table (invalid start value)",
+      "outcome": "REJECTED",
+      "probe": "pdf_truncated"
+    },
+    {
+      "detail": "Invalid file header",
+      "outcome": "REJECTED",
+      "probe": "pdf_garbage"
+    },
+    {
+      "detail": "页数=1",
+      "outcome": "OK",
+      "probe": "pdf_valid_control"
+    },
+    {
+      "detail": "trailer 含 /Encrypt,分类为不支持(不解密)",
+      "outcome": "HANDLED",
+      "probe": "pdf_encrypted_detected"
+    },
+    {
+      "detail": "enclosed_name() 对 ../ 返回 None",
+      "outcome": "REJECTED",
+      "probe": "docx_zip_path_traversal"
+    },
+    {
+      "detail": "声明=2000692>CAP=1000000,解压前拒",
+      "outcome": "REJECTED",
+      "probe": "docx_zip_over_cap_rejected"
+    },
+    {
+      "detail": "恶意 DOCX 在超时内被解析器有界处理(无挂死展开)",
+      "outcome": "REJECTED",
+      "probe": "docx_xml_entity_real_parse"
+    },
+    {
+      "detail": "最小 DOCX 不足以让 docx-rs 完整解析:Failed to read from zip.;正对照留待 W3 用真实样本",
+      "outcome": "PARSER_NEEDS_FULL_OOXML",
+      "probe": "docx_benign_control"
+    },
+    {
+      "detail": "crash worker 非成功终止 status=ExitStatus(ExitStatus(3221226505));残留哨兵存在=true 清理后=true",
+      "outcome": "CONTAINED",
+      "probe": "crash_containment"
+    },
+    {
+      "detail": "hang worker 超时被 kill,父存活;残留哨兵存在=true 清理后=true",
+      "outcome": "KILLED",
+      "probe": "hang_timeout_kill"
+    }
+  ],
+  "scope": "exploratory API feasibility — NOT a closed safety gate"
+}

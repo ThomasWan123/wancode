@@ -1,49 +1,46 @@
-# W1 解析可行性 spike — 证据报告(v2,已按 codex 复核收窄)
+# W1 解析 spike — 探索性 API 可行性(v3,**非**安全门关闭证据)
 
-> 对照 `docs/design/v0.20-work-cowork-increment.md` §1.1 W1 安全面清单。
-> spike:`spike/w1-parser/`(独立 workspace)。证据:`w1-parser-spike.json`(合法 JSON)。
+> 对照 `docs/design/v0.20-work-cowork-increment.md` §1.1。spike:`spike/w1-parser/`。
+> 证据:`w1-parser-spike.json`(serde_json 产出 + parse-back 校验)。
 >
-> **范围声明(codex R1-F1)**:本 spike 是**安全面的部分证据**,**不**关闭/
-> 计入 W1 安全门。数值资源上限(内存/CPU 墙钟精确档位)与真实样本抽取率
-> **未覆盖**,归功能面/压测 spike。据此,PDF 选型修订(pdfium→纯 Rust)
-> **不在本 PR 落地**,仅作为待功能面证据补齐后的建议记录。
+> **范围(codex R2-F1)**:本 spike 是**探索性 API 可行性**,**不**关闭/计入
+> W1 安全门。数值资源档位、真实样本抽取率、完整功能面均 NOT-RUN(归 W3 前置
+> 的功能面 spike)。压缩栈声明精确到:纯 Rust deflate(miniz_oxide),无单独
+> 分发的原生二进制;**不**宣称整依赖图零原生。
 
-## 依赖图:deflate-only 纯 Rust(codex R1-F4 已修)
+## 探针 10/10(all_safe=true;serde_json parse-back 通过)
 
-初版 `zip = "2"` 默认特性拉进 `bzip2-sys`/`lzma-sys`/`zstd-sys` 原生链——
-"零原生依赖"声明当时**造假**。已改 `zip = { default-features = false,
-features = ["deflate"] }`(miniz_oxide 纯 Rust 后端);构建后核验 lockfile
-**零 `*-sys` 压缩链**。精确声明:`native_binary: false` 现指"无单独分发的
-原生二进制 **且** 压缩栈为纯 Rust deflate",不再宣称整图零原生。
-
-## 安全面探针 8/8(all_safe=true;JSON 经 python json.tool 真解析)
-
-| 探针 | 结局 | 说明 |
+| 探针 | 结局 | 真实性说明 |
 |---|---|---|
-| pdf_truncated | REJECTED | 截断 PDF → 结构化错误,无 panic |
-| pdf_garbage | REJECTED | 4KB 垃圾 → Invalid header |
-| pdf_encrypted | HANDLED | 检出 `/Encrypt` → 一期按不支持处理,不解密 |
-| pdf_valid_control | OK | **正对照**:合法单页解析成功(拒绝非全拒) |
-| docx_zip_path_traversal | REJECTED | `../../evil.txt` → `enclosed_name()` 返回 None |
-| **docx_zip_over_cap_rejected** | REJECTED | **真实对抗**:声明解压 2MB > CAP 1MB,解压前拒绝(fail-closed);**变异验证**:去掉 `declared > CAP` 判定 → all_safe=false |
-| xml_entity_expansion | REJECTED | billion-laughs 样本检出 DOCTYPE/ENTITY → 拒(生产 XML 须禁 DTD) |
-| **crash_containment** | CONTAINED | **子进程** worker 在解析中 `abort()`,父进程存活;含 5s 超时 kill 机制 |
+| pdf_truncated | REJECTED | 真喂 lopdf,结构化错误 |
+| pdf_garbage | REJECTED | 真喂 lopdf |
+| pdf_valid_control | OK | 正对照,合法单页解析成功 |
+| **pdf_encrypted_detected** | HANDLED | **构造结构合法 + trailer 带 /Encrypt 的 PDF**,解析后真检出 `/Encrypt` → 分类不支持(codex R2-F2:不再是伪装的截断测试) |
+| docx_zip_path_traversal | REJECTED | `enclosed_name()` 对 `../` 返回 None |
+| **docx_zip_over_cap_rejected** | REJECTED | 声明解压 2MB > CAP 1MB,解压前拒;**变异**:去判定 → all_safe=false |
+| **docx_xml_entity_real_parse** | REJECTED | **真喂 `docx_rs::read_docx`**(billion-laughs DOCX),3s 内有界返回=**未无界展开挂死**(codex R2-F3:真实解析边界,非字符串检查) |
+| docx_benign_control | NOT-RUN | 诚实标注:docx-rs 需真实世界完整 .docx,最小合成件不足以让它读 zip;良性正对照**留待 W3 真实样本**。因此实体探针仅证明"不挂死",未证明"结构正常解析" |
+| **crash_containment** | CONTAINED | **独立子进程**解析中 `abort()`,非成功终止(0xC0000409),父存活 + 残留哨兵被清 |
+| **hang_timeout_kill** | KILLED | **独立子进程**死循环,**超时被 kill**(触发超时分支),父存活 + 残留哨兵被清(codex R2-F4:crash/hang 分离 + 残留断言) |
 
-相比 v1 的改进(全部回应 codex 复核):
-- **#2**:zip 炸弹探针从"能读元数据"改为**真实超限拒绝 + 变异证据**;
-- **#3**:崩溃遏制从同进程 `catch_unwind` 改为**独立可杀子进程** + 超时;
-- **#5**:证据产物是**合法 JSON**(正确转义),控制台标记与 JSON 分离,
-  内置 well-formed 校验 + python json.tool 外部验证。
+## 相比 v2 的改进(全部回应 codex R2)
 
-## 仍未覆盖(NOT-RUN,归功能面 spike,gates W3)
+- **F1**:PR 标题/正文/注释收窄到"探索性、非门关闭";移除 CAP=200MB、
+  catch_unwind、"零原生依赖"等失准表述;
+- **F2**:加密探针用真实 /Encrypt PDF,真检出(非通用解析错误冒充);
+- **F3**:XML 实体炸弹真喂 docx-rs,断言有界返回;良性对照如实 NOT-RUN;
+- **F4**:crash 与 hang 分离;hang 触发超时 kill;两者断言残留哨兵清理;
+- **F5**:serde_json 序列化 + 真实 parse-back(替代同义反复的括号配平)。
 
-- 数值资源档位实测:内存/CPU/墙钟上限的具体数字(本 spike 验机制存在,未压测);
-- 真实样本抽取率:中文/表格/多栏 + 锚点回源逐字一致;
-- 扫描件(无文本层→「无法定位」)、DOCX 段落/块级锚点与 run 拆分;
-- 加密文档一期确定"不支持"的完整 UX(本 spike 只验解析层不崩)。
+## 诚实边界(NOT-RUN)
 
-## 结论(收窄后)
+- 数值资源档位(内存/CPU/墙钟上限具体值)——验机制存在,未压测;
+- 真实样本抽取率、DOCX 段落锚点/run 拆分——归功能面 spike;
+- **良性 DOCX 正对照**——需真实世界 .docx,留 W3。因此实体探针的结论限于
+  "恶意 DOCX 不使 read_docx 挂死",不含"良性 DOCX 正常解析"。
 
-W1 **安全面机制的受测向量全部 fail-closed**,依赖图为纯 Rust deflate。
-这**不等于**安全门关闭——数值档位与功能面待补。pdfium→纯 Rust 的选型修订
-是**建议**,待功能面 spike 通过后才落地。W2 骨架不依赖本修订即可开工。
+## 结论(精确)
+
+W1 **API 可行性成立**:纯 Rust 压缩栈、崩溃/挂死可遏制、结构对抗输入
+fail-closed。这**不等于**安全门关闭——数值档位与功能面(含良性 DOCX 对照)
+待补。pdfium→纯 Rust 选型是**建议**,待功能面 spike 后落地。W2 骨架可先行。
