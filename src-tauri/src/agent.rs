@@ -255,9 +255,8 @@ pub(crate) async fn start_inner_with_intent(
         .unwrap_or_else(|| new_intent.surface_kind());
     let is_chat = surface_kind == crate::surface::SurfaceKind::Chat;
     let cwd = if is_chat {
-        let path = app.path().app_data_dir()
-            .map_err(|e| anyhow!("解析 Chat 私有运行目录失败: {e}"))?
-            .join("chat-runtime");
+        // 路径必须经 resolve_chat_runtime_dir 单一来源（PR #38 F2）。
+        let path = resolve_chat_runtime_dir(&app).map_err(|e| anyhow!(e))?;
         std::fs::create_dir_all(&path)
             .with_context(|| format!("创建 Chat 私有运行目录失败: {}", path.display()))?;
         path
@@ -1360,6 +1359,53 @@ pub fn default_workspace() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string())
+}
+
+/// Chat 私有运行目录名。唯一字面量出处——除 [`chat_runtime_dir_under`]
+/// 外任何代码不得再拼写它（PR #38 F2：两处独立字面量可各自漂移，
+/// 重现"侧栏查的目录 ≠ 引擎写的目录"的隐形丢历史 bug）。
+const CHAT_RUNTIME_DIR_NAME: &str = "chat-runtime";
+
+/// Chat 私有运行目录的唯一推导点（纯函数，可测）。
+pub(crate) fn chat_runtime_dir_under(app_data_dir: PathBuf) -> PathBuf {
+    app_data_dir.join(CHAT_RUNTIME_DIR_NAME)
+}
+
+/// 解析当前应用的 Chat 私有运行目录。`start_inner` 的 is_chat 分支与
+/// `chat_workspace` 命令都必须经由此函数取路径。
+pub(crate) fn resolve_chat_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(chat_runtime_dir_under(
+        app.path()
+            .app_data_dir()
+            .map_err(|e| format!("解析 Chat 私有运行目录失败: {e}"))?,
+    ))
+}
+
+/// Chat 界面的私有工作区路径（app_data_dir/chat-runtime）。
+/// 侧栏用它列出 Chat 会话——此前切到 Chat 直接清空列表，已存在的 Chat
+/// 会话永不显示（v0.19 Chat 分层漏环）。与 agent_start 的 is_chat 分支
+/// 共用 [`resolve_chat_runtime_dir`]，单一来源保证查询目录即写入目录。
+/// 本命令只读——目录创建的副作用归会话启动所有。
+#[tauri::command]
+pub fn chat_workspace(app: AppHandle) -> Result<String, String> {
+    let path = resolve_chat_runtime_dir(&app)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod chat_runtime_dir_tests {
+    use super::*;
+
+    #[test]
+    fn chat_runtime_dir_is_app_data_joined_with_the_single_literal() {
+        let base = PathBuf::from("C:/Users/x/AppData/Roaming/wancode");
+        let dir = chat_runtime_dir_under(base.clone());
+        assert_eq!(dir, base.join("chat-runtime"));
+        assert_eq!(
+            dir.file_name().and_then(|n| n.to_str()),
+            Some(CHAT_RUNTIME_DIR_NAME)
+        );
+    }
 }
 
 /// Interrupt the current turn.
