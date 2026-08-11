@@ -1,0 +1,13 @@
+# C1 Cowork 逃逸探针 spike —— 独立 workspace,秒级构建。
+# 对照 docs/design/v0.20-work-cowork-increment.md §2.1:测试客户端唯一可用的
+# 隔离杠杆(路径限制谓词 canonicalize+starts_with)对三个逃逸向量各自是否
+# 拦得住。判据决定 Cowork 档位:三项全拦→档A候选;任一失守→档B。
+[package]
+name = "c1-escape-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "c1_probe"
+path = "src/main.rs"
+[workspace]
