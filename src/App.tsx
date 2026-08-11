@@ -1123,8 +1123,16 @@ function App() {
     // 于是磁盘和后端都有旧会话，侧栏却只剩刚创建的那一个。
     if (surface === "code" && workspace) refreshSessions(workspace);
     if (surface === "chat" && !sessionIdRef.current) {
-      setSessions([]);
-      setMcpServers([]);
+      // v0.19 漏环：此前切到 Chat 直接 setSessions([])，导致已存在的 Chat
+      // 会话（引擎写在 chat-runtime 私有工作区里）永不在侧栏显示。改为查询
+      // 该工作区的会话列表；路径由后端 chat_workspace 命令给出（与 agent_start
+      // 同源），保证查的就是引擎写入的那个目录。
+      invoke<string>("chat_workspace")
+        .then((chatWs) => refreshSessions(chatWs))
+        .catch(() => {
+          setSessions([]);
+          setMcpServers([]);
+        });
     }
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps

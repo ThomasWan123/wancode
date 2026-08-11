@@ -269,6 +269,7 @@ pub fn run() {
             git_ops::git_branches,
             git_ops::git_checkout,
             agent::default_workspace,
+            agent::chat_workspace,
             agent::agent_list_sessions,
             agent::agent_list_mcp,
             engine_ops::agent_session_info,

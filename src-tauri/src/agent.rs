@@ -1362,6 +1362,20 @@ pub fn default_workspace() -> String {
         .unwrap_or_else(|_| ".".to_string())
 }
 
+/// Chat 界面的私有工作区路径（app_data_dir/chat-runtime）。
+/// 侧栏用它列出 Chat 会话——此前切到 Chat 直接清空列表，已存在的 Chat
+/// 会话永不显示（v0.19 Chat 分层漏环）。路径与 agent_start 里 is_chat 分支
+/// 同源，保证前端查询的工作区就是引擎写入会话的那个。
+#[tauri::command]
+pub fn chat_workspace(app: AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("解析 Chat 私有运行目录失败: {e}"))?
+        .join("chat-runtime");
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Interrupt the current turn.
 #[tauri::command]
 pub async fn agent_cancel(state: State<'_, AgentState>) -> Result<(), String> {
