@@ -9,8 +9,9 @@
 //! 外加一个 worktree 内合法写的**正对照**(证明谓词不是"全拒")。
 //!
 //! 判据(设计 §2.1):
-//!   - 谓词对 ①②③ 全部判"越界"(would-block)+ 正对照判"允许" → 档 A 候选
-//!   - 任一逃逸被谓词误判为"在内" → **档 B**(该杠杆不足以强制隔离)
+//! 本 spike **不产出档位裁定**(codex R2-F1):它只测谓词能否识别逃逸,不驱动
+//! 真实引擎会话、无真实 tool_call、不观测拒绝。C1/C2 档位由保留的 full-MvpAgent
+//! 门决定(用户裁定 2026-08-12:保留门)。
 //!
 //! 诚实边界:这测的是"客户端谓词能不能识别逃逸",不是"引擎会不会在放行
 //! 前调用它"。后者需完整 MvpAgent 会话(C1 第二阶段,provider_compliance 级)。
@@ -86,7 +87,7 @@ fn main() {
 
     // ---- 向量③:symlink/junction 指向宿主 ----
     // 在 worktree 内造一个链接指向宿主目录,再经该链接写文件。
-    // 谓词若只按字面路径判(不解 link)会误判"在内" → 档 B 的决定性证据。
+    // 谓词若只按字面路径判(不解 link)会误判"在内";canonicalize 解链接后应识别越界。
     {
         let link = worktree.join("escape_link");
         let link_made = make_dir_link(&host, &link);
@@ -141,15 +142,9 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     let control_ok = results.iter().any(|(v, p, _)|
         v == "in_worktree_control" && p == "ALLOW");
 
-    // 档位裁定(设计 §2.1 + PR #39 已确证的执行点缺口):
-    // 档 A 需要**写前强制拦截执行点**。PR #39 确证:引擎在放行 shell 写前
-    // 无调用点会咨询客户端谓词(工具/MCP 策略只在 NewSession 构造期设,
-    // PromptRequest 无逐操作钩子)。因此**无论谓词多强,档位都是 B**——
-    // 谓词能识别逃逸 ≠ 有地方在写发生前拦下它。这正是探针要钉死的结论。
-    // 收窄(codex R1-F1/F3):本 spike 只测【客户端谓词能否识别逃逸】,
-    // 不驱动真实引擎会话、无真实 tool_call、不观测结构化拒绝。因此它
-    // **不产出档位裁定**,也不宣称执行点是否存在——那是 C1 完整阶段
-    // (full-MvpAgent)的事。这里只报谓词能力面。
+    // 本 spike **不产出档位裁定**(codex R1-F3/R2-F1):只测谓词能否识别逃逸,
+    // 不驱动真实引擎会话、不观测拒绝,也不宣称执行点是否存在。C1/C2 档位由
+    // 保留的 full-MvpAgent 门决定(用户裁定 2026-08-12)。
     // F2:每个逃逸向量都必须被谓词识别(WOULD_BLOCK)才算成功,
     //     任一 ESCAPED/ERROR/SKIPPED → 失败。
     let all_vectors_blocked = escapes.len() == 3
@@ -200,26 +195,25 @@ fn make_junction(target: &Path, link: &Path) -> bool {
 #[cfg(not(windows))]
 fn make_junction(_t: &Path, _l: &Path) -> bool { false }
 
-/// 合法 JSON 产物(codex R1-F4);正确转义。
+/// 合法 JSON 产物(codex R2-F3):用 serde_json,根除手写转义的控制符 bug。
 fn build_json(results: &[(String, String, String)], sentinel_ok: bool,
     predicate_catches_all: bool, control_ok: bool, all_blocked: bool) -> String {
-    let items: Vec<String> = results.iter().map(|(v, p, d)|
-        format!("{{\"vector\":{},\"predicate\":{},\"detail\":{}}}",
-            js(v), js(p), js(d))).collect();
-    format!("{{\"artifact\":\"c1-escape-predicate-spike\",\"scope\":\"client predicate capability ONLY — not full C1 evidence (no engine session, no real tool_calls, no observed rejection); produces NO tier ruling\",\"sentinel_intact\":{},\"predicate_catches_all_tested\":{},\"control_allows\":{},\"all_three_vectors_blocked\":{},\"vectors\":[{}]}}",
-        sentinel_ok, predicate_catches_all, control_ok, all_blocked, items.join(","))
-}
-
-fn js(s: &str) -> String {
-    let mut o = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\n"), '\r' => o.push_str("\r"),
-            '\t' => o.push_str("\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o.push('"'); o
+    let vectors: Vec<serde_json::Value> = results.iter()
+        .map(|(v, p, d)| serde_json::json!({"vector": v, "predicate": p, "detail": d}))
+        .collect();
+    let doc = serde_json::json!({
+        "artifact": "c1-escape-predicate-spike",
+        "scope": "client predicate capability ONLY — not full C1 evidence \
+(no engine session, no real tool_calls, no observed rejection); produces NO tier ruling. \
+C1/C2 remain gated by the preserved full-MvpAgent requirement (user ruling 2026-08-12).",
+        "sentinel_intact": sentinel_ok,
+        "predicate_catches_all_tested": predicate_catches_all,
+        "control_allows": control_ok,
+        "all_three_vectors_blocked": all_blocked,
+        "vectors": vectors,
+    });
+    let s = serde_json::to_string_pretty(&doc).unwrap();
+    // parse-back:序列化产物必须可被重新解析
+    debug_assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok());
+    s
 }
