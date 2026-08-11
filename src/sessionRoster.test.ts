@@ -104,6 +104,26 @@ describe("createRosterCoordinator — 生产协调器", () => {
     expect(b.state.cleared).toBe(0);
     expect(b.state.visibleRoster).toBe("chat-roster");
   });
+
+  it("失败路径孪生竞态:陈旧 Chat 解析在切回 Code 后 reject → 不得清空 Code 列表", async () => {
+    // round-3 F1:成功路径复查了 surface,失败路径若不复查,被 reject 的
+    // 旧 Chat 入口调用会把正确的 Code 列表清成空。
+    let rejectChat!: (e: Error) => void;
+    const held = new Promise<string>((_, rej) => (rejectChat = rej));
+    const { state, coordinator } = makeFixture({ resolveChat: () => held });
+
+    state.surface = "chat";
+    const staleChatEntry = coordinator({ onChatResolveFailure: "clear" }); // 挂住
+
+    state.surface = "code";
+    await coordinator(); // Code 正对照完成
+    expect(state.visibleRoster).toBe("code-roster");
+
+    rejectChat(new Error("backend down")); // 陈旧解析此刻才失败
+    await staleChatEntry;
+    expect(state.cleared).toBe(0); // 不得清空
+    expect(state.visibleRoster).toBe("code-roster");
+  });
 });
 
 describe("createRefreshGuard", () => {

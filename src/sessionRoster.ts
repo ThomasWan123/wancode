@@ -56,6 +56,10 @@ export function createRosterCoordinator(deps: RosterCoordinatorDeps) {
       try {
         chatWs = await deps.resolveChatWorkspace();
       } catch {
+        // 失败路径与成功路径同规:陈旧延续在用户切走后一律丢弃——
+        // 否则被 reject 的旧 Chat 解析会把切回 Code 后的正确列表清空
+        // (round-3 F1,成功路径反向竞态的孪生形态)。
+        if (deps.getSurface() !== "chat") return;
         if ((opts?.onChatResolveFailure ?? "keep") === "clear") deps.clearRoster();
         return;
       }
