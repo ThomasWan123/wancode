@@ -1,7 +1,8 @@
 {
-  "all_safe": true,
+  "all_safe_over_run_probes": true,
   "artifact": "w1-parser-spike",
   "compression_stack": "pure-rust deflate (miniz_oxide); no separately-shipped native binary",
+  "not_run_count": 1,
   "probes": [
     {
       "detail": "Invalid cross-reference table (invalid start value)",
@@ -34,14 +35,9 @@
       "probe": "docx_zip_over_cap_rejected"
     },
     {
-      "detail": "恶意 DOCX 在超时内被解析器有界处理(无挂死展开)",
-      "outcome": "REJECTED",
-      "probe": "docx_xml_entity_real_parse"
-    },
-    {
-      "detail": "最小 DOCX 不足以让 docx-rs 完整解析:Failed to read from zip.;正对照留待 W3 用真实样本",
-      "outcome": "PARSER_NEEDS_FULL_OOXML",
-      "probe": "docx_benign_control"
+      "detail": "需真实 .docx 样本让 docx-rs 完整解析;合成件不足,归 W3 功能面",
+      "outcome": "NOT_RUN",
+      "probe": "docx_xml_entity_expansion"
     },
     {
       "detail": "crash worker 非成功终止 status=ExitStatus(ExitStatus(3221226505));残留哨兵存在=true 清理后=true",

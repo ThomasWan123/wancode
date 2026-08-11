@@ -95,36 +95,13 @@ fn main() {
         else { ("MUTATION_LEAK", format!("声明={declared} 未超 CAP")) }
     }));
 
-    // ⑦ DOCX XML 实体炸弹:把真实的恶意 .docx 喂给 docx-rs,断言**不展开/不挂死**。
-    //    加良性 DOCX 正对照。这是真实解析边界,不是字符串检查(codex R2-F3)。
-    probes.push(catch("docx_xml_entity_real_parse", || {
-        let bomb_xml = br#"<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"><!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]><w:document xmlns:w="x"><w:body><w:p><w:r><w:t>&c;</w:t></w:r></w:body></w:document>"#;
-        let docx = build_docx_zip("word/document.xml", bomb_xml);
-        // 在子线程 + 超时内解析,证明不会无界展开挂死。
-        let (tx, rx) = std::sync::mpsc::channel();
-        let bytes = docx.clone();
-        std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(|| docx_rs::read_docx(&bytes).is_ok());
-            let _ = tx.send(r.unwrap_or(false));
-        });
-        match rx.recv_timeout(Duration::from_secs(3)) {
-            // 无论解析成功与否,关键是**在 3s 内返回**(未无界展开挂死)。
-            Ok(_) => ("REJECTED", "恶意 DOCX 在超时内被解析器有界处理(无挂死展开)".to_string()),
-            Err(_) => ("EXPANDED_OR_HUNG", "解析在 3s 内未返回(疑似实体展开挂死)".to_string()),
-        }
-    }));
-
-    // ⑦b DOCX 良性正对照:合法 DOCX 能被 docx-rs 解析
-    probes.push(catch("docx_benign_control", || {
-        let ok_xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hello</w:t></w:r></w:p></w:body></w:document>"#;
-        let docx = build_docx_zip("word/document.xml", ok_xml);
-        match docx_rs::read_docx(&docx) {
-            Ok(_) => ("OK", "良性 DOCX 解析成功(证明拒绝非全拒)".to_string()),
-            // docx-rs 需完整 OOXML 结构;解析失败不代表安全问题,标记为 NOT-RUN 语义
-            Err(e) => ("PARSER_NEEDS_FULL_OOXML",
-                format!("最小 DOCX 不足以让 docx-rs 完整解析:{e};正对照留待 W3 用真实样本")),
-        }
-    }));
+    // ⑦ DOCX XML 实体炸弹:**本 spike 无法证明** —— docx-rs 需真实世界完整
+    //    OOXML 才能解析,合成最小 .docx 连 zip 都读不进(codex R2/R3-F3)。
+    //    没有能通过的良性正对照,恶意样本的"快速返回"无法与"同一个 zip 失败"
+    //    区分。因此**移出通过证据**,如实标记为 NOT-RUN,归 W3 用真实样本。
+    //    zip 层防线(路径穿越 ⑤、超限 ⑥)不受影响,仍是真证据。
+    probes.push(("docx_xml_entity_expansion", "NOT_RUN",
+        "需真实 .docx 样本让 docx-rs 完整解析;合成件不足,归 W3 功能面".to_string()));
 
     // ⑧ 崩溃遏制:crash worker → 必须非成功终止 + 残留哨兵被清
     probes.push(worker_probe("crash_containment", "__crash", false));
@@ -134,14 +111,17 @@ fn main() {
     // ---- 汇总为真实 JSON(serde_json) + parse-back 校验(codex R2-F5)----
     let arr: Vec<serde_json::Value> = probes.iter()
         .map(|(n, o, d)| json!({"probe": n, "outcome": o, "detail": d})).collect();
-    let safe = probes.iter().all(|(_, o, _)| matches!(*o,
-        "REJECTED" | "OK" | "HANDLED" | "CONTAINED" | "KILLED"
-        | "PARSER_NEEDS_FULL_OOXML"));
+    // NOT_RUN 不计入 all_safe(codex R3-F1:未运行的正对照不能充数)。
+    let run: Vec<_> = probes.iter().filter(|(_, o, _)| *o != "NOT_RUN").collect();
+    let not_run = probes.len() - run.len();
+    let safe = run.iter().all(|(_, o, _)| matches!(*o,
+        "REJECTED" | "OK" | "HANDLED" | "CONTAINED" | "KILLED"));
     let doc = json!({
         "artifact": "w1-parser-spike",
         "scope": "exploratory API feasibility — NOT a closed safety gate",
         "compression_stack": "pure-rust deflate (miniz_oxide); no separately-shipped native binary",
-        "all_safe": safe,
+        "all_safe_over_run_probes": safe,
+        "not_run_count": not_run,
         "probes": arr,
     });
     let s = serde_json::to_string_pretty(&doc).unwrap();
@@ -150,8 +130,8 @@ fn main() {
 
     let out = args.get(2).cloned().unwrap_or_else(|| "w1-evidence.json".into());
     std::fs::write(&out, &s).unwrap();
-    println!("W1 spike: probes={} all_safe={} parse_back_ok={} -> {}",
-        probes.len(), safe, parse_back_ok, out);
+    println!("W1 spike: run={} not_run={} all_safe={} parse_back_ok={} -> {}",
+        run.len(), not_run, safe, parse_back_ok, out);
     std::process::exit(if safe && parse_back_ok { 0 } else { 1 });
 }
 
