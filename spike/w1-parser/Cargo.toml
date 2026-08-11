@@ -1,0 +1,23 @@
+# W1 解析可行性 spike —— 独立于引擎 workspace,秒级构建,只产证据不进产品。
+# 评估:PDF/DOCX 解析器在【安全面】(不受信输入)的行为,对照设计稿
+# docs/design/v0.20-work-cowork-increment.md §1.1 的双门清单。
+[package]
+name = "w1-parser-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# 关键证据点:引擎已内置 pdf_oxide(纯 Rust),避开 pdfium 原生二进制风险。
+# spike 用 lopdf(纯 Rust,轻)做 PDF 结构探测 + docx-rs(纯 Rust)做 DOCX,
+# 两者都无原生依赖 —— 若纯 Rust 路线在安全面达标,设计稿 §5 体积风险消解。
+[dependencies]
+lopdf = "0.34"
+docx-rs = "0.4"
+zip = "2"
+
+[[bin]]
+name = "w1_probe"
+path = "src/main.rs"
+
+# 独立 workspace,不被 ../grok-build 吸入
+[workspace]
