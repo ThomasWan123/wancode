@@ -16,10 +16,14 @@
 | in_worktree_control(正对照) | ALLOW | worktree 内路径判定在内(非全拒) |
 | absolute_path | WOULD_BLOCK | 绝对路径写宿主被识别越界 |
 | dotdot_relative | WOULD_BLOCK | `../../` 逃逸被识别越界 |
-| symlink_junction | WOULD_BLOCK | 经 junction 写宿主,canonicalize 解链接后识别越界 |
+| symlink_junction | WOULD_BLOCK | 经 junction 写宿主(父级 junction),canonicalize 解链接后识别越界 |
+| existing_final_link | WOULD_BLOCK | **末段本身是链接**(codex R3-F1):worktree 内已存在的末段 junction/symlink 指向宿主。修正前谓词只解父目录会漏判 ALLOW;修正后解全路径识别越界。**变异验证**:退回只解父目录 → ESCAPED(exit 1) |
 
 退出码严格化(F2):三向量全部 WOULD_BLOCK + 正对照 ALLOW + 哨兵完好才 exit 0;
 任一 ESCAPED/ERROR/SKIPPED → exit 1。
+
+> **检测非强制 + TOCTOU(codex R3-F1)**:谓词只做判定,check→write 之间存在
+> 时间窗;档 B 由确认门 + 合并前人工验收兜底,不靠此谓词强制。
 
 ## 本 spike **没有**证明什么(诚实边界,codex R1-F1/F3 纠正)
 

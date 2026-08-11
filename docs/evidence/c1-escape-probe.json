@@ -12,19 +12,24 @@
       "vector": "in_worktree_control"
     },
     {
-      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-301684\\host\\via_absolute.txt",
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\host\\via_absolute.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "absolute_path"
     },
     {
-      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-301684\\worktree\\subdir\\..\\..\\host\\via_dotdot.txt",
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\worktree\\subdir\\..\\..\\host\\via_dotdot.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "dotdot_relative"
     },
     {
-      "detail": "经 junction 写宿主(symlink 无权限,改用 junction),目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-301684\\worktree\\escape_junction\\via_junction.txt",
+      "detail": "经 junction 写宿主(symlink 无权限,改用 junction),目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\worktree\\escape_junction\\via_junction.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "symlink_junction"
+    },
+    {
+      "detail": "已存在的末段 junction 作 target;修正后解全路径识别越界(文件 symlink 无权限,junction 等价验证)",
+      "predicate": "WOULD_BLOCK",
+      "vector": "existing_final_link"
     }
   ]
 }

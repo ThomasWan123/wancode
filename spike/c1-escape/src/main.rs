@@ -22,17 +22,23 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// 客户端路径限制谓词:target 规范化后是否仍在 root 内。
-/// 这是 canonicalize + starts_with 的标准写法 —— 客户端能做到的最强形态。
+/// **仅检测,不能关闭 check→write 的 TOCTOU 窗口**(codex R3)。
+///
+/// codex R3-F1 修正:若 target **本身已存在**(可能是指向宿主的文件符号链接),
+/// 必须 canonicalize target 自身(解开末段链接);否则只解父目录会漏掉
+/// "末段是文件 symlink"这一逃逸——父在 worktree 内,写入却顺链进宿主。
 fn is_confined(root: &Path, target: &Path) -> Result<bool, String> {
     let root_c = fs::canonicalize(root).map_err(|e| format!("root canon: {e}"))?;
-    // target 可能尚不存在(新建写),规范化其**父目录**再拼文件名。
+    if target.exists() {
+        // 末段也解析(文件/目录 symlink 都被解开)
+        let t_c = fs::canonicalize(target).map_err(|e| format!("target canon: {e}"))?;
+        return Ok(t_c.starts_with(&root_c));
+    }
+    // 新建写:target 尚不存在。解析父目录(中间 symlink 被解开)再拼末段字面名。
     let parent = target.parent().unwrap_or(target);
     let name = target.file_name();
     let parent_c = fs::canonicalize(parent).map_err(|e| format!("parent canon: {e}"))?;
-    let resolved = match name {
-        Some(n) => parent_c.join(n),
-        None => parent_c,
-    };
+    let resolved = match name { Some(n) => parent_c.join(n), None => parent_c };
     Ok(resolved.starts_with(&root_c))
 }
 
@@ -125,6 +131,38 @@ fn main() {
         }
     }
 
+    // ---- 向量④:**已存在的末段文件符号链接** 指向宿主(codex R3-F1)----
+    // worktree/link.txt 是指向 host/sentinel.txt 的文件 symlink。旧谓词只解
+    // 父目录 → 父在 worktree 内 → 误判 ALLOW,写入却顺链改宿主。修正后须 ESCAPED。
+    {
+        let flink = worktree.join("link.txt");
+        if make_file_link(&sentinel, &flink) {
+            let verdict = match is_confined(&worktree, &flink) {
+                Ok(false) => "WOULD_BLOCK", // 修正后:解析末段链接 → 越界识别
+                Ok(true) => "ESCAPED",      // 旧实现会走到这里(漏判)
+                Err(_) => "ERROR",
+            };
+            results.push(("existing_final_link".into(), verdict.into(),
+                "worktree/link.txt 文件 symlink 指向宿主哨兵;解末段识别越界".into()));
+        } else {
+            // 文件 symlink 需权限:改用**已存在的 junction 本身**作 target,
+            // 同样走 target.exists()→canonicalize 全路径的修正路径,本机可实证。
+            let jlink = worktree.join("existing_junction_target");
+            if make_junction(&host, &jlink) {
+                let verdict = match is_confined(&worktree, &jlink) {
+                    Ok(false) => "WOULD_BLOCK", // 修正后:末段 junction 被解析 → 越界
+                    Ok(true) => "ESCAPED",      // 旧实现只解父,漏判为 ALLOW
+                    Err(_) => "ERROR",
+                };
+                results.push(("existing_final_link".into(), verdict.into(),
+                    "已存在的末段 junction 作 target;修正后解全路径识别越界(文件 symlink 无权限,junction 等价验证)".into()));
+            } else {
+                results.push(("existing_final_link".into(), "SKIPPED".into(),
+                    "本环境无权创建文件 symlink 或 junction;生产须假设可用".into()));
+            }
+        }
+    }
+
     finish(&results, &sentinel, &sentinel_before, &base);
 }
 
@@ -147,8 +185,10 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     // 保留的 full-MvpAgent 门决定(用户裁定 2026-08-12)。
     // F2:每个逃逸向量都必须被谓词识别(WOULD_BLOCK)才算成功,
     //     任一 ESCAPED/ERROR/SKIPPED → 失败。
-    let all_vectors_blocked = escapes.len() == 3
-        && escapes.iter().all(|(_, p, _)| p == "WOULD_BLOCK");
+    // 所有非正对照向量:凡真正运行(非 SKIPPED)的都必须 WOULD_BLOCK。
+    let run_escapes: Vec<_> = escapes.iter().filter(|(_, p, _)| *p != "SKIPPED").collect();
+    let all_vectors_blocked = !run_escapes.is_empty()
+        && run_escapes.iter().all(|(_, p, _)| *p == "WOULD_BLOCK");
 
     // 合法 JSON 产物(F4):写入文件,控制台标记分离
     let json = build_json(&results, sentinel_ok, predicate_catches_all,
@@ -169,6 +209,16 @@ fn make_dir_link(target: &Path, link: &Path) -> bool {
 
 #[cfg(not(windows))]
 fn make_dir_link(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn make_file_link(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(windows))]
+fn make_file_link(target: &Path, link: &Path) -> bool {
     std::os::unix::fs::symlink(target, link).is_ok()
 }
 
@@ -214,6 +264,6 @@ C1/C2 remain gated by the preserved full-MvpAgent requirement (user ruling 2026-
     });
     let s = serde_json::to_string_pretty(&doc).unwrap();
     // parse-back:序列化产物必须可被重新解析
-    debug_assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok());
+    assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok(), "parse-back failed");
     s
 }
