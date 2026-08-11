@@ -13,7 +13,10 @@ publish = false
 [dependencies]
 lopdf = "0.34"
 docx-rs = "0.4"
-zip = "2"
+# DOCX 只需 deflate;显式禁用 zip 默认特性以剔除 bzip2-sys/lzma-sys/zstd-sys
+# 原生链(codex R1-F4:默认特性使"零原生依赖"声明造假)。zip 的 `deflate`
+# 特性用 miniz_oxide 纯 Rust 后端。构建后核验 lockfile 无 *-sys 压缩链。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "w1_probe"

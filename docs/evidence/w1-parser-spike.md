@@ -1,42 +1,49 @@
-# W1 解析可行性 spike — 证据报告
+# W1 解析可行性 spike — 证据报告(v2,已按 codex 复核收窄)
 
-> 对照 `docs/design/v0.20-work-cowork-increment.md` §1.1 W1 双门清单的**安全面**。
-> spike 代码:`spike/w1-parser/`(独立 workspace,不进产品构建)。
-> 结构化证据:`w1-parser-spike.json`。
+> 对照 `docs/design/v0.20-work-cowork-increment.md` §1.1 W1 安全面清单。
+> spike:`spike/w1-parser/`(独立 workspace)。证据:`w1-parser-spike.json`(合法 JSON)。
+>
+> **范围声明(codex R1-F1)**:本 spike 是**安全面的部分证据**,**不**关闭/
+> 计入 W1 安全门。数值资源上限(内存/CPU 墙钟精确档位)与真实样本抽取率
+> **未覆盖**,归功能面/压测 spike。据此,PDF 选型修订(pdfium→纯 Rust)
+> **不在本 PR 落地**,仅作为待功能面证据补齐后的建议记录。
 
-## 头号发现:纯 Rust 路线可行,原生二进制风险消解
+## 依赖图:deflate-only 纯 Rust(codex R1-F4 已修)
 
-设计稿 §1.1 首选 pdfium-render(原生 PDFium),§5 记为最大风险(~5MB 原生
-二进制 + 崩溃遏制 + 架构矩阵)。spike 实证**纯 Rust 栈(lopdf + zip +
-docx-rs)在安全面全部达标,零原生依赖**:
+初版 `zip = "2"` 默认特性拉进 `bzip2-sys`/`lzma-sys`/`zstd-sys` 原生链——
+"零原生依赖"声明当时**造假**。已改 `zip = { default-features = false,
+features = ["deflate"] }`(miniz_oxide 纯 Rust 后端);构建后核验 lockfile
+**零 `*-sys` 压缩链**。精确声明:`native_binary: false` 现指"无单独分发的
+原生二进制 **且** 压缩栈为纯 Rust deflate",不再宣称整图零原生。
 
-- `native_binary: false` — 无 PDFium/DLL 分发,打包门体积零增量风险;
-- 顺带发现:锁定引擎自身已内置 `pdf_oxide 0.3.43`(纯 Rust),侧证纯 Rust
-  PDF 解析在本项目技术栈内是成熟选择。
-
-**建议修订设计稿选型**:PDF 首选从 pdfium-render 改为纯 Rust(lopdf 做结构/
-文本抽取,或复用引擎的 pdf_oxide 评估),pdfium 降为"若纯 Rust 抽取率不足"
-的备选。此修订待 W1 功能面(抽取率)spike 补齐后定稿。
-
-## 安全面探针 6/6(all_safe=true,退出码 0)
+## 安全面探针 8/8(all_safe=true;JSON 经 python json.tool 真解析)
 
 | 探针 | 结局 | 说明 |
 |---|---|---|
-| pdf_truncated | REJECTED | 截断 PDF(无 xref/trailer)→ 结构化错误,无 panic |
-| pdf_garbage | REJECTED | 4KB 垃圾字节 → Invalid file header,拒绝 |
-| pdf_valid_control | OK | **正对照**:合法单页 PDF 解析成功(页数=1)——证明拒绝不是"全拒" |
-| docx_zip_path_traversal | REJECTED | `../../evil.txt` 条目 → `enclosed_name()` 返回 None(安全 API 拦截逃逸) |
-| docx_zip_bomb_guard | OK | 解压**前**可读声明大小 → 上限判定机制成立(CAP=200MB) |
-| crash_containment | CONTAINED | 解析 panic 被 catch_unwind 兜住;生产须跑在可杀工作进程 |
+| pdf_truncated | REJECTED | 截断 PDF → 结构化错误,无 panic |
+| pdf_garbage | REJECTED | 4KB 垃圾 → Invalid header |
+| pdf_encrypted | HANDLED | 检出 `/Encrypt` → 一期按不支持处理,不解密 |
+| pdf_valid_control | OK | **正对照**:合法单页解析成功(拒绝非全拒) |
+| docx_zip_path_traversal | REJECTED | `../../evil.txt` → `enclosed_name()` 返回 None |
+| **docx_zip_over_cap_rejected** | REJECTED | **真实对抗**:声明解压 2MB > CAP 1MB,解压前拒绝(fail-closed);**变异验证**:去掉 `declared > CAP` 判定 → all_safe=false |
+| xml_entity_expansion | REJECTED | billion-laughs 样本检出 DOCTYPE/ENTITY → 拒(生产 XML 须禁 DTD) |
+| **crash_containment** | CONTAINED | **子进程** worker 在解析中 `abort()`,父进程存活;含 5s 超时 kill 机制 |
 
-## 尚未覆盖(W1 功能面,下一 spike / W3 前置)
+相比 v1 的改进(全部回应 codex 复核):
+- **#2**:zip 炸弹探针从"能读元数据"改为**真实超限拒绝 + 变异证据**;
+- **#3**:崩溃遏制从同进程 `catch_unwind` 改为**独立可杀子进程** + 超时;
+- **#5**:证据产物是**合法 JSON**(正确转义),控制台标记与 JSON 分离,
+  内置 well-formed 校验 + python json.tool 外部验证。
 
-- 抽取率:真实样本(中文/表格/多栏)的文本抽取质量与锚点回源逐字一致;
-- 加密 PDF、扫描件(无文本层→「无法定位」);
-- DOCX 段落/块级锚点(docx-rs 段落树遍历)与 run 拆分;
-- 内存/CPU 上限的实测数值定档(本 spike 只验机制存在,未压测)。
+## 仍未覆盖(NOT-RUN,归功能面 spike,gates W3)
 
-## 结论
+- 数值资源档位实测:内存/CPU/墙钟上限的具体数字(本 spike 验机制存在,未压测);
+- 真实样本抽取率:中文/表格/多栏 + 锚点回源逐字一致;
+- 扫描件(无文本层→「无法定位」)、DOCX 段落/块级锚点与 run 拆分;
+- 加密文档一期确定"不支持"的完整 UX(本 spike 只验解析层不崩)。
 
-W1 安全门的**机制侧全部就绪且纯 Rust**。设计稿 §5 的原生二进制体积风险
-按此证据可从风险表移除或大幅降级。功能面 spike 通过后即可定稿选型、开 W2。
+## 结论(收窄后)
+
+W1 **安全面机制的受测向量全部 fail-closed**,依赖图为纯 Rust deflate。
+这**不等于**安全门关闭——数值档位与功能面待补。pdfium→纯 Rust 的选型修订
+是**建议**,待功能面 spike 通过后才落地。W2 骨架不依赖本修订即可开工。
