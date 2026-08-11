@@ -1,51 +1,123 @@
 import { describe, expect, it } from "vitest";
-import { CHAT_WORKSPACE, createRefreshGuard, rosterRefreshTarget } from "./sessionRoster";
+import {
+  CHAT_WORKSPACE,
+  createRefreshGuard,
+  createRosterCoordinator,
+  rosterRefreshTarget,
+} from "./sessionRoster";
 
-describe("rosterRefreshTarget — 执行时按 surface 选目标", () => {
-  it("Code 正对照:code surface + 工作区 → 刷新该工作区", () => {
-    expect(rosterRefreshTarget("code", "D:/proj")).toBe("D:/proj");
+// 测试驱动的是生产协调器本体(App.tsx 的入口 effect 与 sessions/changed
+// 监听调用的就是它),不是平行实现。夹具只替换 IO 依赖。
+function makeFixture(opts?: { resolveChat?: () => Promise<string> }) {
+  const state = {
+    surface: "code" as string,
+    codeWorkspace: "D:/proj" as string | null,
+    visibleRoster: "initial" as string,
+    cleared: 0,
+  };
+  const guard = createRefreshGuard();
+  const refresh = async (ws: string) => {
+    const g = guard.begin();
+    await Promise.resolve(); // 模拟 IO 一跳
+    if (!guard.isCurrent(g)) return;
+    state.visibleRoster = ws === "CHAT-WS" ? "chat-roster" : "code-roster";
+  };
+  const coordinator = createRosterCoordinator({
+    getSurface: () => state.surface,
+    getCodeWorkspace: () => state.codeWorkspace,
+    resolveChatWorkspace: opts?.resolveChat ?? (() => Promise.resolve("CHAT-WS")),
+    refresh,
+    clearRoster: () => {
+      state.cleared++;
+      state.visibleRoster = "empty";
+    },
   });
+  return { state, coordinator, refresh };
+}
 
-  it("code surface 无工作区 → 不刷新", () => {
-    expect(rosterRefreshTarget("code", "")).toBeNull();
+describe("rosterRefreshTarget", () => {
+  it("code surface + 工作区 → 该工作区;无工作区 → null", () => {
+    expect(rosterRefreshTarget("code", "D:/proj")).toBe("D:/proj");
     expect(rosterRefreshTarget("code", null)).toBeNull();
   });
-
-  it("chat surface → 永远是 Chat 私有工作区哨兵,绝不落到 Code 工作区", () => {
-    // PR #38 F1 的事故形态:监听器闭包里捕获的是 Code 工作区,Chat 界面下
-    // sessions/changed 一来就用它刷新,覆盖修好的 Chat 列表。修复后 chat
-    // surface 的目标与 Code 工作区无关。
+  it("chat surface → 哨兵,与 Code 工作区无关", () => {
     expect(rosterRefreshTarget("chat", "D:/proj")).toBe(CHAT_WORKSPACE);
-    expect(rosterRefreshTarget("chat", null)).toBe(CHAT_WORKSPACE);
   });
 });
 
-describe("createRefreshGuard — 对抗性时序", () => {
-  it("Chat 刷新 → sessions/changed → 慢 Code 响应:最终可见列表必须仍是 Chat", async () => {
-    const guard = createRefreshGuard();
-    let visible = "initial";
-
-    // 慢 Code 请求先发起(旧代数)
-    const gCode = guard.begin();
-    const slowCode = (async () => {
-      await new Promise((r) => setTimeout(r, 20));
-      if (guard.isCurrent(gCode)) visible = "code-roster";
-    })();
-
-    // Chat 刷新后发起(新代数),先返回
-    const gChat = guard.begin();
-    if (guard.isCurrent(gChat)) visible = "chat-roster";
-
-    await slowCode;
-    expect(visible).toBe("chat-roster");
+describe("createRosterCoordinator — 生产协调器", () => {
+  it("Code 正对照:code surface 下刷新 Code 工作区", async () => {
+    const { state, coordinator } = makeFixture();
+    await coordinator();
+    expect(state.visibleRoster).toBe("code-roster");
   });
 
-  it("正常顺序不受守卫误伤:后发起者照常落地", () => {
+  it("Chat 正对照:chat surface 下刷新 Chat 私有工作区", async () => {
+    const { state, coordinator } = makeFixture();
+    state.surface = "chat";
+    await coordinator();
+    expect(state.visibleRoster).toBe("chat-roster");
+  });
+
+  it("原事故时序:Chat 刷新后 sessions/changed 到达 → 目标仍是 Chat,Code 工作区被无视", async () => {
+    // round-1 前的监听器用闭包捕获的 Code 工作区刷新——这里若协调器
+    // 在 chat surface 下用了 codeWorkspace,可见列表会变 code-roster。
+    const { state, coordinator } = makeFixture();
+    state.surface = "chat";
+    await coordinator(); // Chat 入口刷新
+    await coordinator(); // sessions/changed 再触发
+    expect(state.visibleRoster).toBe("chat-roster");
+  });
+
+  it("反向竞态:陈旧 Chat 解析在切回 Code 后释放 → 必须丢弃,最终列表是 Code", async () => {
+    // round-2 F1:入口 effect 的 .then 无条件 refreshSessions(chatWs),
+    // 陈旧延续领取新代数反而必胜。协调器在 await 后复查 surface 堵死。
+    let releaseChat!: (ws: string) => void;
+    const held = new Promise<string>((r) => (releaseChat = r));
+    const { state, coordinator } = makeFixture({ resolveChat: () => held });
+
+    state.surface = "chat";
+    const staleChatEntry = coordinator({ onChatResolveFailure: "clear" }); // 挂住
+
+    state.surface = "code";
+    await coordinator(); // 用户切回 Code 并完成刷新
+    expect(state.visibleRoster).toBe("code-roster");
+
+    releaseChat("CHAT-WS"); // 陈旧 Chat 解析此刻才返回
+    await staleChatEntry;
+    expect(state.visibleRoster).toBe("code-roster"); // 不得被覆盖
+  });
+
+  it("Chat 入口解析失败 → clear 语义清空;通知语义保持现状", async () => {
+    const failing = () => Promise.reject(new Error("backend down"));
+    const a = makeFixture({ resolveChat: failing });
+    a.state.surface = "chat";
+    a.state.visibleRoster = "code-roster";
+    await a.coordinator({ onChatResolveFailure: "clear" });
+    expect(a.state.cleared).toBe(1);
+    expect(a.state.visibleRoster).toBe("empty");
+
+    const b = makeFixture({ resolveChat: failing });
+    b.state.surface = "chat";
+    b.state.visibleRoster = "chat-roster";
+    await b.coordinator(); // 默认 keep
+    expect(b.state.cleared).toBe(0);
+    expect(b.state.visibleRoster).toBe("chat-roster");
+  });
+});
+
+describe("createRefreshGuard", () => {
+  it("慢的旧代数不得覆盖新代数", async () => {
     const guard = createRefreshGuard();
-    const g1 = guard.begin();
-    expect(guard.isCurrent(g1)).toBe(true);
-    const g2 = guard.begin();
-    expect(guard.isCurrent(g1)).toBe(false);
-    expect(guard.isCurrent(g2)).toBe(true);
+    let visible = "initial";
+    const gOld = guard.begin();
+    const slow = (async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      if (guard.isCurrent(gOld)) visible = "stale";
+    })();
+    const gNew = guard.begin();
+    if (guard.isCurrent(gNew)) visible = "fresh";
+    await slow;
+    expect(visible).toBe("fresh");
   });
 });

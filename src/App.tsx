@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
 import { resolveCrashRecovery } from "./crashRecovery";
-import { CHAT_WORKSPACE, createRefreshGuard, rosterRefreshTarget } from "./sessionRoster";
+import { createRefreshGuard, createRosterCoordinator } from "./sessionRoster";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -1121,23 +1121,24 @@ function App() {
     }
   }
 
-  // sessions/changed 等长期监听器安装于挂载时，闭包捕获的 workspace/surface
-  // 是旧值——必须在【执行时】经 ref 取当前值选目标（PR #38 F1：Chat 界面下
-  // 一次晚到的 Code 工作区响应会覆盖修好的 Chat 列表，且会话激活期间不自愈）。
-  async function refreshSessionsForCurrentSurface() {
-    const target = rosterRefreshTarget(surfaceRef.current, workspaceStateRef.current);
-    if (target === CHAT_WORKSPACE) {
-      try {
-        const chatWs = await invoke<string>("chat_workspace");
-        if (surfaceRef.current !== "chat") return; // await 期间用户已切走
-        await refreshSessions(chatWs);
-      } catch {
-        /* 通知路径失败不得清空既有列表（fail-closed：保持现状） */
-      }
-    } else if (target) {
-      await refreshSessions(target);
-    }
-  }
+  // 所有会话列表刷新（Chat 入口 effect 与 sessions/changed 监听）统一经生产
+  // 协调器执行：目标在执行时按 ref 取值决定，Chat 解析 await 后复查 surface。
+  // 两个方向的竞态（晚到 Code 响应覆盖 Chat 列表 / 陈旧 Chat 解析覆盖 Code
+  // 列表）都由它堵死，测试直接驱动同一份实现（PR #38 F1 round-1/round-2）。
+  const refreshRosterForSurfaceRef = useRef(
+    createRosterCoordinator({
+      getSurface: () => surfaceRef.current,
+      getCodeWorkspace: () => workspaceStateRef.current,
+      resolveChatWorkspace: () => invoke<string>("chat_workspace"),
+      refresh: (ws) => refreshSessionsRef.current(ws),
+      clearRoster: () => {
+        setSessions([]);
+        setMcpServers([]);
+      },
+    }),
+  );
+  const refreshSessionsRef = useRef(refreshSessions);
+  refreshSessionsRef.current = refreshSessions;
 
   useEffect(() => {
     // 工作区可能在启动后才由恢复会话/文件夹选择器校正。只在首次挂载刷新会
@@ -1146,15 +1147,10 @@ function App() {
     if (surface === "code" && workspace) refreshSessions(workspace);
     if (surface === "chat" && !sessionIdRef.current) {
       // v0.19 漏环：此前切到 Chat 直接 setSessions([])，导致已存在的 Chat
-      // 会话（引擎写在 chat-runtime 私有工作区里）永不在侧栏显示。改为查询
-      // 该工作区的会话列表；路径由后端 chat_workspace 命令给出（与 agent_start
-      // 同源），保证查的就是引擎写入的那个目录。
-      invoke<string>("chat_workspace")
-        .then((chatWs) => refreshSessions(chatWs))
-        .catch(() => {
-          setSessions([]);
-          setMcpServers([]);
-        });
+      // 会话永不在侧栏显示。经协调器查询 chat-runtime 工作区：await 后复查
+      // surface（切走即丢弃，堵反向竞态）；入口解析失败按旧语义清空——
+      // 不能把 Code 列表留在 Chat 界面上展示。
+      refreshRosterForSurfaceRef.current({ onChatResolveFailure: "clear" });
     }
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1333,7 +1329,7 @@ function App() {
           return;
         }
         if (m === "x.ai/sessions/changed") {
-          refreshSessionsForCurrentSurface();
+          refreshRosterForSurfaceRef.current();
           return;
         }
         if (
