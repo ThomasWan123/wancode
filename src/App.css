@@ -655,17 +655,21 @@ button.ghost.small {
 }
 
 .session-item {
-  /* Chat 界面里会话项是 <button>，会被全局 button{background:var(--btn-bg)}
-     染成实心色块（浅色主题下=黑框）。显式归零，与 Code 界面的 <div> 一致。 */
-  background: transparent;
-  text-align: left;
-  font-weight: 500;
   padding: 7px 10px;
   border-radius: 8px;
   cursor: pointer;
   margin-bottom: 1px;
   border: 1px solid transparent;
   transition: background 0.12s;
+}
+
+button.session-item {
+  /* Chat 界面里会话项是 <button>，会被全局 button{background:var(--btn-bg)}
+     染成实心色块（浅色主题下=黑框）。显式归零并对齐 <div> 版排版。
+     选择器限定到 button：Code 界面的 <div> 会话项零影响（PR #38 F3）。 */
+  background: transparent;
+  text-align: left;
+  font-weight: 500;
 }
 
 .session-item:hover {

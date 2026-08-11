@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
 import { resolveCrashRecovery } from "./crashRecovery";
+import { CHAT_WORKSPACE, createRefreshGuard, rosterRefreshTarget } from "./sessionRoster";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -248,6 +249,9 @@ function buildSuggestions(
 
 function App() {
   const [workspace, setWorkspace] = useState(localStorage.getItem("wancode-workspace") || "");
+  // 供挂载期安装的监听器在执行时读取当前工作区（闭包值会过期，见 refreshSessionsForCurrentSurface）
+  const workspaceStateRef = useRef(workspace);
+  workspaceStateRef.current = workspace;
   const [surface, setSurface] = useState<SurfaceKind>(() =>
     parseSurface(localStorage.getItem("wancode-surface")),
   );
@@ -1098,10 +1102,10 @@ function App() {
   const replayCapRef = useRef<number | null>(null);
   const replaySuppressRef = useRef(false);
   const execIdsRef = useRef<Set<string>>(new Set());
-  const sessionRefreshGenerationRef = useRef(0);
+  const rosterGuardRef = useRef(createRefreshGuard());
 
   async function refreshSessions(ws: string) {
-    const generation = ++sessionRefreshGenerationRef.current;
+    const generation = rosterGuardRef.current.begin();
     try {
       const [nextSessions, nextMcpServers] = await Promise.all([
         invoke<SessionEntry[]>("agent_list_sessions", { workspace: ws }),
@@ -1109,11 +1113,29 @@ function App() {
       ]);
       // 文件夹选择、恢复会话和启动时刷新可能并发。旧工作区的慢响应不得覆盖
       // 后发的新工作区结果，否则真实旧会话会从侧栏“消失”。
-      if (generation !== sessionRefreshGenerationRef.current) return;
+      if (!rosterGuardRef.current.isCurrent(generation)) return;
       setSessions(nextSessions);
       setMcpServers(nextMcpServers);
     } catch {
       /* workspace may not exist yet */
+    }
+  }
+
+  // sessions/changed 等长期监听器安装于挂载时，闭包捕获的 workspace/surface
+  // 是旧值——必须在【执行时】经 ref 取当前值选目标（PR #38 F1：Chat 界面下
+  // 一次晚到的 Code 工作区响应会覆盖修好的 Chat 列表，且会话激活期间不自愈）。
+  async function refreshSessionsForCurrentSurface() {
+    const target = rosterRefreshTarget(surfaceRef.current, workspaceStateRef.current);
+    if (target === CHAT_WORKSPACE) {
+      try {
+        const chatWs = await invoke<string>("chat_workspace");
+        if (surfaceRef.current !== "chat") return; // await 期间用户已切走
+        await refreshSessions(chatWs);
+      } catch {
+        /* 通知路径失败不得清空既有列表（fail-closed：保持现状） */
+      }
+    } else if (target) {
+      await refreshSessions(target);
     }
   }
 
@@ -1311,7 +1333,7 @@ function App() {
           return;
         }
         if (m === "x.ai/sessions/changed") {
-          if (workspace) refreshSessions(workspace);
+          refreshSessionsForCurrentSurface();
           return;
         }
         if (
