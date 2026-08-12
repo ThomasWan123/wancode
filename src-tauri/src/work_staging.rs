@@ -42,7 +42,18 @@ pub fn manifest_path_under(app_data_dir: PathBuf, ws: &WorkspaceId) -> PathBuf {
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn mint_suffix() -> (u64, u64, u64) {
+/// 纯函数:把三段拼成固定形状 id。**seq 掩到 24 位**(codex R2-P2:
+/// `{:06x}` 是最小宽度,计数到 0x1000000 会溢出 7 位使自己的 parser 拒绝)。
+/// 掩码后 seq 永远 6 位 hex,与校验器精确对应;24 位 = 每进程 1670 万个/毫秒
+/// 循环窗口,配合 ms 时间戳足够抗碰撞。
+fn format_id(prefix: &str, ms: u64, seq_raw: u64, pid: u64) -> String {
+    let ms = ms & 0xffff_ffff_ffff; // 48 位,对应 {:012x}
+    let seq = seq_raw & 0xff_ffff; // 24 位,对应 {:06x}
+    let pid = pid & 0xffff_ffff; // 32 位,对应 {:08x}
+    format!("{prefix}-{ms:012x}-{seq:06x}-{pid:08x}")
+}
+
+fn mint_id(prefix: &str) -> String {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -50,7 +61,7 @@ fn mint_suffix() -> (u64, u64, u64) {
     // seq 在 pid 之前:同机同毫秒的字典序由铸造顺序(而非 pid)决定。
     let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id() as u64;
-    (ms, seq, pid)
+    format_id(prefix, ms, seq, pid)
 }
 
 /// 校验 `<prefix>-<12hex>-<6hex>-<8hex>` 精确形状。任何越界字符/长度即拒。
@@ -80,8 +91,7 @@ macro_rules! strict_id_type {
 
         impl $name {
             pub fn mint() -> Self {
-                let (ms, seq, pid) = mint_suffix();
-                Self(format!(concat!($prefix, "-{:012x}-{:06x}-{:08x}"), ms, seq, pid))
+                Self(mint_id($prefix))
             }
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -301,6 +311,19 @@ mod tests {
     }
 
     #[test]
+    fn seq_overflow_still_produces_valid_ids() {
+        // codex R2-P2:计数器越过 0xffffff 后掩码回绕,id 仍是合法 6 位段。
+        for seq in [0x00_0000u64, 0xff_ffff, 0x100_0000, 0x100_0001, u64::MAX] {
+            let ws = format_id("ws", 1, seq, 7);
+            assert!(WorkspaceId::parse(&ws).is_ok(), "seq={seq:#x} 产出非法 id: {ws}");
+            let imp = format_id("imp", 1, seq, 7);
+            assert!(ImportId::parse(&imp).is_ok(), "seq={seq:#x} 产出非法 import id: {imp}");
+        }
+        // 掩码前后不同 seq 在同一 6 位窗口内映射一致(0x1000000 回绕到 0)。
+        assert_eq!(format_id("ws", 1, 0x100_0000, 7), format_id("ws", 1, 0, 7));
+    }
+
+    #[test]
     fn manifest_round_trips_through_json() {
         let mut m = WorkManifest::new(WorkspaceId::mint());
         m.imports.push(ImportRecord {
@@ -350,6 +373,9 @@ mod tests {
 
         let m1 = WorkManifest::new(ws.clone());
         m1.write_atomic(&mp).unwrap();
+        // 断言覆盖语义:第二次写入前目标**已存在**(证明这是 replace 而非 create;
+        // rust CI job = windows-latest,故此路径在 Windows 上被 CI 实测)。
+        assert!(mp.exists(), "第二次写入前 manifest.json 必须已存在");
 
         let mut m2 = WorkManifest::new(ws);
         m2.imports.push(ImportRecord {
