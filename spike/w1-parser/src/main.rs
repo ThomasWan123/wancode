@@ -233,8 +233,8 @@ fn build_pdf(encrypted: bool) -> Vec<u8> {
 }
 
 /// 构造**完整最小 OOXML** DOCX:含 [Content_Types].xml、_rels/.rels、
-/// 以及给定 document.xml 主体。这样 docx-rs 能真正解析(正对照有效),
-/// 实体炸弹对照才有意义(codex R2-F3)。
+/// 以及给定 document.xml 主体。仅供 zip 层探针(⑤路径穿越、⑥超限)构造
+/// 合法容器用;本 spike **不再调用 docx-rs 解析**(实体探针已移 NOT-RUN)。
 fn build_docx_zip(_entry: &str, document_xml: &[u8]) -> Vec<u8> {
     let content_types = br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
     let rels = br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;

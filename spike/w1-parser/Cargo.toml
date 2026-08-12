@@ -7,12 +7,11 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# 探索性 API 可行性 spike(非安全门关闭证据)。lopdf/docx-rs 做 PDF/DOCX,
+# 探索性 API 可行性 spike(非安全门关闭证据)。lopdf 做 PDF 结构;
 # zip 仅 deflate 特性。精确声明(codex R2-F1):压缩栈为纯 Rust deflate,
 # 无单独分发的原生二进制;不宣称整依赖图零原生。
 [dependencies]
 lopdf = "0.34"
-docx-rs = "0.4"
 # zip 默认特性会拉进 bzip2-sys/lzma-sys/zstd-sys 原生链(codex R1-F4)。
 # 仅启用 `deflate`(miniz_oxide 纯 Rust 后端)。构建后核验 lockfile 无 *-sys。
 zip = { version = "2", default-features = false, features = ["deflate"] }
