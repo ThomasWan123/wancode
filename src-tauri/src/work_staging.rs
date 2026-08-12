@@ -1,99 +1,130 @@
 //! Work 层暂存身份模型(v0.20 W2-a,设计稿 §1.4 + codex R3-F2)。
 //!
-//! 三层身份严格分离:
+//! 三层身份严格分离,均为**严格语法校验的新类型**:
 //!   - `WorkspaceId`  —— 持久 Work 工作区标识,一个工作区可含多篇文档;
 //!   - `ImportId`     —— 每篇文档导入铸造;
 //!   - 原件 sha256    —— 与 import_id 联合定位文档。
 //!
-//! 本切片只做**后端身份基础**:单源路径解析、id 铸造、清单读写(原子)、
-//! fail-closed 版本门。**不含**前端切换、导入命令、SurfaceBinding 扩展
-//! (归 W2-b/c)。范围诚实收窄,不宣称 W2 完成。
+//! 本切片只做**后端身份基础**:单源路径解析、id 铸造+严格校验、清单读写
+//! (原子)、fail-closed 版本门。**不含**前端切换、导入命令、SurfaceBinding
+//! 扩展(归 W2-b/c)。范围诚实收窄,不宣称 W2 完成。
 //!
-//! 教训沿用:路径单一来源(PR #38 F2)、serde_json、未知 schema 阻塞而非
-//! 静默(surface.rs 同款)、清单写入用 temp+rename 原子替换。
+//! 安全不变量(codex R2/R3):id 语法**固定为铸造格式**,自定义 Deserialize
+//! 统一走校验 —— 篡改清单放入 `..`/路径分隔符/绝对路径一律拒绝,解析结果
+//! 恒在 Work 根内。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Work 暂存根目录名。唯一字面量出处 —— 除 [`work_root_under`] 外任何代码
-/// 不得再拼写(PR #38 F2:两处独立字面量各自漂移 = 隐形丢文件 bug)。
+/// Work 暂存根目录名。唯一字面量出处(PR #38 F2)。
 const WORK_DIR_NAME: &str = "work";
 
-/// 清单格式版本。未来加字段必须 bump,旧版本读到未知 schema 一律阻塞。
+/// 清单格式版本。加字段必须 bump,旧版本读到未知 schema 一律阻塞。
 pub const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// Work 暂存根:`app_data_dir/work`。所有 Work 路径的唯一推导点。
 pub fn work_root_under(app_data_dir: PathBuf) -> PathBuf {
     app_data_dir.join(WORK_DIR_NAME)
 }
-
-/// 某工作区目录:`app_data_dir/work/<workspace_id>`。
 pub fn workspace_dir_under(app_data_dir: PathBuf, ws: &WorkspaceId) -> PathBuf {
     work_root_under(app_data_dir).join(ws.as_str())
 }
-
-/// 该工作区的清单文件路径。
 pub fn manifest_path_under(app_data_dir: PathBuf, ws: &WorkspaceId) -> PathBuf {
     workspace_dir_under(app_data_dir, ws).join("manifest.json")
 }
 
-/// 持久不透明工作区标识。ULID 风格:48 位毫秒时间戳 + 单调计数 + 进程盐,
-/// 编码为可排序的小写十六进制。零外部依赖(SystemTime + 原子计数即可)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkspaceId(String);
+// ── id 铸造与严格校验 ────────────────────────────────────────────────
+//
+// 铸造格式(两类 id 同构):`<prefix>-<ms:012x>-<pid:08x>-<seq:06x>`。
+// 严格校验保证 id 里只可能出现 [0-9a-f-] 与固定前缀,绝无路径分隔符/`.`。
 
-static WS_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-impl WorkspaceId {
-    /// 铸造一个新的工作区 id。同一进程内单调递增计数保证同毫秒不撞。
-    pub fn mint() -> Self {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let n = WS_COUNTER.fetch_add(1, Ordering::Relaxed);
-        // 进程盐:用当前 pid,降低跨进程同毫秒同计数的碰撞面。
-        let pid = std::process::id() as u64;
-        Self(format!("ws-{ms:012x}-{pid:08x}-{n:06x}"))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// 从已存在的字符串重建(读盘/前端回传)。仅校验非空与前缀,不铸造。
-    pub fn from_existing(s: impl Into<String>) -> Result<Self, WorkStagingError> {
-        let s = s.into();
-        if s.is_empty() || !s.starts_with("ws-") {
-            return Err(WorkStagingError::InvalidWorkspaceId(s));
-        }
-        Ok(Self(s))
-    }
+fn mint_suffix() -> (u64, u64, u64) {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // seq 在 pid 之前:同机同毫秒的字典序由铸造顺序(而非 pid)决定。
+    let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id() as u64;
+    (ms, seq, pid)
 }
 
-/// 每篇导入文档的清单记录。锚点契约见设计 §1.2;本切片只落身份与哈希,
-/// 解析产物/映射表待 W3。
+/// 校验 `<prefix>-<12hex>-<6hex>-<8hex>` 精确形状。任何越界字符/长度即拒。
+fn validate_id(s: &str, prefix: &str) -> bool {
+    let rest = match s.strip_prefix(prefix).and_then(|r| r.strip_prefix('-')) {
+        Some(r) => r,
+        None => return false,
+    };
+    let parts: Vec<&str> = rest.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let (a, b, c) = (parts[0], parts[1], parts[2]);
+    a.len() == 12
+        && b.len() == 6
+        && c.len() == 8
+        && [a, b, c]
+            .iter()
+            .all(|p| p.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()))
+}
+
+macro_rules! strict_id_type {
+    ($name:ident, $prefix:literal, $err:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn mint() -> Self {
+                let (ms, seq, pid) = mint_suffix();
+                Self(format!(concat!($prefix, "-{:012x}-{:06x}-{:08x}"), ms, seq, pid))
+            }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+            /// 从字符串重建(读盘/前端回传),**严格校验固定语法**。
+            pub fn parse(s: impl Into<String>) -> Result<Self, WorkStagingError> {
+                let s = s.into();
+                if validate_id(&s, $prefix) {
+                    Ok(Self(s))
+                } else {
+                    Err(WorkStagingError::$err(s))
+                }
+            }
+        }
+
+        // 自定义 Deserialize:反序列化路径也强制走校验(codex R3-F2:
+        // #[serde(transparent)] 的 derive Deserialize 会绕过校验)。
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let s = String::deserialize(d)?;
+                $name::parse(s).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+strict_id_type!(WorkspaceId, "ws", InvalidWorkspaceId);
+strict_id_type!(ImportId, "imp", InvalidImportId);
+
+// ── 清单 ─────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportRecord {
-    /// 每篇文档导入铸造的持久标识(与 workspace_id 分离,codex R3-F2)。
-    pub import_id: String,
-    /// 完整原件 sha256(不截断)。
+    pub import_id: ImportId,
+    /// 完整原件 sha256(不截断),64 位小写 hex。
     pub source_sha256: String,
-    /// 原文件名(仅展示;不作路径用)。
     pub display_name: String,
-    /// 暂存副本相对工作区目录的路径。
+    /// 暂存副本相对工作区目录的路径(由生产导入逻辑构造,W2-b)。
     pub staging_rel_path: String,
-    /// 文档类型(pdf|docx),小写。
     pub kind: String,
 }
 
-/// 工作区清单。绑定单一 workspace_id;会话/检索只读它所属的这一份
-/// (codex R3-F2:文档不得跨工作区串)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkManifest {
@@ -103,7 +134,6 @@ pub struct WorkManifest {
 }
 
 impl WorkManifest {
-    /// 新建空清单。
     pub fn new(workspace_id: WorkspaceId) -> Self {
         Self {
             manifest_schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
@@ -112,14 +142,12 @@ impl WorkManifest {
         }
     }
 
-    /// 序列化为 JSON(serde_json,正确转义)。
     pub fn to_json(&self) -> Result<String, WorkStagingError> {
         serde_json::to_string_pretty(self).map_err(|e| WorkStagingError::Serialize(e.to_string()))
     }
 
-    /// 从 JSON 反序列化,并过版本门(fail-closed)。未知 schema/未来版本一律阻塞。
+    /// 两阶段:先宽容探测版本,再严格全量解析(未来版本阻塞而非误报损坏)。
     pub fn from_json(s: &str) -> Result<Self, WorkStagingError> {
-        // 两阶段:先宽容探测版本,再严格全量解析(避免"未来版本"被误报"损坏")。
         let probe: SchemaProbe =
             serde_json::from_str(s).map_err(|e| WorkStagingError::Corrupt(e.to_string()))?;
         if probe.manifest_schema_version != CURRENT_MANIFEST_SCHEMA_VERSION {
@@ -131,20 +159,43 @@ impl WorkManifest {
         serde_json::from_str(s).map_err(|e| WorkStagingError::Corrupt(e.to_string()))
     }
 
-    /// 原子写盘:先写同目录 temp,fsync 后 rename 覆盖,避免半写清单。
+    /// 原子写盘:唯一临时文件 → flush + sync_all → 覆盖式 rename → sync 父目录。
+    /// 唯一临时名避免并发写者互踩;失败清理临时文件(codex R3-F3)。
     pub fn write_atomic(&self, manifest_path: &Path) -> Result<(), WorkStagingError> {
+        use std::io::Write;
         let json = self.to_json()?;
         let parent = manifest_path
             .parent()
             .ok_or_else(|| WorkStagingError::Io("manifest 无父目录".into()))?;
         std::fs::create_dir_all(parent).map_err(|e| WorkStagingError::Io(e.to_string()))?;
-        let tmp = manifest_path.with_extension("json.tmp");
-        std::fs::write(&tmp, json.as_bytes()).map_err(|e| WorkStagingError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, manifest_path).map_err(|e| WorkStagingError::Io(e.to_string()))?;
+
+        // 唯一临时名:pid + 单调计数,避免并发写者共用同一 .tmp。
+        let uniq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".manifest.{}.{}.tmp", std::process::id(), uniq));
+
+        let write_and_sync = |tmp: &Path| -> std::io::Result<()> {
+            let mut f = std::fs::File::create(tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.flush()?;
+            f.sync_all()?; // 数据落盘,而非仅进页缓存
+            Ok(())
+        };
+        if let Err(e) = write_and_sync(&tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(WorkStagingError::Io(e.to_string()));
+        }
+        // std::fs::rename 在 Windows 上走 MOVEFILE_REPLACE_EXISTING,可覆盖已存在目标。
+        if let Err(e) = std::fs::rename(&tmp, manifest_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(WorkStagingError::Io(e.to_string()));
+        }
+        // 尽力同步父目录(部分平台使 rename 持久;Windows 无对应语义时忽略错误)。
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 
-    /// 从盘读取并过版本门。
     pub fn read(manifest_path: &Path) -> Result<Self, WorkStagingError> {
         let s = std::fs::read_to_string(manifest_path)
             .map_err(|e| WorkStagingError::Io(e.to_string()))?;
@@ -152,17 +203,16 @@ impl WorkManifest {
     }
 }
 
-/// 仅用于两阶段版本探测。
 #[derive(Deserialize)]
 struct SchemaProbe {
     manifest_schema_version: u32,
 }
 
-/// 结构化 fail-closed 错误。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkStagingError {
     InvalidWorkspaceId(String),
+    InvalidImportId(String),
     UnsupportedSchema { found: u32, supported: u32 },
     Corrupt(String),
     Serialize(String),
@@ -173,6 +223,7 @@ impl std::fmt::Display for WorkStagingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorkStagingError::InvalidWorkspaceId(s) => write!(f, "非法 workspace_id: {s}"),
+            WorkStagingError::InvalidImportId(s) => write!(f, "非法 import_id: {s}"),
             WorkStagingError::UnsupportedSchema { found, supported } => {
                 write!(f, "清单 schema 版本 {found} 不受支持(当前 {supported})")
             }
@@ -191,51 +242,86 @@ mod tests {
     #[test]
     fn work_paths_have_single_literal_source() {
         let base = PathBuf::from("C:/app");
-        let root = work_root_under(base.clone());
-        assert_eq!(root, base.join("work"));
-        let ws = WorkspaceId::from_existing("ws-abc").unwrap();
-        assert_eq!(workspace_dir_under(base.clone(), &ws), base.join("work").join("ws-abc"));
+        assert_eq!(work_root_under(base.clone()), base.join("work"));
+        let ws = WorkspaceId::mint();
         assert_eq!(
-            manifest_path_under(base, &ws),
-            PathBuf::from("C:/app/work/ws-abc/manifest.json")
+            workspace_dir_under(base.clone(), &ws),
+            base.join("work").join(ws.as_str())
         );
     }
 
     #[test]
-    fn minted_ids_are_unique_and_prefixed() {
+    fn minted_ids_are_unique_valid_and_typed() {
         let a = WorkspaceId::mint();
         let b = WorkspaceId::mint();
-        assert!(a.as_str().starts_with("ws-"));
-        assert_ne!(a, b, "同进程连续铸造必须不同(单调计数)");
+        assert_ne!(a, b);
+        assert!(WorkspaceId::parse(a.as_str()).is_ok());
+        let i = ImportId::mint();
+        assert!(ImportId::parse(i.as_str()).is_ok());
+        // 两层身份类型隔离:workspace id 不是合法 import id,反之亦然。
+        assert!(ImportId::parse(a.as_str()).is_err());
+        assert!(WorkspaceId::parse(i.as_str()).is_err());
     }
 
     #[test]
-    fn from_existing_rejects_bad_ids() {
-        assert!(WorkspaceId::from_existing("").is_err());
-        assert!(WorkspaceId::from_existing("nope").is_err());
-        assert!(WorkspaceId::from_existing("ws-ok").is_ok());
+    fn ids_reject_path_escape_and_bad_shape() {
+        // codex R3-F2 反向用例:路径逃逸物一律拒绝。
+        for bad in [
+            "ws-../../etc",
+            "ws-/abs/path",
+            r"ws-..\..\host",
+            "ws-",
+            "ws-xyz",              // 非 hex
+            "ws-000000000000-000000-0000000",   // 段长错(8→7)
+            "ws-000000000000-000000-00000000-x", // 多段
+            "C:/work/ws-x",
+            "nope",
+        ] {
+            assert!(WorkspaceId::parse(bad).is_err(), "应拒: {bad}");
+        }
+        // 合法铸造格式接受。
+        assert!(WorkspaceId::parse("ws-000000000000-000000-00000000").is_ok());
+    }
+
+    #[test]
+    fn deserialize_enforces_id_validation() {
+        // #[serde(transparent)] 的默认 Deserialize 会绕过校验 —— 自定义实现堵死。
+        let evil = r#"{"manifest_schema_version":1,"workspace_id":"ws-../../escape","imports":[]}"#;
+        assert!(matches!(
+            WorkManifest::from_json(evil),
+            Err(WorkStagingError::Corrupt(_)) // 校验失败经 serde custom error 传出
+        ));
+        // import_id 逃逸同样被拒。
+        let ws = WorkspaceId::mint();
+        let evil2 = format!(
+            r#"{{"manifest_schema_version":1,"workspace_id":"{}","imports":[{{"import_id":"imp-/../x","source_sha256":"{}","display_name":"x","staging_rel_path":"x","kind":"pdf"}}]}}"#,
+            ws.as_str(), "a".repeat(64)
+        );
+        assert!(WorkManifest::from_json(&evil2).is_err());
     }
 
     #[test]
     fn manifest_round_trips_through_json() {
-        let mut m = WorkManifest::new(WorkspaceId::from_existing("ws-1").unwrap());
+        let mut m = WorkManifest::new(WorkspaceId::mint());
         m.imports.push(ImportRecord {
-            import_id: "imp-1".into(),
+            import_id: ImportId::mint(),
             source_sha256: "a".repeat(64),
             display_name: "报告.pdf".into(),
-            staging_rel_path: "imp-1/original.pdf".into(),
+            staging_rel_path: "imp-x/original.pdf".into(),
             kind: "pdf".into(),
         });
-        let json = m.to_json().unwrap();
-        let back = WorkManifest::from_json(&json).unwrap();
+        let back = WorkManifest::from_json(&m.to_json().unwrap()).unwrap();
         assert_eq!(m, back);
     }
 
     #[test]
     fn future_schema_version_is_blocked_not_corrupt() {
-        // 未来版本(schema=2)必须报 UnsupportedSchema,不能误报 Corrupt。
-        let future = r#"{"manifest_schema_version":2,"workspace_id":"ws-1","imports":[]}"#;
-        match WorkManifest::from_json(future) {
+        let ws = WorkspaceId::mint();
+        let future = format!(
+            r#"{{"manifest_schema_version":2,"workspace_id":"{}","imports":[]}}"#,
+            ws.as_str()
+        );
+        match WorkManifest::from_json(&future) {
             Err(WorkStagingError::UnsupportedSchema { found: 2, supported: 1 }) => {}
             other => panic!("期望 UnsupportedSchema,实得 {other:?}"),
         }
@@ -243,25 +329,50 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected() {
-        // deny_unknown_fields:形状不认识 = 阻塞。
-        let bad = r#"{"manifest_schema_version":1,"workspace_id":"ws-1","imports":[],"evil":true}"#;
+        let ws = WorkspaceId::mint();
+        let bad = format!(
+            r#"{{"manifest_schema_version":1,"workspace_id":"{}","imports":[],"evil":true}}"#,
+            ws.as_str()
+        );
         assert!(matches!(
-            WorkManifest::from_json(bad),
+            WorkManifest::from_json(&bad),
             Err(WorkStagingError::Corrupt(_))
         ));
     }
 
     #[test]
-    fn write_atomic_then_read_is_identity() {
-        let dir = std::env::temp_dir().join(format!("w2a-{}", std::process::id()));
-        let ws = WorkspaceId::from_existing("ws-rt").unwrap();
+    fn atomic_write_survives_multiple_updates() {
+        // codex R3-F3:连续两次写入现有 manifest.json,读回**第二份**状态,无残留。
+        let dir = std::env::temp_dir().join(format!("w2a-{}-{}", std::process::id(),
+            ID_COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let ws = WorkspaceId::mint();
         let mp = manifest_path_under(dir.clone(), &ws);
-        let m = WorkManifest::new(ws);
-        m.write_atomic(&mp).unwrap();
+
+        let m1 = WorkManifest::new(ws.clone());
+        m1.write_atomic(&mp).unwrap();
+
+        let mut m2 = WorkManifest::new(ws);
+        m2.imports.push(ImportRecord {
+            import_id: ImportId::mint(),
+            source_sha256: "b".repeat(64),
+            display_name: "second.pdf".into(),
+            staging_rel_path: "imp-y/original.pdf".into(),
+            kind: "pdf".into(),
+        });
+        // 覆盖已存在目标(Windows rename 覆盖语义)。
+        m2.write_atomic(&mp).unwrap();
+
         let back = WorkManifest::read(&mp).unwrap();
-        assert_eq!(m, back);
+        assert_eq!(back, m2, "读回必须是第二份状态");
+        assert_eq!(back.imports.len(), 1);
+
         // 无 .tmp 残留
-        assert!(!mp.with_extension("json.tmp").exists());
+        let leftover: Vec<_> = std::fs::read_dir(mp.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "不得残留临时文件");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
