@@ -42,3 +42,19 @@ export function surfaceSwitchRequiresNewSession(
 export function surfaceNeedsWorkspace(kind: SurfaceKind): boolean {
   return kind === "work";
 }
+
+/** 后端**已启动**会话回传 surface 后的激活决策(codex W2-fe-a R2)。与
+ *  resolveActiveSurface(用于启动前的 localStorage 偏好、降级即可)不同:后端
+ *  返回的 Work 已带活会话,不能降级为 Code 掩盖身份——必须 reject,由调用方
+ *  fail closed(抛错、不激活会话)。返回判别式,使交易级契约可单测。 */
+export type BackendSurfaceDecision =
+  | { activate: true; surface: SurfaceKind }
+  | { activate: false; reason: "work-ui-not-ready" };
+
+export function decideBackendSurface(value: unknown): BackendSurfaceDecision {
+  const parsed = parseSurface(value);
+  if (parsed === "work" && !WORK_UI_READY) {
+    return { activate: false, reason: "work-ui-not-ready" };
+  }
+  return { activate: true, surface: parsed };
+}

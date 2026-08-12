@@ -26,7 +26,12 @@ import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
-import { resolveActiveSurface, surfaceSwitchRequiresNewSession, type SurfaceKind } from "./surface";
+import {
+  decideBackendSurface,
+  resolveActiveSurface,
+  surfaceSwitchRequiresNewSession,
+  type SurfaceKind,
+} from "./surface";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -1466,16 +1471,28 @@ function App() {
           surface,
         },
       );
+      // codex W2-fe-a R2:后端**已启动**会话并回传持久 surface。若是 Work 而
+      // 前端 UI 未接线,**fail closed 不激活**——绝不把 Work 会话套进 Code UI、
+      // 也不用 code 覆盖持久身份(那会制造跨层身份矛盾)。抛错走既有错误处理
+      // (catch 设 error、finally 复位 starting),Work session_id 永不成为当前
+      // 会话。W2-fe-b 接线后 WORK_UI_READY 翻真,此分支自然放行。
+      const decision = decideBackendSurface(r.surface_kind);
+      if (!decision.activate) {
+        // throw 先于 setSessionId —— 结构上保证 Work session_id 永不成为当前
+        // 会话;catch 设 error 并返回 "",finally 复位 starting。
+        throw new Error(
+          lang === "zh"
+            ? "此版本暂不支持打开 Work 会话（Work 界面尚未接线）"
+            : "Work sessions aren't available in this build yet",
+        );
+      }
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
-      // 走就绪门:Work UI 未接线前,后端回传的 Work 绑定降级为 Code(不激活
-      // 半接线状态)。W2-fe-b 接线后 WORK_UI_READY 翻真,此处自然放行 Work。
-      const resolvedSurface = resolveActiveSurface(r.surface_kind);
-      setSurface(resolvedSurface);
-      localStorage.setItem("wancode-surface", resolvedSurface);
+      setSurface(decision.surface);
+      localStorage.setItem("wancode-surface", decision.surface);
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
       // 显示的是另一个仓库的改动，stash/丢弃会打错目标）。
-      if (r.cwd && resolvedSurface === "code") {
+      if (r.cwd && decision.surface === "code") {
         setWorkspace(r.cwd);
         localStorage.setItem("wancode-workspace", r.cwd);
       }
@@ -1492,7 +1509,7 @@ function App() {
       // 加载结果一起回来，直接进选择器状态。
       setModelBlock(parseModelBlock(r.model_block));
       refreshSessions(r.cwd || wsPath);
-      if (resolvedSurface === "code") {
+      if (decision.surface === "code") {
         invoke<string[]>("list_workspace_files", { workspace: wsPath })
           .then(setFileList)
           .catch(() => {});

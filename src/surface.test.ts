@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  decideBackendSurface,
   parseSurface,
   resolveActiveSurface,
   surfaceNeedsWorkspace,
@@ -48,5 +49,21 @@ describe("surface navigation contract", () => {
     expect(resolveActiveSurface("code")).toBe("code");
     expect(resolveActiveSurface("cowork")).toBe("code");
     expect(resolveActiveSurface(null)).toBe("code");
+  });
+
+  // codex W2-fe-a R2:后端已启动会话回传 Work 时,决策必须是 **reject**(不降级
+  // 掩盖)。startSession 据此抛错、在 setSessionId 之前——Work session_id 结构上
+  // 永不激活。chat/code 则 activate。
+  it("backend-returned Work is rejected (not relabeled) until the UI is wired", () => {
+    const workDecision = decideBackendSurface("work");
+    if (!WORK_UI_READY) {
+      expect(workDecision).toEqual({ activate: false, reason: "work-ui-not-ready" });
+    } else {
+      expect(workDecision).toEqual({ activate: true, surface: "work" });
+    }
+    expect(decideBackendSurface("chat")).toEqual({ activate: true, surface: "chat" });
+    expect(decideBackendSurface("code")).toEqual({ activate: true, surface: "code" });
+    // 未知后端值(含未接线的 cowork)按 Code 激活(fail-closed 到已接线层)。
+    expect(decideBackendSurface("cowork")).toEqual({ activate: true, surface: "code" });
   });
 });
