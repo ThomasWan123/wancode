@@ -4,8 +4,9 @@
 //! G26 零引擎改动下唯一可能的隔离杠杆 = 在放行 shell 写之前,用一个路径
 //! 限制谓词 `is_confined(root, target)` 判定目标是否在 worktree 内。
 //!
-//! 本 spike 在**真实文件系统**上测该谓词对三个逃逸向量的拦截力:
-//!   ①绝对路径写宿主  ②`..` 相对路径逃逸  ③symlink/junction 指向宿主
+//! 本 spike 在**真实文件系统**上测该谓词对**四个必需逃逸向量**的拦截力:
+//!   ①绝对路径写宿主 ②`..` 相对路径逃逸 ③symlink/junction 指向宿主
+//!   ④已存在的末段链接(codex R3-F1)
 //! 外加一个 worktree 内合法写的**正对照**(证明谓词不是"全拒")。
 //!
 //! 判据(设计 §2.1):
@@ -198,7 +199,7 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     println!("C1 predicate-spike: vectors_blocked={} control_ok={} sentinel_intact={} (NOT full C1 evidence)",
         all_vectors_blocked, control_ok, sentinel_ok);
     let _ = fs::remove_dir_all(base);
-    // 成功 = 谓词识别全部三向量 + 正对照 + 哨兵完好。缺一即失败。
+    // 成功 = 谓词识别全部四个必需向量 + 正对照 + 哨兵完好。缺一即失败。
     std::process::exit(if sentinel_ok && control_ok && all_vectors_blocked { 0 } else { 1 });
 }
 
