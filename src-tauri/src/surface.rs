@@ -40,8 +40,8 @@ pub const CURRENT_POLICY_VERSION: u32 = 1;
 /// sidecar 文件格式版本。读到更大的值 = 文件来自未来版本的 WanCode，
 /// 结构化阻塞（不猜测字段语义）。
 pub const CURRENT_BINDING_SCHEMA_VERSION: u32 = 2;
-/// 认得的最旧 binding schema。v1 = Chat/Code 时代(无 workspace_id 字段);
-/// v2 = 加了可选 workspace_id(W2-c)。读时显式接受 [v1..=CURRENT],未来阻塞。
+/// 认得的最旧 binding schema。v1 = 无 workspace_id 字段的旧格式(所有非 Work 层:
+/// Chat/Code/Cowork);v2 = 加可选 workspace_id(W2-c)。读时显式接受 [v1..=CURRENT],未来阻塞。
 pub const OLDEST_READABLE_BINDING_SCHEMA_VERSION: u32 = 1;
 
 /// 迁移完成标记文件名（v1 命名空间，未来 schema 演进换新标记）。
@@ -64,14 +64,16 @@ pub enum SurfaceKind {
 /// `deny_unknown_fields`：未知字段 = 文件不是本程序认识的形状，阻塞
 /// 而非静默忽略。
 ///
-/// **关于 `workspace_id`（v0.20 W2-c,不 bump schema 的理由）**:一般"新增
-/// 字段必须 bump schema version",因为 `deny_unknown_fields` 会让旧读者拒绝
-/// 带新字段的文件。但 `workspace_id` 仅 Work 层携带,而 **Work 是 v0.20 全新
-/// 层**——已发布版本从不创建 Work 绑定。配合 `skip_serializing_if=None`,
-/// Chat/Code 绑定(workspace_id=None)序列化时**不含该字段**,与旧格式逐字节
-/// 相同;旧读者只可能读到 Chat/Code 文件,永远读不到带 workspace_id 的 Work
-/// 文件(那是升级后才产生的新数据)。因此现存数据零改动、零迁移,schema 保持 1。
-/// (若未来给 Chat/Code 也加字段,那才必须 bump——因为会改动现存文件形状。)
+/// **关于 `workspace_id`（v0.20 W2-c,schema 从 1 升到 2)**:加了可选
+/// `workspace_id`(仅 Work 携带)。**必须 bump schema**(codex 复核纠正了
+/// 早先"不 bump"的错误设想):虽然 `skip_serializing_if=None` 让 Chat/Code
+/// 文件字节不变,但降级——旧的 schema-1 二进制读到升级后产生的 Work 文件
+/// (带 workspace_id 字段)——若 schema 仍是 1,旧读者的两阶段探针会因
+/// `deny_unknown_fields` 误报 CorruptBinding。bump 到 2 后旧读者的严格 `!=1`
+/// 探针门先报 UnsupportedBindingVersion(正确归类降级场景,不误报损坏)。
+/// 读时显式接受 [OLDEST=1..=CURRENT=2]:v1 = 无 workspace_id 字段的旧格式
+/// (所有**非 Work** 层),规范化为 v2 + None;v1 若带 workspace_id 或为 Work
+/// 即形状不一致 → CorruptBinding。未来(>CURRENT)与更旧(<OLDEST)阻塞。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceBinding {
@@ -796,6 +798,22 @@ mod tests {
         .unwrap();
         let b = s.resolve("legacy").unwrap();
         assert_eq!(b.surface_kind, SurfaceKind::Code);
+        assert_eq!(b.workspace_id, None);
+        assert_eq!(b.binding_schema_version, CURRENT_BINDING_SCHEMA_VERSION);
+    }
+
+    // W2-c P2:v1 是"所有非 Work 层"——v1 Cowork(无 workspace_id)也被接受。
+    #[test]
+    fn legacy_v1_cowork_accepted_as_none() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("v1cow"),
+            r#"{"binding_schema_version":1,"session_id":"v1cow","surface_kind":"cowork","created_policy_version":1}"#,
+        )
+        .unwrap();
+        let b = s.resolve("v1cow").unwrap();
+        assert_eq!(b.surface_kind, SurfaceKind::Cowork);
         assert_eq!(b.workspace_id, None);
         assert_eq!(b.binding_schema_version, CURRENT_BINDING_SCHEMA_VERSION);
     }
