@@ -37,7 +37,8 @@ pub fn manifest_path_under(app_data_dir: PathBuf, ws: &WorkspaceId) -> PathBuf {
 
 // ── id 铸造与严格校验 ────────────────────────────────────────────────
 //
-// 铸造格式(两类 id 同构):`<prefix>-<ms:012x>-<pid:08x>-<seq:06x>`。
+// 铸造格式(两类 id 同构):`<prefix>-<ms:012x>-<seq:06x>-<pid:08x>`
+// (seq 在 pid 之前:同机同毫秒字典序由铸造顺序决定,见 format_id)。
 // 严格校验保证 id 里只可能出现 [0-9a-f-] 与固定前缀,绝无路径分隔符/`.`。
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
