@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   parseSurface,
+  resolveActiveSurface,
   surfaceNeedsWorkspace,
   surfaceSwitchRequiresNewSession,
+  WORK_UI_READY,
 } from "./surface";
 
 describe("surface navigation contract", () => {
@@ -28,5 +30,23 @@ describe("surface navigation contract", () => {
     expect(surfaceNeedsWorkspace("work")).toBe(true);
     expect(surfaceNeedsWorkspace("chat")).toBe(false);
     expect(surfaceNeedsWorkspace("code")).toBe(false);
+  });
+
+  // codex W2-fe-a R1:激活门 —— Work UI 未就绪前,持久化/后端回传的 Work
+  // 不得成为当前层(否则 UI fall through 到 Code、启动被后端拒)。
+  it("activation gate keeps Work unreachable until the UI is wired", () => {
+    // parseSurface(纯校验)仍认 Work —— 供 W2-fe-b 用。
+    expect(parseSurface("work")).toBe("work");
+    if (!WORK_UI_READY) {
+      // 但可激活层把 Work 降级为 Code(fail-closed)。
+      expect(resolveActiveSurface("work")).toBe("code");
+    } else {
+      expect(resolveActiveSurface("work")).toBe("work");
+    }
+    // chat/code 不受门影响;未知仍回 Code。
+    expect(resolveActiveSurface("chat")).toBe("chat");
+    expect(resolveActiveSurface("code")).toBe("code");
+    expect(resolveActiveSurface("cowork")).toBe("code");
+    expect(resolveActiveSurface(null)).toBe("code");
   });
 });

@@ -26,7 +26,7 @@ import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
-import { parseSurface, surfaceSwitchRequiresNewSession, type SurfaceKind } from "./surface";
+import { resolveActiveSurface, surfaceSwitchRequiresNewSession, type SurfaceKind } from "./surface";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -253,7 +253,7 @@ function App() {
   const workspaceStateRef = useRef(workspace);
   workspaceStateRef.current = workspace;
   const [surface, setSurface] = useState<SurfaceKind>(() =>
-    parseSurface(localStorage.getItem("wancode-surface")),
+    resolveActiveSurface(localStorage.getItem("wancode-surface")),
   );
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
@@ -1468,7 +1468,9 @@ function App() {
       );
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
-      const resolvedSurface = parseSurface(r.surface_kind);
+      // 走就绪门:Work UI 未接线前,后端回传的 Work 绑定降级为 Code(不激活
+      // 半接线状态)。W2-fe-b 接线后 WORK_UI_READY 翻真,此处自然放行 Work。
+      const resolvedSurface = resolveActiveSurface(r.surface_kind);
       setSurface(resolvedSurface);
       localStorage.setItem("wancode-surface", resolvedSurface);
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
