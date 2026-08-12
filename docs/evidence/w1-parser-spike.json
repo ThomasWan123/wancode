@@ -1,0 +1,54 @@
+{
+  "all_safe_over_run_probes": true,
+  "artifact": "w1-parser-spike",
+  "compression_stack": "pure-rust deflate (miniz_oxide); no separately-shipped native binary",
+  "not_run_count": 1,
+  "probes": [
+    {
+      "detail": "Invalid cross-reference table (invalid start value)",
+      "outcome": "REJECTED",
+      "probe": "pdf_truncated"
+    },
+    {
+      "detail": "Invalid file header",
+      "outcome": "REJECTED",
+      "probe": "pdf_garbage"
+    },
+    {
+      "detail": "页数=1",
+      "outcome": "OK",
+      "probe": "pdf_valid_control"
+    },
+    {
+      "detail": "trailer 含 /Encrypt,分类为不支持(不解密)",
+      "outcome": "HANDLED",
+      "probe": "pdf_encrypted_detected"
+    },
+    {
+      "detail": "enclosed_name() 对 ../ 返回 None",
+      "outcome": "REJECTED",
+      "probe": "docx_zip_path_traversal"
+    },
+    {
+      "detail": "声明=2000692>CAP=1000000,解压前拒",
+      "outcome": "REJECTED",
+      "probe": "docx_zip_over_cap_rejected"
+    },
+    {
+      "detail": "需真实 .docx 样本让 docx-rs 完整解析;合成件不足,归 W3 功能面",
+      "outcome": "NOT_RUN",
+      "probe": "docx_xml_entity_expansion"
+    },
+    {
+      "detail": "crash worker 非成功终止 status=ExitStatus(ExitStatus(3221226505));残留哨兵存在=true 清理后=true",
+      "outcome": "CONTAINED",
+      "probe": "crash_containment"
+    },
+    {
+      "detail": "hang worker 超时被 kill,父存活;残留哨兵存在=true 清理后=true",
+      "outcome": "KILLED",
+      "probe": "hang_timeout_kill"
+    }
+  ],
+  "scope": "exploratory API feasibility — NOT a closed safety gate"
+}
