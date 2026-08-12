@@ -15,6 +15,7 @@ pub mod surface;
 pub mod surface_gate;
 pub mod surface_policy;
 pub mod work_staging;
+pub mod work_import;
 #[cfg(test)]
 mod plugin_lifecycle_probe;
 #[cfg(test)]
@@ -271,6 +272,7 @@ pub fn run() {
             git_ops::git_checkout,
             agent::default_workspace,
             agent::chat_workspace,
+            work_import::work_import,
             agent::agent_list_sessions,
             agent::agent_list_mcp,
             engine_ops::agent_session_info,
