@@ -13,7 +13,7 @@
 //! (防路径穿越,与 W2-a 的 id 逃逸防线同源)。**不含**解析/锚点(W3)、
 //! 前端(W2-c)。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
@@ -182,6 +182,7 @@ fn cleanup_import_dir(import_dir: &Path) {
     let _ = std::fs::remove_dir_all(import_dir);
 }
 
+#[allow(clippy::permissions_set_readonly_false)] // 清理孤儿时有意清只读
 fn clear_readonly_recursive(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
@@ -235,6 +236,7 @@ fn set_read_only(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
