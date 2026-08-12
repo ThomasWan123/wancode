@@ -31,6 +31,8 @@ pub enum WorkImportError {
     SourceUnreadable(String),
     /// 暂存/清单层错误。
     Staging(WorkStagingError),
+    /// 现有清单归属另一工作区(codex R2-F1)。
+    WorkspaceMismatch { requested: String, found: String },
     Io(String),
 }
 
@@ -40,6 +42,10 @@ impl std::fmt::Display for WorkImportError {
             WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}(仅 pdf/docx)"),
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
+            WorkImportError::WorkspaceMismatch { requested, found } => write!(
+                f,
+                "工作区身份不符: 请求 {requested},清单声称 {found}"
+            ),
             WorkImportError::Io(s) => write!(f, "IO 失败: {s}"),
         }
     }
@@ -119,7 +125,16 @@ pub fn import_document(
         };
 
         let mut manifest = if manifest_path.exists() {
-            WorkManifest::read(&manifest_path)? // 损坏/未来版本清单在此 fail-closed
+            let m = WorkManifest::read(&manifest_path)?; // 损坏/未来版本在此 fail-closed
+            // codex R2-F1:现有清单的 workspace_id 必须**精确等于**请求的 id。
+            // 否则(拷贝/篡改/恢复错位)会把导入错误归属到别的工作区。
+            if &m.workspace_id != workspace_id {
+                return Err(WorkImportError::WorkspaceMismatch {
+                    requested: workspace_id.as_str().to_string(),
+                    found: m.workspace_id.as_str().to_string(),
+                });
+            }
+            m
         } else {
             WorkManifest::new(workspace_id.clone())
         };
@@ -379,6 +394,38 @@ mod tests {
         assert!(orphans.is_empty(), "staging 后失败必须清理导入目录,零孤儿");
 
         // 清掉锁文件后可删(锁文件非只读)
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn foreign_workspace_manifest_is_rejected_no_orphan() {
+        // codex R2-F1:工作区 A 目录下放着工作区 B 的清单,导入 A 必须拒绝,
+        // 清单字节不变,无 imp-* 孤儿。
+        let app = tmp_dir("app");
+        let src_dir = tmp_dir("src");
+        let ws_a = WorkspaceId::mint();
+        let ws_b = WorkspaceId::mint();
+        // 在 A 的目录下写入 B 的(语法合法的)清单。
+        let mp_a = manifest_path_under(app.clone(), &ws_a);
+        std::fs::create_dir_all(mp_a.parent().unwrap()).unwrap();
+        WorkManifest::new(ws_b.clone()).write_atomic(&mp_a).unwrap();
+        let before = std::fs::read(&mp_a).unwrap();
+
+        let src = write_source(&src_dir, "x.pdf", b"data");
+        let err = import_document(&app, &ws_a, &src).unwrap_err();
+        assert!(
+            matches!(err, WorkImportError::WorkspaceMismatch { .. }),
+            "应报工作区身份不符,实得 {err:?}"
+        );
+        assert_eq!(std::fs::read(&mp_a).unwrap(), before, "拒绝不得改动清单");
+        let ws_dir = workspace_dir_under(app.clone(), &ws_a);
+        let orphans: Vec<_> = std::fs::read_dir(&ws_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("imp-"))
+            .collect();
+        assert!(orphans.is_empty(), "身份不符拒绝后零 imp-* 孤儿");
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }
