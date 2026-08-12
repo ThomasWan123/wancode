@@ -59,7 +59,16 @@ pub enum SurfaceKind {
 
 /// 持久化的层身份（sidecar 文件内容）。策略内容一概不入盘。
 /// `deny_unknown_fields`：未知字段 = 文件不是本程序认识的形状，阻塞
-/// 而非静默忽略（未来版本新增字段时必须同时 bump schema version）。
+/// 而非静默忽略。
+///
+/// **关于 `workspace_id`（v0.20 W2-c,不 bump schema 的理由）**:一般"新增
+/// 字段必须 bump schema version",因为 `deny_unknown_fields` 会让旧读者拒绝
+/// 带新字段的文件。但 `workspace_id` 仅 Work 层携带,而 **Work 是 v0.20 全新
+/// 层**——已发布版本从不创建 Work 绑定。配合 `skip_serializing_if=None`,
+/// Chat/Code 绑定(workspace_id=None)序列化时**不含该字段**,与旧格式逐字节
+/// 相同;旧读者只可能读到 Chat/Code 文件,永远读不到带 workspace_id 的 Work
+/// 文件(那是升级后才产生的新数据)。因此现存数据零改动、零迁移,schema 保持 1。
+/// (若未来给 Chat/Code 也加字段,那才必须 bump——因为会改动现存文件形状。)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceBinding {
@@ -71,17 +80,47 @@ pub struct SurfaceBinding {
     /// 创建时的规则代号。派生有效策略永远用 CURRENT_POLICY_VERSION 的
     /// 当前代码规则；此字段仅供迁移判定，磁盘值不构成权限来源。
     pub created_policy_version: u32,
+    /// Work 层会话绑定的持久工作区身份(codex R3-F2 / W2-c)。仅 Work 层为
+    /// Some;Chat/Code 为 None 且不序列化(见上文)。检索/会话据此绑定单一
+    /// 工作区清单,文档不得跨工作区串。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<crate::work_staging::WorkspaceId>,
 }
 
 impl SurfaceBinding {
-    /// 以当前版本号构造。
+    /// 以当前版本号构造(Chat/Code:无工作区身份)。
     pub fn new(session_id: impl Into<String>, surface_kind: SurfaceKind) -> Self {
         Self {
             binding_schema_version: CURRENT_BINDING_SCHEMA_VERSION,
             session_id: session_id.into(),
             surface_kind,
             created_policy_version: CURRENT_POLICY_VERSION,
+            workspace_id: None,
         }
+    }
+
+    /// 构造 Work 层绑定,携带其持久工作区身份。
+    pub fn new_work(
+        session_id: impl Into<String>,
+        workspace_id: crate::work_staging::WorkspaceId,
+    ) -> Self {
+        Self {
+            binding_schema_version: CURRENT_BINDING_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            surface_kind: SurfaceKind::Work,
+            created_policy_version: CURRENT_POLICY_VERSION,
+            workspace_id: Some(workspace_id),
+        }
+    }
+
+    /// 身份不变量:Work ⟺ 有 workspace_id;非 Work ⟺ 无。违反 = 结构不一致。
+    pub fn workspace_invariant_holds(&self) -> bool {
+        matches!(
+            (self.surface_kind, self.workspace_id.is_some()),
+            (SurfaceKind::Work, true) | (SurfaceKind::Chat, false)
+                | (SurfaceKind::Code, false)
+                | (SurfaceKind::Cowork, false)
+        )
     }
 }
 
@@ -580,6 +619,61 @@ mod tests {
 
     fn binding(sid: &str, kind: SurfaceKind) -> SurfaceBinding {
         SurfaceBinding::new(sid, kind)
+    }
+
+    // W2-c:Chat/Code 绑定序列化**不含** workspace_id 字段(与旧格式逐字节兼容)。
+    #[test]
+    fn chat_code_binding_omits_workspace_id_field() {
+        for kind in [SurfaceKind::Chat, SurfaceKind::Code] {
+            let json = serde_json::to_string(&SurfaceBinding::new("s", kind)).unwrap();
+            assert!(
+                !json.contains("workspace_id"),
+                "{kind:?} 绑定不得含 workspace_id 字段: {json}"
+            );
+        }
+    }
+
+    // W2-c:旧格式文件(无 workspace_id 字段)仍能反序列化(default None)。
+    #[test]
+    fn legacy_binding_without_workspace_id_deserializes() {
+        let legacy = r#"{"binding_schema_version":1,"session_id":"old","surface_kind":"code","created_policy_version":1}"#;
+        let b: SurfaceBinding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(b.workspace_id, None);
+        assert_eq!(b.surface_kind, SurfaceKind::Code);
+    }
+
+    // W2-c:Work 绑定携带 workspace_id 且 round-trip;身份不变量成立。
+    #[test]
+    fn work_binding_carries_workspace_id_and_round_trips() {
+        let ws = crate::work_staging::WorkspaceId::mint();
+        let b = SurfaceBinding::new_work("ws-sess", ws.clone());
+        assert_eq!(b.surface_kind, SurfaceKind::Work);
+        assert_eq!(b.workspace_id, Some(ws));
+        assert!(b.workspace_invariant_holds());
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains("workspace_id"));
+        let back: SurfaceBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(b, back);
+    }
+
+    // W2-c:身份不变量——Work 无 id / 非 Work 有 id 都算违反。
+    #[test]
+    fn workspace_invariant_rejects_mismatched_shapes() {
+        // Work 但无 workspace_id
+        let bad1 = SurfaceBinding::new("s", SurfaceKind::Work);
+        assert!(!bad1.workspace_invariant_holds());
+        // Code 但有 workspace_id(手工构造违反)
+        let mut bad2 = SurfaceBinding::new("s", SurfaceKind::Code);
+        bad2.workspace_id = Some(crate::work_staging::WorkspaceId::mint());
+        assert!(!bad2.workspace_invariant_holds());
+    }
+
+    // W2-c:带 workspace_id 的**篡改** Work 文件里,逃逸 id 被 WorkspaceId 的
+    // 严格 Deserialize 拒绝(与 W2-a 同源防线,不因进了 binding 而失效)。
+    #[test]
+    fn tampered_workspace_id_in_binding_is_rejected() {
+        let evil = r#"{"binding_schema_version":1,"session_id":"s","surface_kind":"work","created_policy_version":1,"workspace_id":"ws-../../escape"}"#;
+        assert!(serde_json::from_str::<SurfaceBinding>(evil).is_err());
     }
 
     // RED-1：四种 SurfaceKind round-trip。
