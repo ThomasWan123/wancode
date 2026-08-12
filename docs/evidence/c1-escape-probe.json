@@ -1,5 +1,5 @@
 {
-  "all_three_vectors_blocked": true,
+  "all_required_vectors_blocked": true,
   "artifact": "c1-escape-predicate-spike",
   "control_allows": true,
   "predicate_catches_all_tested": true,
@@ -12,17 +12,17 @@
       "vector": "in_worktree_control"
     },
     {
-      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\host\\via_absolute.txt",
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\host\\via_absolute.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "absolute_path"
     },
     {
-      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\worktree\\subdir\\..\\..\\host\\via_dotdot.txt",
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\worktree\\subdir\\..\\..\\host\\via_dotdot.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "dotdot_relative"
     },
     {
-      "detail": "经 junction 写宿主(symlink 无权限,改用 junction),目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-312308\\worktree\\escape_junction\\via_junction.txt",
+      "detail": "经 junction 写宿主(symlink 无权限,改用 junction),目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\worktree\\escape_junction\\via_junction.txt",
       "predicate": "WOULD_BLOCK",
       "vector": "symlink_junction"
     },

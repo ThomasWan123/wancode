@@ -172,23 +172,23 @@ fn finish(results: &[(String, String, String)], sentinel: &Path,
     let sentinel_ok = fs::read(sentinel).map(|b| b == before).unwrap_or(false)
         && sentinel.exists();
 
-    // 谓词能力面(必要非充分):三逃逸向量各自是否被谓词识别。
-    let escapes: Vec<&(String, String, String)> = results.iter()
-        .filter(|(v, _, _)| v != "in_worktree_control").collect();
-    let predicate_catches_all = escapes.iter()
-        .all(|(_, p, _)| p == "WOULD_BLOCK");
     let control_ok = results.iter().any(|(v, p, _)|
         v == "in_worktree_control" && p == "ALLOW");
 
     // 本 spike **不产出档位裁定**(codex R1-F3/R2-F1):只测谓词能否识别逃逸,
     // 不驱动真实引擎会话、不观测拒绝,也不宣称执行点是否存在。C1/C2 档位由
     // 保留的 full-MvpAgent 门决定(用户裁定 2026-08-12)。
-    // F2:每个逃逸向量都必须被谓词识别(WOULD_BLOCK)才算成功,
-    //     任一 ESCAPED/ERROR/SKIPPED → 失败。
-    // 所有非正对照向量:凡真正运行(非 SKIPPED)的都必须 WOULD_BLOCK。
-    let run_escapes: Vec<_> = escapes.iter().filter(|(_, p, _)| *p != "SKIPPED").collect();
-    let all_vectors_blocked = !run_escapes.is_empty()
-        && run_escapes.iter().all(|(_, p, _)| *p == "WOULD_BLOCK");
+    //
+    // codex R4-F1:必需向量集**精确命名**,四个全部必须**运行且 WOULD_BLOCK**
+    // 才算通过。任一 SKIPPED/ESCAPED/ERROR/缺失 → 不作通过证据(该次运行整体
+    // 视为 NOT_RUN,exit 非零)。不再过滤掉 SKIPPED 后只看剩余子集。
+    const REQUIRED: [&str; 4] = ["absolute_path", "dotdot_relative",
+        "symlink_junction", "existing_final_link"];
+    let all_vectors_blocked = REQUIRED.iter().all(|req| {
+        results.iter().any(|(v, p, _)| v == req && p == "WOULD_BLOCK")
+    });
+    // 谓词能力面(供 JSON 记录):同上口径。
+    let predicate_catches_all = all_vectors_blocked;
 
     // 合法 JSON 产物(F4):写入文件,控制台标记分离
     let json = build_json(&results, sentinel_ok, predicate_catches_all,
@@ -259,7 +259,7 @@ C1/C2 remain gated by the preserved full-MvpAgent requirement (user ruling 2026-
         "sentinel_intact": sentinel_ok,
         "predicate_catches_all_tested": predicate_catches_all,
         "control_allows": control_ok,
-        "all_three_vectors_blocked": all_blocked,
+        "all_required_vectors_blocked": all_blocked,
         "vectors": vectors,
     });
     let s = serde_json::to_string_pretty(&doc).unwrap();
