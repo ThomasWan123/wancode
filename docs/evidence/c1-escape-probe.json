@@ -1,0 +1,35 @@
+{
+  "all_required_vectors_blocked": true,
+  "artifact": "c1-escape-predicate-spike",
+  "control_allows": true,
+  "predicate_catches_all_tested": true,
+  "scope": "client predicate capability ONLY — not full C1 evidence (no engine session, no real tool_calls, no observed rejection); produces NO tier ruling. C1/C2 remain gated by the preserved full-MvpAgent requirement (user ruling 2026-08-12).",
+  "sentinel_intact": true,
+  "vectors": [
+    {
+      "detail": "worktree 内路径判定为在内(正对照通过)",
+      "predicate": "ALLOW",
+      "vector": "in_worktree_control"
+    },
+    {
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\host\\via_absolute.txt",
+      "predicate": "WOULD_BLOCK",
+      "vector": "absolute_path"
+    },
+    {
+      "detail": "目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\worktree\\subdir\\..\\..\\host\\via_dotdot.txt",
+      "predicate": "WOULD_BLOCK",
+      "vector": "dotdot_relative"
+    },
+    {
+      "detail": "经 junction 写宿主(symlink 无权限,改用 junction),目标=C:\\Users\\wanwe\\AppData\\Local\\Temp\\c1-escape-289500\\worktree\\escape_junction\\via_junction.txt",
+      "predicate": "WOULD_BLOCK",
+      "vector": "symlink_junction"
+    },
+    {
+      "detail": "已存在的末段 junction 作 target;修正后解全路径识别越界(文件 symlink 无权限,junction 等价验证)",
+      "predicate": "WOULD_BLOCK",
+      "vector": "existing_final_link"
+    }
+  ]
+}

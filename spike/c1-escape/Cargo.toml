@@ -1,0 +1,17 @@
+# C1 逃逸**谓词单元 spike** —— 独立 workspace,秒级构建。
+# 对照 docs/design/v0.20-work-cowork-increment.md §2.1:仅测客户端路径谓词
+# (canonicalize+starts_with)能否识别逃逸向量。**不产出档位裁定**——Cowork
+# 档位与 C2 由保留的 full-MvpAgent 门决定(用户裁定 2026-08-12:保留门)。
+# 这是必要非充分的输入,不是 C1 门证据。
+[package]
+name = "c1-escape-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "c1_probe"
+path = "src/main.rs"
+[workspace]
+
+[dependencies]
+serde_json = "1"
