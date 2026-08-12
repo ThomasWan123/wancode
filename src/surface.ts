@@ -43,18 +43,33 @@ export function surfaceNeedsWorkspace(kind: SurfaceKind): boolean {
   return kind === "work";
 }
 
-/** 后端**已启动**会话回传 surface 后的激活决策(codex W2-fe-a R2)。与
- *  resolveActiveSurface(用于启动前的 localStorage 偏好、降级即可)不同:后端
- *  返回的 Work 已带活会话,不能降级为 Code 掩盖身份——必须 reject,由调用方
- *  fail closed(抛错、不激活会话)。返回判别式,使交易级契约可单测。 */
+/** 前端**已全链路接线**、可作为当前层激活的 surface。Work 待 W2-fe-b、
+ *  Cowork 待 Cowork 线。后端 agent.rs 的 surface_launchable 与此协同。 */
+const WIRED: readonly SurfaceKind[] = WORK_UI_READY ? ["chat", "code", "work"] : ["chat", "code"];
+
+/** 后端**已启动**会话回传 surface 后的激活决策(codex W2-fe-a R2/R3)。与
+ *  resolveActiveSurface(启动前 localStorage 偏好,降级即可)不同:后端返回值
+ *  已带活会话,任何**未接线的层**(Work、Cowork,以及未来任何后端有而前端
+ *  没接的层)都不能降级为 Code 掩盖身份——必须 reject,由调用方 fail closed。
+ *  区分"已知但未接线的层"与"畸形/未知输入",便于报错。返回判别式,可单测。
+ *
+ *  注:真正的防线在后端(agent.rs surface_launchable 在发布 handle 前拦截,
+ *  故后端根本不会带着活 handle 返回这些层);本函数是前端纵深防御。 */
 export type BackendSurfaceDecision =
   | { activate: true; surface: SurfaceKind }
-  | { activate: false; reason: "work-ui-not-ready" };
+  | { activate: false; reason: "layer-not-wired" | "unknown-surface" };
+
+const BACKEND_KNOWN: readonly string[] = ["chat", "code", "work", "cowork"];
 
 export function decideBackendSurface(value: unknown): BackendSurfaceDecision {
-  const parsed = parseSurface(value);
-  if (parsed === "work" && !WORK_UI_READY) {
-    return { activate: false, reason: "work-ui-not-ready" };
+  // 已接线层 → 激活。
+  if (typeof value === "string" && (WIRED as readonly string[]).includes(value)) {
+    return { activate: true, surface: value as SurfaceKind };
   }
-  return { activate: true, surface: parsed };
+  // 后端已知但前端未接线的层(work/cowork/…) → reject(不降级掩盖身份)。
+  if (typeof value === "string" && BACKEND_KNOWN.includes(value)) {
+    return { activate: false, reason: "layer-not-wired" };
+  }
+  // 畸形/未知输入 → reject(不猜测、不激活)。
+  return { activate: false, reason: "unknown-surface" };
 }
