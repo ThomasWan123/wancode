@@ -126,7 +126,27 @@ impl SurfaceState {
         session_id: &str,
         kind: SurfaceKind,
     ) -> Result<SurfaceBinding, SurfaceError> {
+        // W2-c:Work 层需要 workspace_id,不能经本(仅 kind 的)入口创建——
+        // 用 bind_new_work_session。生产新会话目前固定 Code(2d 评审前),
+        // 故此约束不影响现有路径。
+        if kind == SurfaceKind::Work {
+            return Err(SurfaceError::CorruptBinding {
+                session_id: session_id.to_string(),
+                reason: "Work 层会话须经 bind_new_work_session 提供 workspace_id".into(),
+            });
+        }
         let b = SurfaceBinding::new(session_id, kind);
+        self.gate.store().write(&b)?;
+        Ok(b)
+    }
+
+    /// 创建 Work 层新会话,携带其持久工作区身份(W2-c / R3-F2)。
+    pub fn bind_new_work_session(
+        &self,
+        session_id: &str,
+        workspace_id: crate::work_staging::WorkspaceId,
+    ) -> Result<SurfaceBinding, SurfaceError> {
+        let b = SurfaceBinding::new_work(session_id, workspace_id);
         self.gate.store().write(&b)?;
         Ok(b)
     }
@@ -145,7 +165,17 @@ impl SurfaceState {
         new_session_id: &str,
     ) -> Result<SurfaceBinding, SurfaceError> {
         let source = self.gate.store().resolve(source_session_id)?;
-        self.bind_new_session(new_session_id, source.surface_kind)
+        // W2-c / R3-F2:fork **完整继承**源身份,含 workspace_id(Work 源
+        // fork 出的会话必须留在同一工作区,而非丢掉工作区身份)。
+        let inherited = SurfaceBinding {
+            binding_schema_version: crate::surface::CURRENT_BINDING_SCHEMA_VERSION,
+            session_id: new_session_id.to_string(),
+            surface_kind: source.surface_kind,
+            created_policy_version: crate::surface::CURRENT_POLICY_VERSION,
+            workspace_id: source.workspace_id.clone(),
+        };
+        self.gate.store().write(&inherited)?;
+        Ok(inherited)
     }
 
     /// 生产迁移门：枚举 = 引擎公开的全量会话列举（无数量上限）。
@@ -349,10 +379,15 @@ mod tests {
             .ensure_migrated(|| async { Ok(vec![]) })
             .await
             .unwrap();
-        s.bind_new_session("src-work", SurfaceKind::Work).unwrap();
+        // W2-c:Work 源经 bind_new_work_session 建,fork 必须**继承 workspace_id**。
+        let ws = crate::work_staging::WorkspaceId::mint();
+        s.bind_new_work_session("src-work", ws.clone()).unwrap();
         let b = s.inherit_binding("src-work", "child-1").unwrap();
         assert_eq!(b.surface_kind, SurfaceKind::Work);
-        assert_eq!(s.resolve("child-1").unwrap().surface_kind, SurfaceKind::Work);
+        assert_eq!(b.workspace_id, Some(ws.clone()), "fork 必须继承源的 workspace_id");
+        let child = s.resolve("child-1").unwrap();
+        assert_eq!(child.surface_kind, SurfaceKind::Work);
+        assert_eq!(child.workspace_id, Some(ws), "child 持久绑定同一工作区");
         // 源无归属：拒绝派生。
         assert!(matches!(
             s.inherit_binding("ghost-src", "child-2"),

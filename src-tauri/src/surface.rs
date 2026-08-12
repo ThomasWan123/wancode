@@ -39,7 +39,10 @@ pub const CURRENT_POLICY_VERSION: u32 = 1;
 
 /// sidecar 文件格式版本。读到更大的值 = 文件来自未来版本的 WanCode，
 /// 结构化阻塞（不猜测字段语义）。
-pub const CURRENT_BINDING_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_BINDING_SCHEMA_VERSION: u32 = 2;
+/// 认得的最旧 binding schema。v1 = 无 workspace_id 字段的旧格式(所有非 Work 层:
+/// Chat/Code/Cowork);v2 = 加可选 workspace_id(W2-c)。读时显式接受 [v1..=CURRENT],未来阻塞。
+pub const OLDEST_READABLE_BINDING_SCHEMA_VERSION: u32 = 1;
 
 /// 迁移完成标记文件名（v1 命名空间，未来 schema 演进换新标记）。
 pub const MIGRATION_MARKER: &str = "surface-binding-v1.complete";
@@ -59,7 +62,18 @@ pub enum SurfaceKind {
 
 /// 持久化的层身份（sidecar 文件内容）。策略内容一概不入盘。
 /// `deny_unknown_fields`：未知字段 = 文件不是本程序认识的形状，阻塞
-/// 而非静默忽略（未来版本新增字段时必须同时 bump schema version）。
+/// 而非静默忽略。
+///
+/// **关于 `workspace_id`（v0.20 W2-c,schema 从 1 升到 2)**:加了可选
+/// `workspace_id`(仅 Work 携带)。**必须 bump schema**(codex 复核纠正了
+/// 早先"不 bump"的错误设想):虽然 `skip_serializing_if=None` 让 Chat/Code
+/// 文件字节不变,但降级——旧的 schema-1 二进制读到升级后产生的 Work 文件
+/// (带 workspace_id 字段)——若 schema 仍是 1,旧读者的两阶段探针会因
+/// `deny_unknown_fields` 误报 CorruptBinding。bump 到 2 后旧读者的严格 `!=1`
+/// 探针门先报 UnsupportedBindingVersion(正确归类降级场景,不误报损坏)。
+/// 读时显式接受 [OLDEST=1..=CURRENT=2]:v1 = 无 workspace_id 字段的旧格式
+/// (所有**非 Work** 层),规范化为 v2 + None;v1 若带 workspace_id 或为 Work
+/// 即形状不一致 → CorruptBinding。未来(>CURRENT)与更旧(<OLDEST)阻塞。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceBinding {
@@ -71,17 +85,47 @@ pub struct SurfaceBinding {
     /// 创建时的规则代号。派生有效策略永远用 CURRENT_POLICY_VERSION 的
     /// 当前代码规则；此字段仅供迁移判定，磁盘值不构成权限来源。
     pub created_policy_version: u32,
+    /// Work 层会话绑定的持久工作区身份(codex R3-F2 / W2-c)。仅 Work 层为
+    /// Some;Chat/Code 为 None 且不序列化(见上文)。检索/会话据此绑定单一
+    /// 工作区清单,文档不得跨工作区串。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<crate::work_staging::WorkspaceId>,
 }
 
 impl SurfaceBinding {
-    /// 以当前版本号构造。
+    /// 以当前版本号构造(Chat/Code:无工作区身份)。
     pub fn new(session_id: impl Into<String>, surface_kind: SurfaceKind) -> Self {
         Self {
             binding_schema_version: CURRENT_BINDING_SCHEMA_VERSION,
             session_id: session_id.into(),
             surface_kind,
             created_policy_version: CURRENT_POLICY_VERSION,
+            workspace_id: None,
         }
+    }
+
+    /// 构造 Work 层绑定,携带其持久工作区身份。
+    pub fn new_work(
+        session_id: impl Into<String>,
+        workspace_id: crate::work_staging::WorkspaceId,
+    ) -> Self {
+        Self {
+            binding_schema_version: CURRENT_BINDING_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            surface_kind: SurfaceKind::Work,
+            created_policy_version: CURRENT_POLICY_VERSION,
+            workspace_id: Some(workspace_id),
+        }
+    }
+
+    /// 身份不变量:Work ⟺ 有 workspace_id;非 Work ⟺ 无。违反 = 结构不一致。
+    pub fn workspace_invariant_holds(&self) -> bool {
+        matches!(
+            (self.surface_kind, self.workspace_id.is_some()),
+            (SurfaceKind::Work, true) | (SurfaceKind::Chat, false)
+                | (SurfaceKind::Code, false)
+                | (SurfaceKind::Cowork, false)
+        )
     }
 }
 
@@ -187,6 +231,13 @@ pub enum SurfaceError {
         existing: SurfaceKind,
         requested: SurfaceKind,
     },
+    /// 既有 Work binding 的 workspace_id 与写入请求不同——工作区身份不可变
+    /// (codex R1-F2:不许把已绑定会话悄悄重绑到别的工作区)。
+    WorkspaceIdentityConflict {
+        session_id: String,
+        existing: String,
+        requested: String,
+    },
     /// 存储 IO 失败（新会话此态 = 可留存不可运行，等显式恢复/认领）。
     StoreIo { session_id: String, reason: String },
     /// 迁移未全部成功，完成标记未写。
@@ -226,6 +277,10 @@ impl std::fmt::Display for SurfaceError {
             SurfaceError::ImmutableKindConflict { session_id, existing, requested } => write!(
                 f,
                 "immutable_kind_conflict: 会话 {session_id} 已归属 {existing:?}，拒绝改为 {requested:?}"
+            ),
+            SurfaceError::WorkspaceIdentityConflict { session_id, existing, requested } => write!(
+                f,
+                "workspace_identity_conflict: 会话 {session_id} 已绑定工作区 {existing}，拒绝改为 {requested}"
             ),
             SurfaceError::StoreIo { session_id, reason } => {
                 write!(f, "store_io: 会话 {session_id} sidecar 写入失败：{reason}")
@@ -359,15 +414,38 @@ impl SurfaceBindingStore {
                 created_policy_version: binding.created_policy_version,
             });
         }
+        // 写前也强制身份不变量(codex R1-F1):不允许把 Work+None 或
+        // 非 Work+Some 这种不一致身份落盘。
+        if !binding.workspace_invariant_holds() {
+            return Err(SurfaceError::CorruptBinding {
+                session_id: binding.session_id.clone(),
+                reason: "写入的 binding 违反 Work⟺workspace_id 身份不变量".into(),
+            });
+        }
         let judge_existing = |existing: SurfaceBinding| {
-            if existing.surface_kind == binding.surface_kind {
-                Ok(())
-            } else {
+            // 完整不可变身份比对(codex R1-F2):kind **与 workspace_id** 都须一致,
+            // 否则重绑到别的工作区会假报成功。
+            if existing.surface_kind != binding.surface_kind {
                 Err(SurfaceError::ImmutableKindConflict {
                     session_id: binding.session_id.clone(),
                     existing: existing.surface_kind,
                     requested: binding.surface_kind,
                 })
+            } else if existing.workspace_id != binding.workspace_id {
+                Err(SurfaceError::WorkspaceIdentityConflict {
+                    session_id: binding.session_id.clone(),
+                    existing: existing
+                        .workspace_id
+                        .map(|w| w.as_str().to_string())
+                        .unwrap_or_default(),
+                    requested: binding
+                        .workspace_id
+                        .clone()
+                        .map(|w| w.as_str().to_string())
+                        .unwrap_or_default(),
+                })
+            } else {
+                Ok(())
             }
         };
         // 快路径：已有文件直接裁决（读错误如实上抛）。
@@ -421,10 +499,16 @@ impl SurfaceBindingStore {
                 session_id: session_id.to_string(),
                 reason: format!("版本探针解析失败: {e}"),
             })?;
-        // 版本门：schema 严格等值——过去与未来的 schema 都阻塞（旧格式
-        // 必须经显式迁移，不做静默兼容读取）；policy 代号仅未来阻塞
-        // （旧 policy 会话按当前规则派生是两层契约的核心，G22⑥）。
-        if probe.binding_schema_version != CURRENT_BINDING_SCHEMA_VERSION
+        // 版本门(W2-c 修订):schema 显式接受 [OLDEST..=CURRENT]——v1 是
+        // Chat/Code 时代的已知旧格式(无 workspace_id),v2 当前。**过去的
+        // 已知版本不再一律阻塞**,因为 v1→v2 是纯附加(v1 语义 = workspace_id
+        // None),读作 None 是精确而非有损兼容,这是显式处理不是静默。未来
+        // (> CURRENT)仍阻塞;更旧(< OLDEST)也阻塞。policy 代号仍仅未来阻塞。
+        // 关键(codex R1-F3):旧的 schema-1 二进制读到 v2 文件时,其严格
+        // `!= 1` 探针门会先报 UnsupportedBindingVersion(而非 deny_unknown_fields
+        // 的 CorruptBinding)——两阶段探针在旧读者上把降级场景归类正确。
+        if probe.binding_schema_version > CURRENT_BINDING_SCHEMA_VERSION
+            || probe.binding_schema_version < OLDEST_READABLE_BINDING_SCHEMA_VERSION
             || probe.created_policy_version > CURRENT_POLICY_VERSION
         {
             return Err(SurfaceError::UnsupportedBindingVersion {
@@ -433,8 +517,9 @@ impl SurfaceBindingStore {
                 created_policy_version: probe.created_policy_version,
             });
         }
-        // 阶段二：当前 schema 的严格全量解析（deny_unknown_fields）。
-        let binding: SurfaceBinding =
+        // 阶段二:严格全量解析。v1/v2 都能解进 v2 结构体(workspace_id 有
+        // serde default);v1 文件无该字段 → None。
+        let mut binding: SurfaceBinding =
             serde_json::from_str(&text).map_err(|e| SurfaceError::CorruptBinding {
                 session_id: session_id.to_string(),
                 reason: e.to_string(),
@@ -443,6 +528,25 @@ impl SurfaceBindingStore {
             return Err(SurfaceError::SessionIdMismatch {
                 requested: session_id.to_string(),
                 embedded: binding.session_id,
+            });
+        }
+        // v1 legacy 显式规范化为 v2:v1 必是 Chat/Code + None;若 v1 文件竟带
+        // workspace_id 或为 Work,即形状不一致 → CorruptBinding。
+        if binding.binding_schema_version < CURRENT_BINDING_SCHEMA_VERSION {
+            if binding.workspace_id.is_some() || binding.surface_kind == SurfaceKind::Work {
+                return Err(SurfaceError::CorruptBinding {
+                    session_id: session_id.to_string(),
+                    reason: "v1 binding 不得携带 workspace_id 或为 Work 层".into(),
+                });
+            }
+            binding.binding_schema_version = CURRENT_BINDING_SCHEMA_VERSION;
+        }
+        // 信任边界强制身份不变量(codex R1-F1):Work⟺Some / 非 Work⟺None,
+        // 违反即 fail-closed,不把不一致的持久身份返给调用方。
+        if !binding.workspace_invariant_holds() {
+            return Err(SurfaceError::CorruptBinding {
+                session_id: session_id.to_string(),
+                reason: "binding 违反 Work⟺workspace_id 身份不变量".into(),
             });
         }
         Ok(Some(binding))
@@ -579,7 +683,152 @@ mod tests {
     }
 
     fn binding(sid: &str, kind: SurfaceKind) -> SurfaceBinding {
-        SurfaceBinding::new(sid, kind)
+        // W2-c:Work 必须携带 workspace_id(身份不变量),其余走普通构造。
+        if kind == SurfaceKind::Work {
+            SurfaceBinding::new_work(sid, crate::work_staging::WorkspaceId::mint())
+        } else {
+            SurfaceBinding::new(sid, kind)
+        }
+    }
+
+    // W2-c:Chat/Code 绑定序列化**不含** workspace_id 字段(与旧格式逐字节兼容)。
+    #[test]
+    fn chat_code_binding_omits_workspace_id_field() {
+        for kind in [SurfaceKind::Chat, SurfaceKind::Code] {
+            let json = serde_json::to_string(&SurfaceBinding::new("s", kind)).unwrap();
+            assert!(
+                !json.contains("workspace_id"),
+                "{kind:?} 绑定不得含 workspace_id 字段: {json}"
+            );
+        }
+    }
+
+    // W2-c:旧格式文件(无 workspace_id 字段)仍能反序列化(default None)。
+    #[test]
+    fn legacy_binding_without_workspace_id_deserializes() {
+        let legacy = r#"{"binding_schema_version":1,"session_id":"old","surface_kind":"code","created_policy_version":1}"#;
+        let b: SurfaceBinding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(b.workspace_id, None);
+        assert_eq!(b.surface_kind, SurfaceKind::Code);
+    }
+
+    // W2-c:Work 绑定携带 workspace_id 且 round-trip;身份不变量成立。
+    #[test]
+    fn work_binding_carries_workspace_id_and_round_trips() {
+        let ws = crate::work_staging::WorkspaceId::mint();
+        let b = SurfaceBinding::new_work("ws-sess", ws.clone());
+        assert_eq!(b.surface_kind, SurfaceKind::Work);
+        assert_eq!(b.workspace_id, Some(ws));
+        assert!(b.workspace_invariant_holds());
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains("workspace_id"));
+        let back: SurfaceBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(b, back);
+    }
+
+    // W2-c:身份不变量——Work 无 id / 非 Work 有 id 都算违反。
+    #[test]
+    fn workspace_invariant_rejects_mismatched_shapes() {
+        // Work 但无 workspace_id
+        let bad1 = SurfaceBinding::new("s", SurfaceKind::Work);
+        assert!(!bad1.workspace_invariant_holds());
+        // Code 但有 workspace_id(手工构造违反)
+        let mut bad2 = SurfaceBinding::new("s", SurfaceKind::Code);
+        bad2.workspace_id = Some(crate::work_staging::WorkspaceId::mint());
+        assert!(!bad2.workspace_invariant_holds());
+    }
+
+    // W2-c:带 workspace_id 的**篡改** Work 文件里,逃逸 id 被 WorkspaceId 的
+    // 严格 Deserialize 拒绝(与 W2-a 同源防线,不因进了 binding 而失效)。
+    #[test]
+    fn tampered_workspace_id_in_binding_is_rejected() {
+        let evil = r#"{"binding_schema_version":2,"session_id":"s","surface_kind":"work","created_policy_version":1,"workspace_id":"ws-../../escape"}"#;
+        assert!(serde_json::from_str::<SurfaceBinding>(evil).is_err());
+    }
+
+    // W2-c F1:store 在**信任边界**强制身份不变量——Work+None / 非 Work+Some
+    // 都不能落盘也不能解析返回。
+    #[test]
+    fn store_rejects_invariant_violating_bindings() {
+        let (_g, s) = store();
+        // Work + None(手工构造违反)→ write 拒。
+        let bad_work = SurfaceBinding::new("bw", SurfaceKind::Work);
+        assert!(matches!(s.write(&bad_work), Err(SurfaceError::CorruptBinding { .. })));
+        // Code + Some(手工构造违反)→ write 拒。
+        let mut bad_code = SurfaceBinding::new("bc", SurfaceKind::Code);
+        bad_code.workspace_id = Some(crate::work_staging::WorkspaceId::mint());
+        assert!(matches!(s.write(&bad_code), Err(SurfaceError::CorruptBinding { .. })));
+        // 直接把违反不变量的文件写到盘上,resolve 也 fail-closed。
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("disk-bad"),
+            r#"{"binding_schema_version":2,"session_id":"disk-bad","surface_kind":"work","created_policy_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(s.resolve("disk-bad"), Err(SurfaceError::CorruptBinding { .. })));
+    }
+
+    // W2-c F2:已绑定某工作区的 Work 会话,重绑到**别的**工作区必须显式冲突,
+    // 而非假报成功。
+    #[test]
+    fn rebind_to_different_workspace_conflicts() {
+        let (_g, s) = store();
+        let ws_a = crate::work_staging::WorkspaceId::mint();
+        let ws_b = crate::work_staging::WorkspaceId::mint();
+        s.write(&SurfaceBinding::new_work("s", ws_a.clone())).unwrap();
+        // 同工作区重写 = 幂等 Ok。
+        s.write(&SurfaceBinding::new_work("s", ws_a)).unwrap();
+        // 换工作区 = WorkspaceIdentityConflict。
+        assert!(matches!(
+            s.write(&SurfaceBinding::new_work("s", ws_b)),
+            Err(SurfaceError::WorkspaceIdentityConflict { .. })
+        ));
+    }
+
+    // W2-c F3:旧 v1 文件(无 workspace_id 字段)被**显式接受**为 Chat/Code,
+    // 规范化为当前 schema,workspace_id=None——不误报 Corrupt/UnsupportedVersion。
+    #[test]
+    fn legacy_v1_file_accepted_as_none() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("legacy"),
+            r#"{"binding_schema_version":1,"session_id":"legacy","surface_kind":"code","created_policy_version":1}"#,
+        )
+        .unwrap();
+        let b = s.resolve("legacy").unwrap();
+        assert_eq!(b.surface_kind, SurfaceKind::Code);
+        assert_eq!(b.workspace_id, None);
+        assert_eq!(b.binding_schema_version, CURRENT_BINDING_SCHEMA_VERSION);
+    }
+
+    // W2-c P2:v1 是"所有非 Work 层"——v1 Cowork(无 workspace_id)也被接受。
+    #[test]
+    fn legacy_v1_cowork_accepted_as_none() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("v1cow"),
+            r#"{"binding_schema_version":1,"session_id":"v1cow","surface_kind":"cowork","created_policy_version":1}"#,
+        )
+        .unwrap();
+        let b = s.resolve("v1cow").unwrap();
+        assert_eq!(b.surface_kind, SurfaceKind::Cowork);
+        assert_eq!(b.workspace_id, None);
+        assert_eq!(b.binding_schema_version, CURRENT_BINDING_SCHEMA_VERSION);
+    }
+
+    // W2-c F3:v1 文件若竟带 workspace_id 或为 Work(形状不一致)→ CorruptBinding。
+    #[test]
+    fn legacy_v1_with_workspace_or_work_is_corrupt() {
+        let (_g, s) = store();
+        std::fs::create_dir_all(&s.root).unwrap();
+        std::fs::write(
+            s.path_for("v1work"),
+            r#"{"binding_schema_version":1,"session_id":"v1work","surface_kind":"work","created_policy_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(s.resolve("v1work"), Err(SurfaceError::CorruptBinding { .. })));
     }
 
     // RED-1：四种 SurfaceKind round-trip。
@@ -639,10 +888,10 @@ mod tests {
     #[test]
     fn embedded_id_mismatch_blocks() {
         let (_g, s) = store();
-        s.write(&binding("sess-a", SurfaceKind::Work)).unwrap();
+        s.write(&binding("sess-a", SurfaceKind::Code)).unwrap();
         std::fs::write(
             s.path_for("sess-a"),
-            serde_json::to_string(&binding("sess-b", SurfaceKind::Work)).unwrap(),
+            serde_json::to_string(&binding("sess-b", SurfaceKind::Code)).unwrap(),
         )
         .unwrap();
         match s.resolve("sess-a") {
@@ -786,7 +1035,7 @@ mod tests {
             other => panic!("标记后迁移不得回填新 ID，得到 {other:?}"),
         }
         // 快照内全部已有归属时才是幂等 Ok。
-        s.write(&binding("bound", SurfaceKind::Work)).unwrap();
+        s.write(&binding("bound", SurfaceKind::Code)).unwrap();
         s.migrate_legacy(["bound"]).expect("全绑定快照幂等成功");
     }
 
@@ -856,11 +1105,11 @@ mod tests {
             })
         };
         let a = mk("par-a".into(), SurfaceKind::Chat);
-        let b = mk("par-b".into(), SurfaceKind::Work);
+        let b = mk("par-b".into(), SurfaceKind::Code);
         a.join().unwrap();
         b.join().unwrap();
         assert_eq!(s.resolve("par-a").unwrap().surface_kind, SurfaceKind::Chat);
-        assert_eq!(s.resolve("par-b").unwrap().surface_kind, SurfaceKind::Work);
+        assert_eq!(s.resolve("par-b").unwrap().surface_kind, SurfaceKind::Code);
     }
 
     // 复核-2：同 session 两种 kind 并发首写恰一个成功（no-clobber）。
@@ -882,7 +1131,7 @@ mod tests {
                 })
             };
             let ha = mk(SurfaceKind::Chat);
-            let hb = mk(SurfaceKind::Work);
+            let hb = mk(SurfaceKind::Code);
             let a = ha.join().unwrap();
             let b = hb.join().unwrap();
             let oks = [&a, &b].iter().filter(|r| r.is_ok()).count();
@@ -893,7 +1142,7 @@ mod tests {
                 "落败方必须 ImmutableKindConflict，实际 {loser:?}"
             );
             // 磁盘上的 kind == 赢家的 kind。
-            let winner_kind = if a.is_ok() { SurfaceKind::Chat } else { SurfaceKind::Work };
+            let winner_kind = if a.is_ok() { SurfaceKind::Chat } else { SurfaceKind::Code };
             assert_eq!(
                 s.try_read_raw(&sid).unwrap().unwrap().surface_kind,
                 winner_kind
@@ -1002,7 +1251,7 @@ mod tests {
     #[test]
     fn past_schema_version_blocks() {
         let (_g, s) = store();
-        s.write(&binding("past", SurfaceKind::Work)).unwrap();
+        s.write(&binding("past", SurfaceKind::Code)).unwrap();
         std::fs::write(
             s.path_for("past"),
             r#"{"binding_schema_version":0,"session_id":"past","surface_kind":"work","created_policy_version":0}"#,
@@ -1059,12 +1308,12 @@ mod tests {
         std::fs::create_dir_all(&s.root).unwrap();
         std::fs::write(
             s.path_for("fut-shape"),
-            r#"{"binding_schema_version":2,"session_id":"fut-shape","surface_kind":"quantum","brand_new_field":{"nested":true}}"#,
+            r#"{"binding_schema_version":3,"session_id":"fut-shape","surface_kind":"quantum","brand_new_field":{"nested":true}}"#,
         )
         .unwrap();
         match s.resolve("fut-shape") {
-            Err(SurfaceError::UnsupportedBindingVersion { binding_schema_version: 2, .. }) => {}
-            other => panic!("期望 UnsupportedBindingVersion(schema=2)，得到 {other:?}"),
+            Err(SurfaceError::UnsupportedBindingVersion { binding_schema_version: 3, .. }) => {}
+            other => panic!("期望 UnsupportedBindingVersion(schema=3)，得到 {other:?}"),
         }
     }
 
