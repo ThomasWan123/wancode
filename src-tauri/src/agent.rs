@@ -170,6 +170,19 @@ fn surface_loads_configured_mcp(kind: crate::surface::SurfaceKind) -> bool {
     kind == crate::surface::SurfaceKind::Code
 }
 
+/// 该层是否**要求引擎确认已应用**本地扩展隔离（`localExtensionsDisabled`）。
+///
+/// 请求该策略与**验证它被应用**是两回事（codex W2-fe-b R3）：curated profile
+/// 与空 ACP `mcp_servers` 并不能独立压制插件/managed MCP 来源——真正压制它们
+/// 的是引擎应用了该策略。因此凡是宣称「零 MCP/零本地扩展」的层（Chat、Work），
+/// 都必须在**新建与恢复**两条路径上要求 `localExtensionsDisabledApplied`，
+/// 否则引擎漂移/旧引擎/忽略该请求的路径会让边界 fail-open。Code 无此要求
+/// （它本就允许配置 MCP 与本地扩展）。
+fn surface_requires_local_extension_isolation(kind: crate::surface::SurfaceKind) -> bool {
+    use crate::surface::SurfaceKind::{Chat, Work};
+    matches!(kind, Chat | Work)
+}
+
 /// Start (or restart) an embedded agent session rooted at `workspace`.
 #[tauri::command]
 pub async fn agent_start(
@@ -555,7 +568,9 @@ pub(crate) async fn start_inner_with_intent(
             .as_ref()
             .and_then(|m| m.get("x.ai/modelBlock"))
             .cloned();
-        if is_chat && !local_extensions_policy_applied(resp.meta.as_ref()) {
+        if surface_requires_local_extension_isolation(surface_kind)
+            && !local_extensions_policy_applied(resp.meta.as_ref())
+        {
             cancel.cancel();
             return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
                 &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
@@ -572,7 +587,9 @@ pub(crate) async fn start_inner_with_intent(
         )
         .await
         .map_err(|e| anyhow!("创建会话失败: {e}"))?;
-        if is_chat && !local_extensions_policy_applied(resp.meta.as_ref()) {
+        if surface_requires_local_extension_isolation(surface_kind)
+            && !local_extensions_policy_applied(resp.meta.as_ref())
+        {
             cancel.cancel();
             return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
                 &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
@@ -760,7 +777,10 @@ fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_j
 
 #[cfg(test)]
 mod surface_launchable_tests {
-    use super::{surface_launchable, surface_loads_configured_mcp};
+    use super::{
+        surface_launchable, surface_loads_configured_mcp,
+        surface_requires_local_extension_isolation,
+    };
     use crate::surface::SurfaceKind;
 
     #[test]
@@ -771,6 +791,50 @@ mod surface_launchable_tests {
         assert!(surface_launchable(SurfaceKind::Code));
         assert!(surface_launchable(SurfaceKind::Work));
         assert!(!surface_launchable(SurfaceKind::Cowork));
+    }
+
+    // codex W2-fe-b R3:宣称零 MCP/零本地扩展的层(Chat、Work)必须在新建与
+    // 恢复两条路径上**要求引擎确认**已应用隔离;缺失/false 一律 fail-closed。
+    // Code 是正对照(不受限,不要求确认)。
+    #[test]
+    fn work_and_chat_require_local_extension_ack_code_does_not() {
+        use super::local_extensions_policy_applied;
+        assert!(surface_requires_local_extension_isolation(SurfaceKind::Work));
+        assert!(surface_requires_local_extension_isolation(SurfaceKind::Chat));
+        assert!(!surface_requires_local_extension_isolation(SurfaceKind::Code));
+
+        // 组合判定 = 门的真实逻辑:要求隔离 且 未确认 → 阻塞。
+        let blocks = |kind, meta: Option<serde_json::Value>| {
+            let map = meta.map(|v| v.as_object().cloned().expect("object meta"));
+            surface_requires_local_extension_isolation(kind)
+                && !local_extensions_policy_applied(map.as_ref())
+        };
+        // Work:确认缺失 / 显式 false → 阻塞;true → 放行。
+        assert!(blocks(SurfaceKind::Work, None), "Work 缺确认必须阻塞");
+        assert!(
+            blocks(SurfaceKind::Work, Some(serde_json::json!({}))),
+            "Work 元数据无该字段必须阻塞"
+        );
+        assert!(
+            blocks(
+                SurfaceKind::Work,
+                Some(serde_json::json!({"localExtensionsDisabledApplied": false}))
+            ),
+            "Work 显式 false 必须阻塞"
+        );
+        assert!(
+            !blocks(
+                SurfaceKind::Work,
+                Some(serde_json::json!({"localExtensionsDisabledApplied": true}))
+            ),
+            "Work 已确认应放行"
+        );
+        // Code 正对照:无论确认与否都不因此阻塞。
+        assert!(!blocks(SurfaceKind::Code, None));
+        assert!(!blocks(
+            SurfaceKind::Code,
+            Some(serde_json::json!({"localExtensionsDisabledApplied": false}))
+        ));
     }
 
     #[test]
