@@ -33,34 +33,26 @@ describe("surface navigation contract", () => {
     expect(surfaceNeedsWorkspace("code")).toBe(false);
   });
 
-  // codex W2-fe-a R1:激活门 —— Work UI 未就绪前,持久化/后端回传的 Work
-  // 不得成为当前层(否则 UI fall through 到 Code、启动被后端拒)。
-  it("activation gate keeps Work unreachable until the UI is wired", () => {
-    // parseSurface(纯校验)仍认 Work —— 供 W2-fe-b 用。
-    expect(parseSurface("work")).toBe("work");
-    if (!WORK_UI_READY) {
-      // 但可激活层把 Work 降级为 Code(fail-closed)。
-      expect(resolveActiveSurface("work")).toBe("code");
-    } else {
-      expect(resolveActiveSurface("work")).toBe("work");
-    }
-    // chat/code 不受门影响;未知仍回 Code。
+  // 激活门(W2-fe-a R1 引入,W2-fe-b 起 Work 已接线放行)。门的形状随
+  // WORK_UI_READY:ready → Work 可激活;未 ready → 降级 Code。Cowork/未知恒 Code。
+  it("activation gate follows WORK_UI_READY; Cowork/unknown always Code", () => {
+    expect(parseSurface("work")).toBe("work"); // 纯校验恒认 Work
+    expect(resolveActiveSurface("work")).toBe(WORK_UI_READY ? "work" : "code");
+    // chat/code 不受门影响;Cowork(未接线)、未知一律回 Code。
     expect(resolveActiveSurface("chat")).toBe("chat");
     expect(resolveActiveSurface("code")).toBe("code");
     expect(resolveActiveSurface("cowork")).toBe("code");
     expect(resolveActiveSurface(null)).toBe("code");
   });
 
-  // codex W2-fe-a R2:后端已启动会话回传 Work 时,决策必须是 **reject**(不降级
-  // 掩盖)。startSession 据此抛错、在 setSessionId 之前——Work session_id 结构上
-  // 永不激活。chat/code 则 activate。
-  it("backend-returned unwired layers are rejected (not relabeled), unknown too", () => {
-    // Work 与 Cowork 都是"已知但未接线的层" → reject(不降级掩盖身份)。
-    if (!WORK_UI_READY) {
-      expect(decideBackendSurface("work")).toEqual({ activate: false, reason: "layer-not-wired" });
-    } else {
-      expect(decideBackendSurface("work")).toEqual({ activate: true, surface: "work" });
-    }
+  // 后端已启动会话回传 surface 的决策(W2-fe-a R2/R3)。W2-fe-b 起 Work 已接线
+  // → activate;Cowork 仍未接线 → reject(不降级掩盖身份);畸形 → reject。
+  it("backend decision: Work activates when wired, Cowork/unknown rejected", () => {
+    expect(decideBackendSurface("work")).toEqual(
+      WORK_UI_READY
+        ? { activate: true, surface: "work" }
+        : { activate: false, reason: "layer-not-wired" },
+    );
     // Cowork 始终未接线(Cowork 线未落地)。
     expect(decideBackendSurface("cowork")).toEqual({ activate: false, reason: "layer-not-wired" });
     // 畸形/未知输入 → reject(不猜测、不激活)。

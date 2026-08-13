@@ -88,6 +88,10 @@ pub struct StartResult {
     pub caps_config_issue: Option<crate::caps_snapshot::FileIssue>,
     /// v0.19-2a：会话的真实层身份（来自 sidecar，不是前端猜测）。
     pub surface_kind: crate::surface::SurfaceKind,
+    /// W2-fe-b：Work 会话的持久工作区身份（来自 binding；非 Work 为 None）。
+    /// 前端据此调 work_import 把文档导入本会话所属工作区。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     /// 当前策略规则代号（派生用，见 surface::CURRENT_POLICY_VERSION）。
     pub policy_version: u32,
 }
@@ -150,13 +154,14 @@ pub async fn agent_list_mcp(workspace: String) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// 端到端**可启动**的层。W2-fe-a:仅 Chat/Code 已全链路打通(创建+显示+
-/// 生命周期);Work 待 W2-fe-b、Cowork 待 Cowork 线。用于 agent_start 在发布
-/// handle 之前 gate——不可启动的层绝不装 handle(否则留下前端无法显示、
-/// agent_cancel 无法拆除的孤儿会话)。放行条件与前端 WORK_UI_READY 协同解除。
+/// 端到端**可启动**的层。W2-fe-b:Chat/Code/Work 已全链路打通(Work 有创建
+/// 入口 bind_new_work_session + 前端 switcher/视图/导入 + WORK_UI_READY);
+/// Cowork 待 Cowork 线。用于 agent_start 在发布 handle 之前 gate——不可启动
+/// 的层绝不装 handle(否则留下前端无法显示、agent_cancel 无法拆除的孤儿会话)。
+/// 本闸与前端 surface.ts 的 WORK_UI_READY **协同放行**:两处必须同版本一起改。
 fn surface_launchable(kind: crate::surface::SurfaceKind) -> bool {
-    use crate::surface::SurfaceKind::{Chat, Code};
-    matches!(kind, Chat | Code)
+    use crate::surface::SurfaceKind::{Chat, Code, Work};
+    matches!(kind, Chat | Code | Work)
 }
 
 /// Start (or restart) an embedded agent session rooted at `workspace`.
@@ -263,11 +268,39 @@ pub(crate) async fn start_inner_with_intent(
         .map(|b| b.surface_kind)
         .unwrap_or_else(|| new_intent.surface_kind());
     let is_chat = surface_kind == crate::surface::SurfaceKind::Chat;
+    let is_work = surface_kind == crate::surface::SurfaceKind::Work;
+    // W2-fe-b:Work 会话的 workspace_id 需在 cwd 之前确定——Work 的 cwd 就是
+    // 该工作区的暂存目录(app_data_dir/work/<workspace_id>)。resumed Work 用
+    // 绑定里的 id(不变量保证 Some);fresh Work 现铸造(下面写入 Work 绑定,
+    // 同一 id 复用,不重复铸造)。
+    let work_workspace_id: Option<crate::work_staging::WorkspaceId> = if is_work {
+        match resumed_binding.as_ref() {
+            Some(b) => Some(b.workspace_id.clone().ok_or_else(|| {
+                anyhow!("Work 绑定缺 workspace_id（身份不变量被破坏）")
+            })?),
+            None => Some(crate::work_staging::WorkspaceId::mint()),
+        }
+    } else {
+        None
+    };
     let cwd = if is_chat {
         // 路径必须经 resolve_chat_runtime_dir 单一来源（PR #38 F2）。
         let path = resolve_chat_runtime_dir(&app).map_err(|e| anyhow!(e))?;
         std::fs::create_dir_all(&path)
             .with_context(|| format!("创建 Chat 私有运行目录失败: {}", path.display()))?;
+        path
+    } else if is_work {
+        // Work cwd = 该工作区暂存目录(原件只读、DocReadOnly,不碰用户项目)。
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| anyhow!("解析 app_data_dir 失败: {e}"))?;
+        let ws = work_workspace_id
+            .as_ref()
+            .expect("is_work 分支必有 workspace_id");
+        let path = crate::work_staging::workspace_dir_under(app_data, ws);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("创建 Work 暂存目录失败: {}", path.display()))?;
         path
     } else {
         let path = PathBuf::from(&workspace);
@@ -513,9 +546,19 @@ pub(crate) async fn start_inner_with_intent(
         Some(b) => b,
         None => {
             let surface = app.state::<crate::surface_gate::SurfaceState>();
-            match surface
-                .bind_new_session(&session_id.0, surface_kind)
-            {
+            // W2-fe-b:新 Work 会话写 Work 绑定,复用上面(cwd 之前)铸造的
+            // **同一** workspace_id(身份不变量要求 Work⟺workspace_id;
+            // bind_new_session 拒 Work)。workspace_id 随绑定持久化,经
+            // StartResult.workspace_id 回传前端用于导入。
+            let bound = if is_work {
+                let ws = work_workspace_id
+                    .clone()
+                    .expect("is_work 分支必有 workspace_id");
+                surface.bind_new_work_session(&session_id.0, ws)
+            } else {
+                surface.bind_new_session(&session_id.0, surface_kind)
+            };
+            match bound {
                 Ok(b) => b,
                 Err(e) => {
                     cancel.cancel();
@@ -619,6 +662,10 @@ pub(crate) async fn start_inner_with_intent(
         model_options,
         caps_config_issue,
         surface_kind: surface_binding.surface_kind,
+        workspace_id: surface_binding
+            .workspace_id
+            .as_ref()
+            .map(|w| w.as_str().to_string()),
         policy_version: crate::surface::derive_effective_policy(surface_binding.surface_kind)
             .policy_version,
     })
@@ -676,12 +723,12 @@ mod surface_launchable_tests {
     use crate::surface::SurfaceKind;
 
     #[test]
-    fn only_chat_and_code_are_launchable_pre_w2fe_b() {
-        // codex W2-fe-a R3:Work/Cowork 端到端未打通 → agent_start 在装 handle
-        // 前据此拦截,绝不为它们发布孤儿 handle。
+    fn chat_code_work_launchable_cowork_gated() {
+        // W2-fe-b:Work 端到端打通 → 可启动。Cowork 线未落地 → agent_start
+        // 仍在装 handle 前拦截,绝不发布孤儿 handle。
         assert!(surface_launchable(SurfaceKind::Chat));
         assert!(surface_launchable(SurfaceKind::Code));
-        assert!(!surface_launchable(SurfaceKind::Work));
+        assert!(surface_launchable(SurfaceKind::Work));
         assert!(!surface_launchable(SurfaceKind::Cowork));
     }
 }

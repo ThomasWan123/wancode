@@ -26,11 +26,13 @@ use serde::Serialize;
 
 /// 新会话的层意图。**刻意不是 SurfaceKind**：恢复会话没有意图参数
 /// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
-/// 重新归属。公开入口只接受 v0.19 已交付的 Chat/Code；Work/Cowork 拒绝。
+/// 重新归属。公开入口接受 Chat/Code（v0.19）与 Work（v0.20 W2-fe-b）；
+/// Cowork 仍拒绝（Cowork 线未落地）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewSurfaceIntent {
     Code,
     Chat,
+    Work,
 }
 
 impl NewSurfaceIntent {
@@ -38,6 +40,7 @@ impl NewSurfaceIntent {
         match self {
             NewSurfaceIntent::Code => crate::surface::SurfaceKind::Code,
             NewSurfaceIntent::Chat => crate::surface::SurfaceKind::Chat,
+            NewSurfaceIntent::Work => crate::surface::SurfaceKind::Work,
         }
     }
 }
@@ -47,6 +50,7 @@ impl NewSurfaceIntent {
         match value.unwrap_or("code") {
             "code" => Ok(Self::Code),
             "chat" => Ok(Self::Chat),
+            "work" => Ok(Self::Work),
             other => Err(SurfacePolicyError::UnsupportedSurface {
                 surface: other.to_string(),
             }),
@@ -711,15 +715,25 @@ mod tests {
     }
 
     #[test]
-    fn v019_wire_only_accepts_chat_and_code() {
+    fn wire_accepts_chat_code_work_rejects_cowork() {
         assert_eq!(NewSurfaceIntent::from_wire(None), Ok(NewSurfaceIntent::Code));
         assert_eq!(
             NewSurfaceIntent::from_wire(Some("chat")),
             Ok(NewSurfaceIntent::Chat)
         );
-        assert!(matches!(
+        // v0.20 W2-fe-b:Work 现在是合法的新会话意图。
+        assert_eq!(
             NewSurfaceIntent::from_wire(Some("work")),
-            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "work"
+            Ok(NewSurfaceIntent::Work)
+        );
+        assert_eq!(
+            NewSurfaceIntent::from_wire(Some("work")).unwrap().surface_kind(),
+            crate::surface::SurfaceKind::Work
+        );
+        // Cowork 线未落地 → 仍拒绝。
+        assert!(matches!(
+            NewSurfaceIntent::from_wire(Some("cowork")),
+            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "cowork"
         ));
     }
 }

@@ -139,6 +139,43 @@ body {
   background: var(--bg2);
 }
 
+/* W2-fe-b: Work 视图最小样式——导入文档列表(只读)。 */
+.work-docs {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg2);
+  font-size: 13px;
+}
+.work-docs-empty {
+  color: var(--text-dim, #888);
+}
+.work-docs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.work-docs-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.work-doc-kind {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim, #888);
+}
+.work-doc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .surface-switch button {
   padding: 5px 11px;
   border-radius: 7px;

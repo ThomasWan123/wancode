@@ -4,11 +4,11 @@ export type SurfaceKind = "chat" | "code" | "work";
 
 const KNOWN: readonly SurfaceKind[] = ["chat", "code", "work"];
 
-/** Work 层 UI 是否已全量接线(switcher/视图/导入/会话创建)。**W2-fe-b 前为
- *  false**:模型认得 Work,但激活路径(见 resolveActiveSurface)不得让它成为
- *  当前层——否则其余 UI 会 fall through 到 Code 行为、且启动会向后端传 Work
- *  而被 bind_new_session 拒(codex W2-fe-a R1)。W2-fe-b 落地时翻成 true。 */
-export const WORK_UI_READY = false;
+/** Work 层 UI 是否已全量接线(switcher/视图/导入/会话创建)。**W2-fe-b 起为
+ *  true**:switcher 有 Work 按钮、有 Work 视图与导入、agent_start 能创建 Work
+ *  会话。与**后端 agent.rs 的 surface_launchable 协同**——两处必须同版本一起
+ *  放行 Work(否则半接线:一边允许启动、另一边拒绝显示 → 孤儿会话)。 */
+export const WORK_UI_READY = true;
 
 /** 解析持久化/回传的层值为**合法** SurfaceKind;未知一律 fail 回 Code(不猜测)。
  *  这是纯校验,供 W2-fe-b 等所有消费者使用;是否可**激活**另见
