@@ -295,7 +295,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let marker_path = xai_grok_shell::util::grok_home::grok_home().join("wancode-last-session.json");
         let _ = std::fs::remove_file(&marker_path);
         let blocked_marker = std::fs::create_dir_all(&marker_path).is_ok();
-        let bindings_before = dir_entry_names(&surface.gate().store().root_dir());
+        let bindings_before = dir_entry_names(surface.gate().store().root_dir());
         let ws_before2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let fresh_fail = tokio::time::timeout(
             std::time::Duration::from_secs(120),
@@ -319,7 +319,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             let g = state.handle.lock().await;
             g.as_ref().map(|h| h.session_id.0.to_string())
         };
-        let bindings_after = dir_entry_names(&surface.gate().store().root_dir());
+        let bindings_after = dir_entry_names(surface.gate().store().root_dir());
         let ws_after2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let _ = std::fs::remove_dir_all(&marker_path);
         // **设计保证的不变量是「不发布 handle」**（agent.rs 注释：「写失败即取消
