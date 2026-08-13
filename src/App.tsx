@@ -26,7 +26,12 @@ import { parseModelOptions, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
-import { parseSurface, surfaceSwitchRequiresNewSession, type SurfaceKind } from "./surface";
+import {
+  decideBackendSurface,
+  resolveActiveSurface,
+  surfaceSwitchRequiresNewSession,
+  type SurfaceKind,
+} from "./surface";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -253,7 +258,7 @@ function App() {
   const workspaceStateRef = useRef(workspace);
   workspaceStateRef.current = workspace;
   const [surface, setSurface] = useState<SurfaceKind>(() =>
-    parseSurface(localStorage.getItem("wancode-surface")),
+    resolveActiveSurface(localStorage.getItem("wancode-surface")),
   );
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
@@ -1466,14 +1471,30 @@ function App() {
           surface,
         },
       );
+      // codex W2-fe-a R2:后端**已启动**会话并回传持久 surface。若是 Work 而
+      // 前端 UI 未接线,**fail closed 不激活**——绝不把 Work 会话套进 Code UI、
+      // 也不用 code 覆盖持久身份(那会制造跨层身份矛盾)。抛错走既有错误处理
+      // (catch 设 error、finally 复位 starting),Work session_id 永不成为当前
+      // 会话。W2-fe-b 接线后 WORK_UI_READY 翻真,此分支自然放行。
+      const decision = decideBackendSurface(r.surface_kind);
+      if (!decision.activate) {
+        // throw 先于 setSessionId —— 前端不激活未接线层。真正的防线在后端
+        // (agent.rs surface_launchable 在发布 handle 前就拦截了 Work/Cowork,
+        // 故正常情况下根本走不到这里);这里是纵深防御。catch 设 error 并返回
+        // "",finally 复位 starting。
+        throw new Error(
+          lang === "zh"
+            ? "此版本暂不支持打开该层的会话"
+            : "This session's surface isn't available in this build yet",
+        );
+      }
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
-      const resolvedSurface = parseSurface(r.surface_kind);
-      setSurface(resolvedSurface);
-      localStorage.setItem("wancode-surface", resolvedSurface);
+      setSurface(decision.surface);
+      localStorage.setItem("wancode-surface", decision.surface);
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
       // 显示的是另一个仓库的改动，stash/丢弃会打错目标）。
-      if (r.cwd && resolvedSurface === "code") {
+      if (r.cwd && decision.surface === "code") {
         setWorkspace(r.cwd);
         localStorage.setItem("wancode-workspace", r.cwd);
       }
@@ -1490,7 +1511,7 @@ function App() {
       // 加载结果一起回来，直接进选择器状态。
       setModelBlock(parseModelBlock(r.model_block));
       refreshSessions(r.cwd || wsPath);
-      if (resolvedSurface === "code") {
+      if (decision.surface === "code") {
         invoke<string[]>("list_workspace_files", { workspace: wsPath })
           .then(setFileList)
           .catch(() => {});

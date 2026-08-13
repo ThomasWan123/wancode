@@ -150,6 +150,15 @@ pub async fn agent_list_mcp(workspace: String) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// 端到端**可启动**的层。W2-fe-a:仅 Chat/Code 已全链路打通(创建+显示+
+/// 生命周期);Work 待 W2-fe-b、Cowork 待 Cowork 线。用于 agent_start 在发布
+/// handle 之前 gate——不可启动的层绝不装 handle(否则留下前端无法显示、
+/// agent_cancel 无法拆除的孤儿会话)。放行条件与前端 WORK_UI_READY 协同解除。
+fn surface_launchable(kind: crate::surface::SurfaceKind) -> bool {
+    use crate::surface::SurfaceKind::{Chat, Code};
+    matches!(kind, Chat | Code)
+}
+
 /// Start (or restart) an embedded agent session rooted at `workspace`.
 #[tauri::command]
 pub async fn agent_start(
@@ -518,6 +527,19 @@ pub(crate) async fn start_inner_with_intent(
             }
         }
     };
+    // W2-fe-a(codex R3):端到端未打通的层不得启动。Work/Cowork 在本版本没有
+    // 完整链路(无创建入口、前端无显示),若放行会**在此处之下装出一个活 handle**
+    // (line ~574),而前端无法显示、agent_cancel 又只取消回合不拆 handle —— 留下
+    // 一个隐藏的孤儿会话。gate 在 handle 发布**之前**(与紧邻的崩溃标记 gate 同
+    // 一发布事务):不可启动的层直接取消并结构化报错,绝不发布 handle。W2-fe-b
+    // 打通 Work 端到端后 surface_launchable 放行 Work(Cowork 随 Cowork 线)。
+    if !surface_launchable(surface_binding.surface_kind) {
+        cancel.cancel();
+        return Err(anyhow!(
+            "SURFACE_NOT_LAUNCHABLE: {:?} 层会话在本版本尚不可启动",
+            surface_binding.surface_kind
+        ));
+    }
     // Crash recovery is part of the same publication transaction as the
     // immutable surface binding. A session without a durable dirty marker must
     // never become the active, send-capable handle: otherwise a crash can make
@@ -646,6 +668,22 @@ fn schedule_skill_baseline_refresh(acp_tx: AcpAgentTx) {
 fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
     meta.and_then(|m| m.get("localExtensionsDisabledApplied"))
         .and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+#[cfg(test)]
+mod surface_launchable_tests {
+    use super::surface_launchable;
+    use crate::surface::SurfaceKind;
+
+    #[test]
+    fn only_chat_and_code_are_launchable_pre_w2fe_b() {
+        // codex W2-fe-a R3:Work/Cowork 端到端未打通 → agent_start 在装 handle
+        // 前据此拦截,绝不为它们发布孤儿 handle。
+        assert!(surface_launchable(SurfaceKind::Chat));
+        assert!(surface_launchable(SurfaceKind::Code));
+        assert!(!surface_launchable(SurfaceKind::Work));
+        assert!(!surface_launchable(SurfaceKind::Cowork));
+    }
 }
 
 #[cfg(test)]
