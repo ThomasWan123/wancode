@@ -17,6 +17,8 @@ pub mod surface_policy;
 pub mod work_staging;
 pub mod work_import;
 #[cfg(test)]
+mod work_seams;
+#[cfg(test)]
 mod plugin_lifecycle_probe;
 #[cfg(test)]
 mod compat_contracts;

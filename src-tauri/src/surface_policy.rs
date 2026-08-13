@@ -131,7 +131,7 @@ pub fn policy_blocked_message(e: &SurfacePolicyError) -> String {
 /// typed 构造：工具条目来自 `ToolConfig::from(&WebSearchTool/&WebFetchTool)`
 /// ——真实内部 ID（`GrokBuild:*`）由工具自己报告，裸字符串不是契约。
 /// 形状由单测的 serialize → `AgentDefinition::from_json` 往返锁定。
-pub(crate) fn chat_agent_profile() -> serde_json::Value {
+pub fn chat_agent_profile() -> serde_json::Value {
     use xai_grok_tools::implementations::grok_build::{WebFetchTool, WebSearchTool};
     use xai_grok_tools::registry::types::ToolConfig;
     let web_search = ToolConfig::from(&WebSearchTool);
@@ -181,7 +181,7 @@ pub(crate) fn chat_startup_hints() -> serde_json::Value {
 /// （默认 Work 会话工具 schema 缺席；联网 Work 会话是未来的显式 opt-in）。
 /// 文档读取/检索由 W3 的锚点级检索提供，不是裸文件工具。codex W2-fe-b R1：
 /// 之前 Work 会 fall through 到 Code 能力档（全工具 + 配置 MCP），违反边界。
-pub(crate) fn work_agent_profile() -> serde_json::Value {
+pub fn work_agent_profile() -> serde_json::Value {
     use xai_grok_tools::implementations::grok_build::TodoWriteTool;
     use xai_grok_tools::registry::types::ToolConfig;
     // 引擎硬约束（codex W2-fe-b R2，xai-grok-agent/src/builder.rs:686）：
