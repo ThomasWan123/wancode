@@ -317,6 +317,12 @@ impl SurfaceBindingStore {
         Self { root: root.into() }
     }
 
+    /// sidecar 根目录。供验证探针快照「失败启动是否新增 binding」用
+    /// （W2.5 / codex #48 R3-F1）；生产代码不应据此绕过 write/resolve。
+    pub fn root_dir(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// 文件路径 = root/<sha256 hex>.json。原始 ID 绝不进路径——路径穿越
     /// 型 session ID（`../x`、绝对路径、盘符）哈希后只是 64 个 hex 字符。
     pub fn path_for(&self, session_id: &str) -> PathBuf {

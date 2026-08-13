@@ -200,6 +200,24 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         };
         check!("S7-work-resume-opposing", resume_ok, resume_detail);
 
+        // ⑥(生产路径) 在**活着的 Work 会话**上经生产 ext 边界查 MCP 清单。
+        // 这条与 CI 探针不同：会话由 start_inner_with_intent 创建，因此
+        // apply_work_agent_config_overrides / 生产请求构造都在链路里——档或
+        // 覆盖回归会在这里暴露（codex R3-F2 指出探针不走生产构造）。
+        let mcp_live = ext_call(&state, "x.ai/mcp/list", serde_json::json!({})).await;
+        let mcp_empty = mcp_live
+            .as_ref()
+            .ok()
+            .and_then(|v| v.get("result").and_then(|r| r.get("servers")).or_else(|| v.get("servers")))
+            .and_then(|s| s.as_array())
+            .map(|a| a.is_empty());
+        check!(
+            "S7-work-live-session-zero-mcp",
+            mcp_empty == Some(true),
+            format!("servers_empty={mcp_empty:?} raw={mcp_live:?}")
+        );
+
+
         // ⑦ 被拒启动不留残留。**必须真的到达 launchability 门**（codex R2-F2：
         // 伪造一个不存在的 session id 会让 ACP LoadSession 先失败，根本没走到
         // 门，那种「拒绝」什么都证明不了）。做法：拿**上面那个已存在的真实
@@ -267,6 +285,57 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let no_handle = after_handle.is_none();
         let ws_dirs_after = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let no_new_ws = ws_dirs_after == ws_dirs_before;
+        // ⑦b 新建 Work 启动在 **binding 写入之后** 失败时的后置状态
+        //    （codex R3-F1：上面那条走的是 resumed 路径，只能证明「已存在身份
+        //    被拒」，证明不了「新建失败不留 binding/workspace」）。
+        //    确定性注入：在 $GROK_HOME/wancode-last-session.json 处建一个**目录**，
+        //    使崩溃标记写入必失败——那正是「写 binding 之后、发布 handle 之前」
+        //    的唯一确定性失败点（agent.rs：603 写 binding → 637 门 → 648 标记
+        //    → 697 handle）。
+        let marker_path = xai_grok_shell::util::grok_home::grok_home().join("wancode-last-session.json");
+        let _ = std::fs::remove_file(&marker_path);
+        let blocked_marker = std::fs::create_dir_all(&marker_path).is_ok();
+        let bindings_before = dir_entry_names(&surface.gate().store().root_dir());
+        let ws_before2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
+        let fresh_fail = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::agent::start_inner_with_intent(
+                app.clone(),
+                &state,
+                workspace.clone(),
+                None,
+                None,
+                NewSurfaceIntent::Work,
+            ),
+        )
+        .await;
+        let fresh_err = match &fresh_fail {
+            Ok(Err(e)) => format!("{e:#}"),
+            Ok(Ok(_)) => "unexpected success".to_string(),
+            Err(_) => "timeout".to_string(),
+        };
+        let failed_at_marker = fresh_err.contains("CRASH_RECOVERY_MARKER_FAILED");
+        let handle_after_fresh_fail = {
+            let g = state.handle.lock().await;
+            g.as_ref().map(|h| h.session_id.0.to_string())
+        };
+        let bindings_after = dir_entry_names(&surface.gate().store().root_dir());
+        let ws_after2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
+        let _ = std::fs::remove_dir_all(&marker_path);
+        // **设计保证的不变量是「不发布 handle」**（agent.rs 注释：「写失败即取消
+        // 本次 Agent——绝不暴露可发送的 handle；引擎可能留下孤立会话，恢复时会被
+        // unbound_surface 拦住」）。binding/workspace 是否残留一并**如实记录**，
+        // 供评审判断是否需要改设计——不在测试里假装它不存在。
+        let new_bindings = bindings_after.len() as i64 - bindings_before.len() as i64;
+        let new_ws = ws_after2.len() as i64 - ws_before2.len() as i64;
+        check!(
+            "S7-work-failed-fresh-start-no-handle",
+            blocked_marker && failed_at_marker && handle_after_fresh_fail.is_none(),
+            format!(
+                "failed_at_marker={failed_at_marker} handle={handle_after_fresh_fail:?}                  new_bindings={new_bindings} new_workspaces={new_ws} err={fresh_err}"
+            )
+        );
+
         check!(
             "S7-work-rejected-start-clean",
             pre.is_ok() && rejected_at_gate && no_handle && no_new_ws,
