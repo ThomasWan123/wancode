@@ -182,11 +182,21 @@ pub(crate) fn chat_startup_hints() -> serde_json::Value {
 /// 文档读取/检索由 W3 的锚点级检索提供，不是裸文件工具。codex W2-fe-b R1：
 /// 之前 Work 会 fall through 到 Code 能力档（全工具 + 配置 MCP），违反边界。
 pub(crate) fn work_agent_profile() -> serde_json::Value {
+    use xai_grok_tools::implementations::grok_build::TodoWriteTool;
+    use xai_grok_tools::registry::types::ToolConfig;
+    // 引擎硬约束（codex W2-fe-b R2，xai-grok-agent/src/builder.rs:686）：
+    // `!inject_default_tools && tool_config.tools.is_empty()` → InvalidConfig，
+    // 即**空工具集 + 不注入默认工具**这一组合无法构建 agent。因此不能用
+    // 「零工具」表达零能力，必须给一个**零能力面**的工具：todo_write 只操作
+    // 会话内存状态（Resources serde），无文件系统、无网络、无进程执行。
+    // 联网/代码执行/MCP 依旧全部缺席——能力边界由「有哪些工具」决定，
+    // 而不是「有没有工具」。W3 的文档检索工具落地后在此加入。
+    let todo = ToolConfig::from(&TodoWriteTool);
     serde_json::json!({
         "name": "wancode-work",
         "description": "WanCode Work 层：文档工作台，零代码执行、默认无联网/MCP",
-        // 显式空 tool_config——默认 Work 会话不注入任何函数工具（schema 缺席）。
-        "toolConfig": { "tools": [] },
+        // 显式最小 tool_config——主防线：仅零能力面的 todo_write。
+        "toolConfig": { "tools": [todo] },
         "injectDefaultTools": false,
         "agentsMd": false,
         "discoverSkills": false,
@@ -482,36 +492,57 @@ mod tests {
     // codex W2-fe-b R1:默认 Work 会话档必须**零联网/MCP/代码执行**——工具
     // schema 缺席 + hosted/代码工具进 disallowedTools。正对照:Chat 允许 web,
     // 二者档不同(证明 Work 不是照抄 Chat/Code)。
+    // codex W2-fe-b R1/R2:默认 Work 会话档必须①能被引擎真实解析并满足其
+    // **构建前置**(否则每个 Work 会话都构建失败——R2 的真 bug),②零联网/
+    // MCP/代码执行能力面。走 AgentDefinition::from_json 真实解析路径,不只
+    // 看裸 JSON(R2 就是因为只断言 JSON 才漏掉引擎约束)。
     #[test]
-    fn work_profile_has_no_network_mcp_or_code_tools() {
-        let p = work_agent_profile();
-        // 函数工具 schema 空;hosted tools 空;不注入默认工具;不继承 MCP。
-        assert_eq!(p["toolConfig"]["tools"].as_array().unwrap().len(), 0);
-        assert_eq!(p["tools"].as_array().unwrap().len(), 0);
-        assert_eq!(p["injectDefaultTools"], serde_json::json!(false));
-        assert_eq!(p["mcpServers"].as_array().unwrap().len(), 0);
-        assert_eq!(p["mcpInheritance"], serde_json::json!("none"));
-        assert_eq!(p["discoverSkills"], serde_json::json!(false));
-        // 冗余兜底:web + 代码执行 + 文件工具都在 disallowedTools。
-        let dis: Vec<String> = p["disallowedTools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        for must in [
-            "web_search",
-            "web_fetch",
-            "x_search",
-            "GrokBuild:run_terminal_cmd",
-            "GrokBuild:write_file",
-        ] {
-            assert!(dis.contains(&must.to_string()), "Work 必须 disallow {must}");
+    fn work_profile_parses_and_satisfies_engine_build_precondition() {
+        let def = AgentDefinition::from_json(&work_agent_profile())
+            .expect("引擎必须能解析 Work profile——解析失败即形状漂移");
+        assert_eq!(def.name, "wancode-work");
+
+        // ── ① 引擎构建前置(xai-grok-agent/src/builder.rs:686):
+        // `!inject_default_tools && tool_config.tools.is_empty()` = InvalidConfig。
+        // 这条断言就是 R2 漏掉的那条。
+        assert!(!def.inject_default_tools, "inject_default_tools 必须 false");
+        assert!(
+            !def.tool_config.tools.is_empty(),
+            "引擎拒绝「不注入默认工具 + 空工具集」——Work 必须给零能力面的工具"
+        );
+
+        // ── ② 能力面:工具集恰为零能力的 todo_write(无 fs/网络/执行)。
+        let ids: Vec<&str> = def.tool_config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["GrokBuild:todo_write"],
+            "默认 Work 工具集必须恰为 todo_write(零能力面)"
+        );
+        // hosted 面全空:无 web_search/web_fetch/x_search。
+        assert!(def.tools.is_empty(), "默认 Work 不得有任何 hosted 工具(含 web)");
+        assert!(!def.agents_md, "agents_md 必须 false");
+        assert!(!def.discover_skills, "discover_skills 必须 false");
+        assert!(def.mcp_servers.is_empty(), "零自定义 MCP");
+        let back = serde_json::to_value(&def).expect("AgentDefinition 可序列化");
+        assert_eq!(
+            back.get("mcpInheritance").and_then(|v| v.as_str()),
+            Some("none"),
+            "MCP 继承必须 none"
+        );
+        // 冗余兜底 denylist:web + 代码执行 + 文件工具。
+        for must in ["web_search", "web_fetch", "x_search", "GrokBuild:run_terminal_cmd"] {
+            assert!(
+                def.disallowed_tools.contains(&must.to_string()),
+                "Work denylist 必须含 {must}"
+            );
         }
-        // 正对照:Chat 档允许 web(证明 Work 比 Chat 更严,不是同一份)。
-        let chat = chat_agent_profile();
-        assert_eq!(chat["tools"].as_array().unwrap().len(), 2); // web_search + web_fetch
-        assert_ne!(p["tools"], chat["tools"]);
+
+        // ── 正对照:Chat 档同样满足构建前置,但**能力面不同**(允许 web),
+        // 证明 Work 不是照抄 Chat/Code。
+        let chat = AgentDefinition::from_json(&chat_agent_profile()).expect("Chat profile 可解析");
+        assert!(!chat.inject_default_tools && !chat.tool_config.tools.is_empty());
+        assert_eq!(chat.tools, vec!["web_search".to_string(), "web_fetch".to_string()]);
+        assert_ne!(def.tools, chat.tools, "Work 与 Chat 的 hosted 能力面必须不同");
     }
 
     /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下插件「来源/激活/
