@@ -176,6 +176,53 @@ pub(crate) fn chat_startup_hints() -> serde_json::Value {
     serde_json::json!({ "skipGitStatus": true })
 }
 
+/// Work 层 agentProfile（`_meta.agentProfile`）：文档工作台，**零代码执行、
+/// 默认无联网/MCP**（设计 §1 D8 一期 MVP）。比 Chat 更严——连 web 也不注入
+/// （默认 Work 会话工具 schema 缺席；联网 Work 会话是未来的显式 opt-in）。
+/// 文档读取/检索由 W3 的锚点级检索提供，不是裸文件工具。codex W2-fe-b R1：
+/// 之前 Work 会 fall through 到 Code 能力档（全工具 + 配置 MCP），违反边界。
+pub(crate) fn work_agent_profile() -> serde_json::Value {
+    serde_json::json!({
+        "name": "wancode-work",
+        "description": "WanCode Work 层：文档工作台，零代码执行、默认无联网/MCP",
+        // 显式空 tool_config——默认 Work 会话不注入任何函数工具（schema 缺席）。
+        "toolConfig": { "tools": [] },
+        "injectDefaultTools": false,
+        "agentsMd": false,
+        "discoverSkills": false,
+        "mcpServers": [],
+        "mcpInheritance": "none",
+        // hosted tools 全裁剪：默认 Work 无联网、无代码执行。
+        "tools": [],
+        "disallowedTools": [
+            "x_search",
+            "web_search",
+            "web_fetch",
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuild:read_file",
+            "GrokBuild:write_file",
+            "GrokBuild:search_replace",
+            "GrokBuild:list_dir",
+            "GrokBuild:grep",
+        ],
+    })
+}
+
+/// Work 的 AgentConfig 覆盖：关闭 managed MCP（与 Chat 同）。配置/继承 MCP
+/// 另在 agent_start 处对 Work 置空（mcp_servers）。
+pub(crate) fn apply_work_agent_config_overrides(
+    cfg: &mut xai_grok_shell::agent::config::Config,
+) {
+    cfg.managed_mcps_enabled = false;
+    cfg.managed_mcp_gateway_tools_enabled = false;
+}
+
+/// Work 的 startupHints：Work cwd 是暂存目录（非用户项目），跳过 git 状态
+/// 与项目布局注入。
+pub(crate) fn work_startup_hints() -> serde_json::Value {
+    serde_json::json!({ "skipGitStatus": true, "skipProjectLayout": true })
+}
+
 /// agent_type 冲突门：从 config.toml 文档判定模型是否可用于 Chat。
 /// `doc` = toml_edit 解析后的用户配置；`model_id` = catalog key。
 /// 返回 Ok(()) 仅当模型存在且未 pin agent_type。
@@ -431,6 +478,41 @@ pub(crate) fn apply_chat_agent_config_overrides(
 mod tests {
     use super::*;
     use xai_grok_shell::agent::config::AgentDefinition;
+
+    // codex W2-fe-b R1:默认 Work 会话档必须**零联网/MCP/代码执行**——工具
+    // schema 缺席 + hosted/代码工具进 disallowedTools。正对照:Chat 允许 web,
+    // 二者档不同(证明 Work 不是照抄 Chat/Code)。
+    #[test]
+    fn work_profile_has_no_network_mcp_or_code_tools() {
+        let p = work_agent_profile();
+        // 函数工具 schema 空;hosted tools 空;不注入默认工具;不继承 MCP。
+        assert_eq!(p["toolConfig"]["tools"].as_array().unwrap().len(), 0);
+        assert_eq!(p["tools"].as_array().unwrap().len(), 0);
+        assert_eq!(p["injectDefaultTools"], serde_json::json!(false));
+        assert_eq!(p["mcpServers"].as_array().unwrap().len(), 0);
+        assert_eq!(p["mcpInheritance"], serde_json::json!("none"));
+        assert_eq!(p["discoverSkills"], serde_json::json!(false));
+        // 冗余兜底:web + 代码执行 + 文件工具都在 disallowedTools。
+        let dis: Vec<String> = p["disallowedTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for must in [
+            "web_search",
+            "web_fetch",
+            "x_search",
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuild:write_file",
+        ] {
+            assert!(dis.contains(&must.to_string()), "Work 必须 disallow {must}");
+        }
+        // 正对照:Chat 档允许 web(证明 Work 比 Chat 更严,不是同一份)。
+        let chat = chat_agent_profile();
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 2); // web_search + web_fetch
+        assert_ne!(p["tools"], chat["tools"]);
+    }
 
     /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下插件「来源/激活/
     /// 重载」决策文件（agent 3 + shell 4+1）的联合 sha256。引擎升级后

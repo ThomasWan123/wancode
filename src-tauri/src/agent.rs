@@ -164,6 +164,12 @@ fn surface_launchable(kind: crate::surface::SurfaceKind) -> bool {
     matches!(kind, Chat | Code | Work)
 }
 
+/// 是否加载配置/继承的 MCP 服务器。**仅 Code**——Chat/Work 默认无联网/MCP
+/// 能力面（codex W2-fe-b R1；设计 §1「默认 Work 会话不注入联网/MCP 工具」）。
+fn surface_loads_configured_mcp(kind: crate::surface::SurfaceKind) -> bool {
+    kind == crate::surface::SurfaceKind::Code
+}
+
 /// Start (or restart) an embedded agent session rooted at `workspace`.
 #[tauri::command]
 pub async fn agent_start(
@@ -388,6 +394,13 @@ pub(crate) async fn start_inner_with_intent(
             tracing::warn!(error = %e, "Chat 发现磁盘 hooks；由引擎会话硬门隔离");
         }
     }
+    // codex W2-fe-b R1:Work 也要落 AgentConfig 覆盖（关 managed MCP）与禁
+    // 自动模式——否则 Work 会继承 Code 的配置档。工具/MCP 主防线是上面的
+    // work_agent_profile（schema 缺席）+ mcp_servers 置空。
+    if is_work {
+        crate::surface_policy::apply_work_agent_config_overrides(&mut agent_config);
+        agent_config.default_auto_mode = false;
+    }
 
     // NOTE: we deliberately do NOT grant_folder_trust() here.
     //
@@ -424,6 +437,12 @@ pub(crate) async fn start_inner_with_intent(
     let startup_hints = if is_chat {
         let mut hints = crate::surface_policy::chat_startup_hints();
         hints.as_object_mut().expect("static Chat hints")
+            .insert("nonInteractive".into(), serde_json::Value::Bool(true));
+        hints
+    } else if is_work {
+        // Work cwd 是暂存目录，非用户项目——跳过 git 状态/项目布局注入。
+        let mut hints = crate::surface_policy::work_startup_hints();
+        hints.as_object_mut().expect("static Work hints")
             .insert("nonInteractive".into(), serde_json::Value::Bool(true));
         hints
     } else {
@@ -484,18 +503,40 @@ pub(crate) async fn start_inner_with_intent(
     }
 
     // ── Open session (new or resume-with-replay) ───────────────────
-    let mcp_servers = if is_chat {
-        Vec::new()
-    } else {
+    // codex W2-fe-b R1:Work 与 Chat 同样**零配置/继承 MCP**（默认 Work 无
+    // 联网/MCP 能力面）。只有 Code 加载配置 MCP。
+    let mcp_servers = if surface_loads_configured_mcp(surface_kind) {
         xai_grok_shell::util::config::load_mcp_servers(
             &cwd,
             &xai_grok_tools::types::compat::CompatConfig::default(),
         )
+    } else {
+        Vec::new()
     };
-    let session_meta = is_chat.then(|| serde_json::json!({
-        "agentProfile": crate::surface_policy::chat_agent_profile(),
-        "x.ai/localExtensionsDisabled": true,
-    }).as_object().cloned().expect("static Chat session meta"));
+    // 会话级 agentProfile：Chat / Work 各自的受限档；Code 无（继承默认）。
+    let session_meta = if is_chat {
+        Some(
+            serde_json::json!({
+                "agentProfile": crate::surface_policy::chat_agent_profile(),
+                "x.ai/localExtensionsDisabled": true,
+            })
+            .as_object()
+            .cloned()
+            .expect("static Chat session meta"),
+        )
+    } else if is_work {
+        Some(
+            serde_json::json!({
+                "agentProfile": crate::surface_policy::work_agent_profile(),
+                "x.ai/localExtensionsDisabled": true,
+            })
+            .as_object()
+            .cloned()
+            .expect("static Work session meta"),
+        )
+    } else {
+        None
+    };
     let mut model_block: Option<serde_json::Value> = None;
     let (session_id, session_models) = if let Some(sid) = resume {
         let mut req = acp::LoadSessionRequest::new(acp::SessionId::new(sid.clone()), cwd.clone())
@@ -719,7 +760,7 @@ fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_j
 
 #[cfg(test)]
 mod surface_launchable_tests {
-    use super::surface_launchable;
+    use super::{surface_launchable, surface_loads_configured_mcp};
     use crate::surface::SurfaceKind;
 
     #[test]
@@ -730,6 +771,16 @@ mod surface_launchable_tests {
         assert!(surface_launchable(SurfaceKind::Code));
         assert!(surface_launchable(SurfaceKind::Work));
         assert!(!surface_launchable(SurfaceKind::Cowork));
+    }
+
+    #[test]
+    fn only_code_loads_configured_mcp() {
+        // codex W2-fe-b R1:默认 Work 无 MCP 能力面(与 Chat 同);正对照 Code
+        // 仍加载配置 MCP。
+        assert!(surface_loads_configured_mcp(SurfaceKind::Code));
+        assert!(!surface_loads_configured_mcp(SurfaceKind::Work));
+        assert!(!surface_loads_configured_mcp(SurfaceKind::Chat));
+        assert!(!surface_loads_configured_mcp(SurfaceKind::Cowork));
     }
 }
 
