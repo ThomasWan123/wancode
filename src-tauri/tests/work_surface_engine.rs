@@ -21,7 +21,20 @@
 //!      Code 会话能看见 canary MCP（正对照）。
 //!
 //! 未覆盖（本文件范围外，见 PR 说明）：binding 读回、导入、恢复对立意图、
-//! 失败清理——那些走 wancode 自有层，不需要引擎，另在同 PR 的其他测试里。
+//! 失败清理——那些走 wancode 自有层，不需要引擎，见 `src/work_seams.rs`。
+//!
+//! **不链接 `wancode_lib`，改用 `#[path]` 把生产源文件编进本 crate**——与
+//! `job_breakaway` 同款理由：引擎 workspace 的 `[profile.dev] panic = "abort"`
+//! 与 cargo 强制测试目标 unwind 冲突，链 lib 会编译失败（实测 773 条
+//! panic-strategy 错误）。测的仍是**逐字同一实现**：`surface_profiles.rs`
+//! 就是生产路径 `agent.rs` 用的那份档。
+//!
+//! **`harness = false`**：`GROK_HOME` 经引擎 `grok_home()` 的 OnceLock 解析，
+//! 一个进程只认第一次；独立进程才能保证隔离真正生效（否则同进程里别的测试
+//! 先触发解析，`set_var` 静默失效，引擎会落到开发者真实 `~/.grok`）。
+
+#[path = "../src/surface_profiles.rs"]
+mod surface_profiles;
 
 use agent_client_protocol as acp;
 use tokio_util::sync::CancellationToken;
@@ -96,13 +109,12 @@ async fn spawn_authenticated(config: AgentConfig, cancel: &CancellationToken) ->
 /// 与 `agent.rs` 生产路径同形的 Work 会话 meta：**生产 profile 函数本体**
 /// （不复制一份 JSON——复制出来的档测不到生产代码漂移）。
 fn work_session_meta() -> serde_json::Map<String, serde_json::Value> {
-    serde_json::json!({
-        "agentProfile": wancode_lib::surface_policy::work_agent_profile(),
-        "x.ai/localExtensionsDisabled": true,
-    })
-    .as_object()
-    .cloned()
-    .expect("static Work session meta")
+    // 生产档本体（经 #[path] 编进本 crate，非复制品）。
+    let profile = surface_profiles::work_agent_profile().to_string();
+    serde_json::from_str(&format!(
+        r#"{{"agentProfile":{profile},"x.ai/localExtensionsDisabled":true}}"#
+    ))
+    .expect("Work session meta 应为合法 JSON")
 }
 
 /// 起一个隔离夹具：返回 (tmpdir, grok_home, cwd)。
@@ -124,7 +136,6 @@ fn isolated_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 ///
 /// 这是 #46 R2 那一类失败的直接证据：若 profile 不被引擎接受（空工具集）、
 /// 或 `GrokBuild:todo_write` 在注册表里解析不到，newSession 会失败。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_profile_builds_a_real_session_with_zero_mcp() {
     let (_tmp, cwd) = isolated_fixture();
     let cancel = CancellationToken::new();
@@ -224,4 +235,15 @@ async fn work_profile_builds_a_real_session_with_zero_mcp() {
 
 
     cancel.cancel();
+}
+
+/// `harness = false`：自写入口。断言失败即 panic → 非零退出 → cargo 判失败。
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(work_profile_builds_a_real_session_with_zero_mcp());
+    println!("WORK ENGINE PROBE PASS");
 }
