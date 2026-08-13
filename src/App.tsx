@@ -260,6 +260,12 @@ function App() {
   const [surface, setSurface] = useState<SurfaceKind>(() =>
     resolveActiveSurface(localStorage.getItem("wancode-surface")),
   );
+  // W2-fe-b:当前 Work 会话的工作区身份(后端 StartResult 回传)与已导入文档。
+  // workDocs 是本会话内累积(每次导入 append);跨会话持久列表待后续切片。
+  const [workWorkspaceId, setWorkWorkspaceId] = useState<string>("");
+  const [workDocs, setWorkDocs] = useState<
+    { import_id: string; display_name: string; kind: string; source_sha256: string }[]
+  >([]);
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
   const [model, setModel] = useState("glm-5.2");
@@ -542,6 +548,32 @@ function App() {
       refreshSessions(dir);
       // Auto-open the workspace (start the session) — one action, Claude-style.
       startSession(undefined, dir);
+    }
+  }
+
+  // W2-fe-b:把一份文档(pdf/docx)导入当前 Work 会话的工作区。原件只读复制、
+  // 记完整 sha256(后端 work_import)。成功后 append 到本会话文档列表。
+  async function importWorkDoc() {
+    if (!workWorkspaceId) {
+      setError(lang === "zh" ? "当前不是 Work 会话，无法导入" : "Not a Work session");
+      return;
+    }
+    const path = await openDialog({
+      directory: false,
+      title: lang === "zh" ? "选择要导入的文档" : "Pick a document to import",
+      filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
+    });
+    if (typeof path !== "string" || !path) return;
+    try {
+      const rec = await invoke<{
+        import_id: string;
+        display_name: string;
+        kind: string;
+        source_sha256: string;
+      }>("work_import", { workspaceId: workWorkspaceId, sourcePath: path });
+      setWorkDocs((prev) => [...prev, rec]);
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -1157,6 +1189,11 @@ function App() {
       // 不能把 Code 列表留在 Chat 界面上展示。
       refreshRosterForSurfaceRef.current({ onChatResolveFailure: "clear" });
     }
+    // W2-fe-b:切到 Work 且无活会话 → 起一个新 Work 会话(后端铸造 workspace_id
+    // 并把 cwd 设为该工作区暂存目录;不碰用户代码工作区)。
+    if (surface === "work" && !sessionIdRef.current) {
+      startSession();
+    }
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, surface]);
@@ -1461,6 +1498,7 @@ function App() {
         cwd: string;
         model_block?: unknown; model_options?: unknown; caps_config_issue?: unknown;
         surface_kind: SurfaceKind;
+        workspace_id?: string;
         policy_version: number;
       }>(
         "agent_start",
@@ -1492,6 +1530,13 @@ function App() {
       sessionIdRef.current = r.session_id;
       setSurface(decision.surface);
       localStorage.setItem("wancode-surface", decision.surface);
+      // W2-fe-b:Work 会话捕获其工作区身份;换会话重置本会话文档累积。
+      if (decision.surface === "work") {
+        setWorkWorkspaceId(r.workspace_id ?? "");
+        setWorkDocs([]);
+      } else {
+        setWorkWorkspaceId("");
+      }
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
       // 显示的是另一个仓库的改动，stash/丢弃会打错目标）。
       if (r.cwd && decision.surface === "code") {
@@ -2150,7 +2195,7 @@ function App() {
           <div className="brand-name">WanCode</div>
         </div>
         <div className="surface-switch" role="group" aria-label={lang === "zh" ? "会话层" : "Session surface"}>
-          {(["chat", "code"] as const).map((next) => (
+          {(["chat", "code", "work"] as const).map((next) => (
             <button
               key={next}
               className={surface === next ? "active" : ""}
@@ -2171,7 +2216,7 @@ function App() {
                 localStorage.setItem("wancode-surface", next);
               }}
             >
-              {next === "chat" ? "Chat" : "Code"}
+              {next === "chat" ? "Chat" : next === "code" ? "Code" : "Work"}
             </button>
           ))}
         </div>
@@ -2230,6 +2275,15 @@ function App() {
             <IconGitBranch />
           </button>
         )}
+        {surface === "work" && sessionId && (
+          <button
+            className="icon-btn"
+            title={lang === "zh" ? "导入文档 (pdf/docx)" : "Import document (pdf/docx)"}
+            onClick={importWorkDoc}
+          >
+            {lang === "zh" ? "导入" : "Import"}
+          </button>
+        )}
         <button
           className="icon-btn"
           title={t.toggleTheme}
@@ -2248,6 +2302,28 @@ function App() {
           <IconSettings />
         </button>
       </header>
+      {/* W2-fe-b:Work 视图(最小版)——导入的文档列表(只读,原件不可改)。
+          文档内容查看/引用回源归 W3(解析锚点 + 只读查看器)。 */}
+      {surface === "work" && sessionId && (
+        <div className="work-docs" role="region" aria-label={lang === "zh" ? "Work 文档" : "Work documents"}>
+          {workDocs.length === 0 ? (
+            <div className="work-docs-empty">
+              {lang === "zh"
+                ? "尚无文档。点“导入”添加 pdf/docx（原件只读复制到本会话工作区）。"
+                : "No documents yet. Click Import to add a pdf/docx (copied read-only into this session's workspace)."}
+            </div>
+          ) : (
+            <ul className="work-docs-list">
+              {workDocs.map((d) => (
+                <li key={d.import_id} title={`sha256 ${d.source_sha256}`}>
+                  <span className="work-doc-kind">{d.kind.toUpperCase()}</span>
+                  <span className="work-doc-name">{d.display_name}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {ctx && sessionId && (
         <div className="ctx-bar" title={`${ctx.used.toLocaleString()} / ${ctx.total.toLocaleString()} tokens`}>

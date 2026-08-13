@@ -26,11 +26,13 @@ use serde::Serialize;
 
 /// 新会话的层意图。**刻意不是 SurfaceKind**：恢复会话没有意图参数
 /// （一切从 sidecar binding 派生），未来调用者无法借参数把已有会话
-/// 重新归属。公开入口只接受 v0.19 已交付的 Chat/Code；Work/Cowork 拒绝。
+/// 重新归属。公开入口接受 Chat/Code（v0.19）与 Work（v0.20 W2-fe-b）；
+/// Cowork 仍拒绝（Cowork 线未落地）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewSurfaceIntent {
     Code,
     Chat,
+    Work,
 }
 
 impl NewSurfaceIntent {
@@ -38,6 +40,7 @@ impl NewSurfaceIntent {
         match self {
             NewSurfaceIntent::Code => crate::surface::SurfaceKind::Code,
             NewSurfaceIntent::Chat => crate::surface::SurfaceKind::Chat,
+            NewSurfaceIntent::Work => crate::surface::SurfaceKind::Work,
         }
     }
 }
@@ -47,6 +50,7 @@ impl NewSurfaceIntent {
         match value.unwrap_or("code") {
             "code" => Ok(Self::Code),
             "chat" => Ok(Self::Chat),
+            "work" => Ok(Self::Work),
             other => Err(SurfacePolicyError::UnsupportedSurface {
                 surface: other.to_string(),
             }),
@@ -170,6 +174,63 @@ pub(crate) fn chat_agent_profile() -> serde_json::Value {
 /// 注入。私有中性 cwd 才是边界，本 hint 只是降噪。
 pub(crate) fn chat_startup_hints() -> serde_json::Value {
     serde_json::json!({ "skipGitStatus": true })
+}
+
+/// Work 层 agentProfile（`_meta.agentProfile`）：文档工作台，**零代码执行、
+/// 默认无联网/MCP**（设计 §1 D8 一期 MVP）。比 Chat 更严——连 web 也不注入
+/// （默认 Work 会话工具 schema 缺席；联网 Work 会话是未来的显式 opt-in）。
+/// 文档读取/检索由 W3 的锚点级检索提供，不是裸文件工具。codex W2-fe-b R1：
+/// 之前 Work 会 fall through 到 Code 能力档（全工具 + 配置 MCP），违反边界。
+pub(crate) fn work_agent_profile() -> serde_json::Value {
+    use xai_grok_tools::implementations::grok_build::TodoWriteTool;
+    use xai_grok_tools::registry::types::ToolConfig;
+    // 引擎硬约束（codex W2-fe-b R2，xai-grok-agent/src/builder.rs:686）：
+    // `!inject_default_tools && tool_config.tools.is_empty()` → InvalidConfig，
+    // 即**空工具集 + 不注入默认工具**这一组合无法构建 agent。因此不能用
+    // 「零工具」表达零能力，必须给一个**零能力面**的工具：todo_write 只操作
+    // 会话内存状态（Resources serde），无文件系统、无网络、无进程执行。
+    // 联网/代码执行/MCP 依旧全部缺席——能力边界由「有哪些工具」决定，
+    // 而不是「有没有工具」。W3 的文档检索工具落地后在此加入。
+    let todo = ToolConfig::from(&TodoWriteTool);
+    serde_json::json!({
+        "name": "wancode-work",
+        "description": "WanCode Work 层：文档工作台，零代码执行、默认无联网/MCP",
+        // 显式最小 tool_config——主防线：仅零能力面的 todo_write。
+        "toolConfig": { "tools": [todo] },
+        "injectDefaultTools": false,
+        "agentsMd": false,
+        "discoverSkills": false,
+        "mcpServers": [],
+        "mcpInheritance": "none",
+        // hosted tools 全裁剪：默认 Work 无联网、无代码执行。
+        "tools": [],
+        "disallowedTools": [
+            "x_search",
+            "web_search",
+            "web_fetch",
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuild:read_file",
+            "GrokBuild:write_file",
+            "GrokBuild:search_replace",
+            "GrokBuild:list_dir",
+            "GrokBuild:grep",
+        ],
+    })
+}
+
+/// Work 的 AgentConfig 覆盖：关闭 managed MCP（与 Chat 同）。配置/继承 MCP
+/// 另在 agent_start 处对 Work 置空（mcp_servers）。
+pub(crate) fn apply_work_agent_config_overrides(
+    cfg: &mut xai_grok_shell::agent::config::Config,
+) {
+    cfg.managed_mcps_enabled = false;
+    cfg.managed_mcp_gateway_tools_enabled = false;
+}
+
+/// Work 的 startupHints：Work cwd 是暂存目录（非用户项目），跳过 git 状态
+/// 与项目布局注入。
+pub(crate) fn work_startup_hints() -> serde_json::Value {
+    serde_json::json!({ "skipGitStatus": true, "skipProjectLayout": true })
 }
 
 /// agent_type 冲突门：从 config.toml 文档判定模型是否可用于 Chat。
@@ -427,6 +488,62 @@ pub(crate) fn apply_chat_agent_config_overrides(
 mod tests {
     use super::*;
     use xai_grok_shell::agent::config::AgentDefinition;
+
+    // codex W2-fe-b R1:默认 Work 会话档必须**零联网/MCP/代码执行**——工具
+    // schema 缺席 + hosted/代码工具进 disallowedTools。正对照:Chat 允许 web,
+    // 二者档不同(证明 Work 不是照抄 Chat/Code)。
+    // codex W2-fe-b R1/R2:默认 Work 会话档必须①能被引擎真实解析并满足其
+    // **构建前置**(否则每个 Work 会话都构建失败——R2 的真 bug),②零联网/
+    // MCP/代码执行能力面。走 AgentDefinition::from_json 真实解析路径,不只
+    // 看裸 JSON(R2 就是因为只断言 JSON 才漏掉引擎约束)。
+    #[test]
+    fn work_profile_parses_and_satisfies_engine_build_precondition() {
+        let def = AgentDefinition::from_json(&work_agent_profile())
+            .expect("引擎必须能解析 Work profile——解析失败即形状漂移");
+        assert_eq!(def.name, "wancode-work");
+
+        // ── ① 引擎构建前置(xai-grok-agent/src/builder.rs:686):
+        // `!inject_default_tools && tool_config.tools.is_empty()` = InvalidConfig。
+        // 这条断言就是 R2 漏掉的那条。
+        assert!(!def.inject_default_tools, "inject_default_tools 必须 false");
+        assert!(
+            !def.tool_config.tools.is_empty(),
+            "引擎拒绝「不注入默认工具 + 空工具集」——Work 必须给零能力面的工具"
+        );
+
+        // ── ② 能力面:工具集恰为零能力的 todo_write(无 fs/网络/执行)。
+        let ids: Vec<&str> = def.tool_config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["GrokBuild:todo_write"],
+            "默认 Work 工具集必须恰为 todo_write(零能力面)"
+        );
+        // hosted 面全空:无 web_search/web_fetch/x_search。
+        assert!(def.tools.is_empty(), "默认 Work 不得有任何 hosted 工具(含 web)");
+        assert!(!def.agents_md, "agents_md 必须 false");
+        assert!(!def.discover_skills, "discover_skills 必须 false");
+        assert!(def.mcp_servers.is_empty(), "零自定义 MCP");
+        let back = serde_json::to_value(&def).expect("AgentDefinition 可序列化");
+        assert_eq!(
+            back.get("mcpInheritance").and_then(|v| v.as_str()),
+            Some("none"),
+            "MCP 继承必须 none"
+        );
+        // 冗余兜底 denylist:web + 代码执行 + 文件工具。
+        for must in ["web_search", "web_fetch", "x_search", "GrokBuild:run_terminal_cmd"] {
+            assert!(
+                def.disallowed_tools.contains(&must.to_string()),
+                "Work denylist 必须含 {must}"
+            );
+        }
+
+        // ── 正对照:Chat 档同样满足构建前置,但**能力面不同**(允许 web),
+        // 证明 Work 不是照抄 Chat/Code。
+        let chat = AgentDefinition::from_json(&chat_agent_profile()).expect("Chat profile 可解析");
+        assert!(!chat.inject_default_tools && !chat.tool_config.tools.is_empty());
+        assert_eq!(chat.tools, vec!["web_search".to_string(), "web_fetch".to_string()]);
+        assert_ne!(def.tools, chat.tools, "Work 与 Chat 的 hosted 能力面必须不同");
+    }
 
     /// 2c-10 漂移锁基线：锁定引擎 commit 63d4edab 下插件「来源/激活/
     /// 重载」决策文件（agent 3 + shell 4+1）的联合 sha256。引擎升级后
@@ -711,15 +828,25 @@ mod tests {
     }
 
     #[test]
-    fn v019_wire_only_accepts_chat_and_code() {
+    fn wire_accepts_chat_code_work_rejects_cowork() {
         assert_eq!(NewSurfaceIntent::from_wire(None), Ok(NewSurfaceIntent::Code));
         assert_eq!(
             NewSurfaceIntent::from_wire(Some("chat")),
             Ok(NewSurfaceIntent::Chat)
         );
-        assert!(matches!(
+        // v0.20 W2-fe-b:Work 现在是合法的新会话意图。
+        assert_eq!(
             NewSurfaceIntent::from_wire(Some("work")),
-            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "work"
+            Ok(NewSurfaceIntent::Work)
+        );
+        assert_eq!(
+            NewSurfaceIntent::from_wire(Some("work")).unwrap().surface_kind(),
+            crate::surface::SurfaceKind::Work
+        );
+        // Cowork 线未落地 → 仍拒绝。
+        assert!(matches!(
+            NewSurfaceIntent::from_wire(Some("cowork")),
+            Err(SurfacePolicyError::UnsupportedSurface { surface }) if surface == "cowork"
         ));
     }
 }
