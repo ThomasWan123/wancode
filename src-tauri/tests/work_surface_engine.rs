@@ -17,8 +17,10 @@
 //!   ① Work profile 在真实引擎里能构建会话（#46 R2 那一类失败的正面证据）；
 //!   ⑤ **负控制**：无效 curated tool id 必须让同一边界失败——不证明探针
 //!      能看见失败，绿灯就没有说服力；
-//!   ⑥ 能力面精确断言：Work 会话的 `x.ai/mcp/list` 为空，而同一配置下的
-//!      Code 会话能看见 canary MCP（正对照）。
+//!   ⑥ 能力面精确断言（含正对照）：**同一份 canary MCP 清单**同时交给 Code
+//!      与 Work 两个会话——Code 必须看得见它（证明观测手段有效、canary 真的
+//!      到得了引擎），Work 必须返回**真数组且为空**（证明是 Work 档在抑制，
+//!      而不是「空输入得空输出」）。
 //!
 //! 未覆盖（本文件范围外，见 PR 说明）：binding 读回、导入、恢复对立意图、
 //! 失败清理——那些走 wancode 自有层，不需要引擎，见 `src/work_seams.rs`。
@@ -33,7 +35,11 @@
 //! 一个进程只认第一次；独立进程才能保证隔离真正生效（否则同进程里别的测试
 //! 先触发解析，`set_var` 静默失效，引擎会落到开发者真实 `~/.grok`）。
 
+// `#[path]` 把生产源文件整份编进来，本探针只用其中的 work_agent_profile；
+// chat_agent_profile 在本 crate 里没有调用点，故按文件级 allow 处理（不改
+// 生产源文件的可见性/属性）。
 #[path = "../src/surface_profiles.rs"]
+#[allow(dead_code)]
 mod surface_profiles;
 
 use agent_client_protocol as acp;
@@ -132,6 +138,53 @@ fn isolated_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, cwd)
 }
 
+/// canary MCP：HTTP 形态指向不存在的本地端口——引擎只需**列出**它，
+/// 不需要连上（与模型配置同样的「死端口」手法，零外网、零子进程）。
+const CANARY_MCP_NAME: &str = "wancode-canary-mcp";
+
+fn canary_mcp_servers() -> Vec<acp::McpServer> {
+    vec![acp::McpServer::Http(acp::McpServerHttp::new(
+        CANARY_MCP_NAME,
+        "http://127.0.0.1:34192/mcp",
+    ))]
+}
+
+/// 读某会话的 MCP 服务器名单。**要求 `servers` 是真数组**——字段缺失或
+/// 形状漂移一律 panic，绝不静默当成「零个」（codex W2.5 R1-F2）。
+async fn mcp_server_names(acp_tx: &AcpAgentTx, session_id: &acp::SessionId) -> Vec<String> {
+    let sid = session_id.0.to_string();
+    let raw = serde_json::value::to_raw_value(&serde_json::json!({
+        "sessionId": sid, "session_id": sid,
+    }))
+    .expect("static json");
+    let ext: acp::ExtResponse = acp_send(
+        acp::ExtRequest::new("x.ai/mcp/list".to_string(), raw.into()),
+        acp_tx,
+    )
+    .await
+    .expect("x.ai/mcp/list 必须可用——能力面断言依赖它");
+    let v: serde_json::Value =
+        serde_json::from_str(ext.0.get()).expect("mcp/list 响应应为合法 JSON");
+    // 实测响应形状：{"result":{"servers":[...]}}。**必须**取到真数组——
+    // 旧版用 `.get("servers")` + `unwrap_or(0)`，因字段嵌套在 result 下而
+    // 永远取不到，于是把「读不到」静默当成「零个」，测试因错误的原因变绿
+    // （codex W2.5 R1-F2 指出的正是这个）。两种形状都接受，都取不到就 panic。
+    let arr = v
+        .get("result")
+        .and_then(|r| r.get("servers"))
+        .or_else(|| v.get("servers"))
+        .and_then(|s| s.as_array())
+        .unwrap_or_else(|| panic!("mcp/list 必须含 servers 数组（形状漂移会让零断言失效）：{v:?}"));
+    arr.iter()
+        .map(|s| {
+            s.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
 /// ① + ⑥：Work profile 在真实引擎里能构建会话，且该会话零 MCP。
 ///
 /// 这是 #46 R2 那一类失败的直接证据：若 profile 不被引擎接受（空工具集）、
@@ -143,8 +196,10 @@ async fn work_profile_builds_a_real_session_with_zero_mcp() {
 
     // 与生产一致：空 mcp_servers + Work agentProfile + 本地扩展隔离。
     let resp: acp::NewSessionResponse = acp_send(
+        // 关键：Work 也**交同一份 canary 清单**。若只传空列表，「零 MCP」
+        // 只证明空输入得空输出；传了 canary 仍为空，才证明是 Work 档在抑制。
         acp::NewSessionRequest::new(cwd.clone())
-            .mcp_servers(Vec::new())
+            .mcp_servers(canary_mcp_servers())
             .meta(Some(work_session_meta())),
         &acp_tx,
     )
@@ -163,27 +218,29 @@ async fn work_profile_builds_a_real_session_with_zero_mcp() {
         "引擎必须确认已应用本地扩展隔离；生产路径正是据此 fail-closed"
     );
 
-    // ⑥ 能力面：Work 会话的 MCP 列表必须为空。
-    // 与生产 ext_call 同形：RawValue 参数、双写 sessionId/session_id。
-    let sid = resp.session_id.0.to_string();
-    let raw = serde_json::value::to_raw_value(&serde_json::json!({
-        "sessionId": sid, "session_id": sid,
-    }))
-    .expect("static json");
-    let ext: acp::ExtResponse = acp_send(
-        acp::ExtRequest::new("x.ai/mcp/list".to_string(), raw.into()),
+    // ⑥ 能力面（含正对照）：见文件头。
+    let work_servers = mcp_server_names(&acp_tx, &resp.session_id).await;
+
+    // 正对照：同一引擎里再开一个 **Code 形态**会话（无受限 profile），
+    // 交给它**同一份 canary 清单**——它必须看得见 canary。若这条为空，
+    // 说明观测手段或 canary 本身无效，Work 的「空」就毫无意义。
+    let code_resp: acp::NewSessionResponse = acp_send(
+        acp::NewSessionRequest::new(cwd.clone()).mcp_servers(canary_mcp_servers()),
         &acp_tx,
     )
     .await
-    .expect("x.ai/mcp/list 必须可用——Work 的零 MCP 断言依赖它");
-    let mcp: serde_json::Value =
-        serde_json::from_str(ext.0.get()).expect("mcp/list 响应应为合法 JSON");
-    let servers = mcp
-        .get("servers")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(servers, 0, "默认 Work 会话必须零 MCP，实得 {mcp:?}");
+    .expect("Code 形态会话应能创建");
+    let code_servers = mcp_server_names(&acp_tx, &code_resp.session_id).await;
+    assert!(
+        code_servers.iter().any(|n| n == CANARY_MCP_NAME),
+        "正对照失效：Code 会话必须看得见 canary MCP（实得 {code_servers:?}）——         没有这条，Work 的零 MCP 断言不成立"
+    );
+
+    // Work：必须是**真数组且为空**（不接受字段缺失/形状漂移当作零）。
+    assert!(
+        work_servers.is_empty(),
+        "默认 Work 会话必须零 MCP，实得 {work_servers:?}"
+    );
 
     // ── ⑤ 负控制（同一引擎、同一边界）─────────────────────────────
     // 证明本探针**看得见** #46 R2 那一类失败：把工具 id 换成注册表里不存在
