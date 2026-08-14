@@ -24,6 +24,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::work_staging::ImportId;
+
 /// 锚点 wire 格式版本。形状变更必须 bump 并显式处理旧版本。
 pub const CURRENT_ANCHOR_SCHEMA: u32 = 1;
 
@@ -81,7 +83,9 @@ impl Locator {
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
     pub anchor_schema: u32,
-    pub import_id: String,
+    /// 导入身份。用 W2 的严格新类型（自定义 Deserialize 校验固定语法），
+    /// 篡改/伪造的 id 在反序列化即被拒（codex W3-a R1-F2：此前是裸 String）。
+    pub import_id: ImportId,
     /// 完整 sha256（64 位小写 hex，不截断）。
     pub source_sha256: String,
     pub kind: DocKind,
@@ -102,7 +106,7 @@ pub const RANGE_SPACE_RAW: &str = "raw";
 impl Anchor {
     /// 以当前契约构造锚点。excerpt 按归一形态存储并截断到上限。
     pub fn new(
-        import_id: impl Into<String>,
+        import_id: ImportId,
         source_sha256: impl Into<String>,
         kind: DocKind,
         locator: Locator,
@@ -110,7 +114,7 @@ impl Anchor {
     ) -> Self {
         Self {
             anchor_schema: CURRENT_ANCHOR_SCHEMA,
-            import_id: import_id.into(),
+            import_id,
             source_sha256: source_sha256.into(),
             kind,
             offset_unit: OFFSET_UNIT_UTF16.into(),
@@ -141,6 +145,8 @@ pub enum AnchorError {
     RangeSplitsSurrogatePair { offset: usize },
     /// 归一后摘录与该区间的实际文本不符——映射已失效，不近似指向。
     ExcerptMismatch { expected: String, actual: String },
+    /// `source_sha256` 不是 64 位小写 hex——形状都不对，不进入比较。
+    MalformedSourceHash { found: String },
 }
 
 impl std::fmt::Display for AnchorError {
@@ -163,6 +169,9 @@ impl std::fmt::Display for AnchorError {
                 write!(f, "来源已失效：偏移 {offset} 劈开了代理对")
             }
             AnchorError::ExcerptMismatch { .. } => write!(f, "来源已失效：摘录与原文不符"),
+            AnchorError::MalformedSourceHash { found } => {
+                write!(f, "锚点 source_sha256 形状非法：{found}")
+            }
         }
     }
 }
@@ -215,6 +224,11 @@ fn truncate_utf16(s: &str, max_units: usize) -> String {
         units += w;
     }
     out
+}
+
+/// 64 位小写 hex 判定（sha256 的形状）。
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// 文本的 UTF-16 长度（code unit 数）。
@@ -297,6 +311,11 @@ pub fn resolve_anchor(
     if !anchor.locator.matches_kind(anchor.kind) {
         return Err(AnchorError::LocatorKindMismatch);
     }
+    if !is_sha256_hex(&anchor.source_sha256) {
+        return Err(AnchorError::MalformedSourceHash {
+            found: anchor.source_sha256.clone(),
+        });
+    }
     if anchor.source_sha256 != doc_sha256 {
         return Err(AnchorError::SourceHashMismatch {
             expected: anchor.source_sha256.clone(),
@@ -306,13 +325,16 @@ pub fn resolve_anchor(
     let [start, end] = anchor.locator.raw_range();
     let raw = utf16_slice(raw_text, start, end)?;
     // 摘录相等性在**归一形态**下判定；定位已经在 raw 空间完成。
-    let got = normalize_for_equality(&raw);
+    // **必须逐字相等**（codex W3-a R1-F1）：曾用 `starts_with` 允许「摘录是
+    // 切片的前缀」，那是 §1.2 明禁的近似匹配——excerpt="hel" 会验证覆盖
+    // "hello" 的区间。构造期对 excerpt 做过 MAX_EXCERPT_UTF16 截断，故这里
+    // 对切片施加**同样的截断**后再逐字比较，而不是放宽成前缀。
+    let got = truncate_utf16(&normalize_for_equality(&raw), MAX_EXCERPT_UTF16);
     let want = anchor.excerpt.as_str();
-    // 锚点 excerpt 可能被截断到上限，故用前缀比较（截断后仍须逐字一致）。
-    if !got.starts_with(want) && got != want {
+    if got != want {
         return Err(AnchorError::ExcerptMismatch {
             expected: want.to_string(),
-            actual: truncate_utf16(&got, MAX_EXCERPT_UTF16),
+            actual: got,
         });
     }
     Ok(raw)
@@ -328,7 +350,7 @@ mod tests {
 
     fn pdf_anchor(range: [usize; 2], raw_excerpt: &str) -> Anchor {
         Anchor::new(
-            "imp-1",
+            ImportId::mint(),
             sha(0xab),
             DocKind::Pdf,
             Locator::Pdf {
@@ -497,7 +519,7 @@ mod tests {
         // 但**定位仍靠块内 raw_range**。
         let block_raw = "这句话被拆成三段。";
         let a = Anchor::new(
-            "imp-2",
+            ImportId::mint(),
             sha(0xab),
             DocKind::Docx,
             Locator::Docx {
@@ -519,15 +541,26 @@ mod tests {
     }
 
     #[test]
-    fn reimport_mints_a_new_identity_so_old_anchors_do_not_follow() {
-        // 重导入同一文件 → 新 import_id；旧锚仍指旧导入（不被静默改指）。
-        let old = pdf_anchor([0, 5], "hello");
-        let mut new = pdf_anchor([0, 5], "hello");
-        new.import_id = "imp-2".into();
-        assert_ne!(old.import_id, new.import_id);
-        // 旧锚对新副本（哈希相同但身份不同）仍可解析文本——身份区分由
-        // import_id 承担，调用方据它选清单记录；哈希只保证内容未变。
-        assert!(resolve_anchor(&old, &sha(0xab), "hello").is_ok());
+    fn anchor_carries_a_strict_import_id_and_rejects_a_forged_one() {
+        // codex W3-a R1-F2：此前 import_id 是裸 String，测试只比了两个字面量,
+        // 什么也没证明。现在用 W2 的严格新类型——伪造/篡改的 id 在**反序列化**
+        // 即被拒。至于「重导入铸新身份、旧锚不跟随」，那需要清单参与，归拥有
+        // 清单的那个切片证明，本切片不宣称。
+        let a = pdf_anchor([0, 5], "hello");
+        let json = serde_json::to_value(&a).unwrap();
+        assert!(
+            json["import_id"].as_str().unwrap().starts_with("imp-"),
+            "wire 上是铸造格式的 import_id"
+        );
+        // 伪造一个不合语法的 id → 整个锚点反序列化失败（fail-closed）。
+        let mut forged = json.clone();
+        forged["import_id"] = serde_json::Value::String("imp-../../escape".into());
+        assert!(
+            serde_json::from_value::<Anchor>(forged).is_err(),
+            "非法 import_id 必须让锚点反序列化失败"
+        );
+        // 两次铸造互不相同（身份确实是新铸的，不是常量）。
+        assert_ne!(ImportId::mint(), ImportId::mint());
     }
 
     #[test]
@@ -544,5 +577,36 @@ mod tests {
         let raw = "abc";
         let a = pdf_anchor([3, 3], "");
         assert_eq!(resolve_anchor(&a, &sha(0xab), raw).unwrap(), "");
+    }
+
+    // codex W3-a R1-F1：**前缀不算相符**。这一类正是旧 starts_with 放过的。
+    #[test]
+    fn a_proper_prefix_of_the_range_text_is_a_mismatch() {
+        let mut a = pdf_anchor([0, 5], "hello");
+        a.excerpt = "hel".into(); // 真前缀
+        assert!(matches!(
+            resolve_anchor(&a, &sha(0xab), "hello"),
+            Err(AnchorError::ExcerptMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_excerpt_cannot_resolve_a_non_empty_range() {
+        let mut a = pdf_anchor([0, 5], "hello");
+        a.excerpt = String::new();
+        assert!(matches!(
+            resolve_anchor(&a, &sha(0xab), "hello"),
+            Err(AnchorError::ExcerptMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_source_hash_is_rejected_before_comparison() {
+        let mut a = pdf_anchor([0, 5], "hello");
+        a.source_sha256 = "NOTAHASH".into();
+        assert!(matches!(
+            resolve_anchor(&a, "NOTAHASH", "hello"),
+            Err(AnchorError::MalformedSourceHash { .. })
+        ));
     }
 }
