@@ -80,3 +80,9 @@ futures-util = "0.3"
 [[test]]
 name = "job_breakaway"
 harness = false
+
+# W2.5 Work 引擎探针：harness = false。理由见测试文件头——GROK_HOME 的
+# OnceLock 需独立进程才能真正隔离，且 panic=abort 与 libtest harness 冲突。
+[[test]]
+name = "work_surface_engine"
+harness = false
