@@ -29,8 +29,34 @@ cargo run --release --bin w3_diag2 -- <sample.pdf>            # 字体类型 + T
 | 英语词汇：中文字数 | 0 | **838** | **0** |
 | 英语词汇：乱码率 | — | **0.0** | 0.541 |
 | 英语词汇：文本量(UTF-16) | 0 | 3712 | 4808（无效） |
-| 志愿表：是否抽出 | **是**（抽取率 1.0） | **panic** `unsupported encoding UniGB-UCS2-H` | 名义 1.0，中文字 0，乱码率 0.984 |
-| 逐页/几何 API（锚点需要） | 有页，文本弱 | **有**：`OutputDev::begin_page(page_num, media_box, art_box)` + 带位置的文本输出 | 有逐页 |
+| 志愿表：是否抽出 | **是**（抽取率 1.0） | **panic**（见下方 payload） | 名义 1.0，中文字 0，乱码率 0.984 |
+| 逐页/几何 API（锚点需要） | 有页，文本弱 | 见「未 RUN 的读源码结论」 | 有逐页 |
+
+### panic payload（可复现，codex #50 R1-P1）
+
+`w3_opt2` 在志愿表上的 JSON 原样输出：
+
+```json
+"pdf_extract": { "ok": false, "panicked": true, "error": "unsupported encoding UniGB-UCS2-H", "ms": 28 }
+```
+
+即 `pdf-extract` 对该 CMap 是**无条件 panic**（`pdf-extract-0.9.0/src/lib.rs:983`
+`panic!("unsupported encoding {}", name)`），不是错误返回。首版把 payload
+收成一句 `"panic in pdf-extract"`，导致这条负载事实**用提交的命令复现不出来**；
+现版 downcast `&str`/`String` 后写进 JSON。
+
+### 「抽到了」的判据（codex #50 R1-P2）
+
+`either_extracted_usable` = **非空 且 乱码率 < 0.1**。旧口径只看非空，会把
+`pdf` crate 的未解码字节（乱码率 0.541 / 0.984）算成「抽到了」。按新判据：
+
+| 样本 | either_extracted_usable |
+|---|---|
+| 英语词汇(CID+ToUnicode) | **true**（仅 `pdf-extract` 贡献） |
+| 志愿表(UniGB-UCS2-H) | **false**（`pdf-extract` panic，`pdf` crate 全乱码） |
+
+`junk_ratio` 只计 U+FFFD / NUL / 控制符，**不计** ASCII 问号（问号在正常文本里
+合法，计入会误伤）——注释已与实现对齐。
 
 ## 结论
 
@@ -41,7 +67,12 @@ cargo run --release --bin w3_diag2 -- <sample.pdf>            # 字体类型 + T
 
 1. **没有任何单一纯 Rust crate 覆盖两个样本**。`pdf-extract` 在 CID+ToUnicode 件上成功、在传统 CMap 件上 **panic**；`lopdf` 恰好相反；`pdf` crate 两个都拿不到中文字符。
 2. **`pdf-extract` 的失败是 panic 不是错误返回**（`pdf-extract-0.9.0/src/lib.rs:983` 无条件 `panic!("unsupported encoding {}", name)`）。`UniGB-UCS2-H` 是简体中文 PDF 的标准 Adobe CMap，出现频率不低。生产使用需要 panic 遏制或上游/补丁支持预定义 CMap。
-3. **锚点定位子可行性：正面**。`pdf-extract` 的 `OutputDev` 提供 `begin_page(page_num, media_box, art_box)` 与带位置的文本输出，故锚点契约要求的 `page` 与几何（bbox）可得；`chunk` 与 `raw_range` 由我们在逐页文本流上自建。整篇 `extract_text` 不足以支撑锚点，但该 crate 的 API 形状**能**支撑。
+3. **锚点定位子可行性：读源码结论，NOT-RUN**。`pdf-extract` 声明了
+   `pub trait OutputDev { fn begin_page(&mut self, page_num: u32, media_box: &MediaBox,
+   art_box: Option<(f64,f64,f64,f64)>) -> Result<(), OutputError>; ... }`
+   （`lib.rs:1876-1878`），形状上能给出 `page` 与几何。**但本轮没有实际用
+   `OutputDev` 跑出逐页 + bbox 数据**，故此条是**读源码**而非 RUN，不得当作
+   已验证能力。整篇 `extract_text` 确定不足以支撑锚点（本轮 RUN 证实只有整篇粒度）。
 
 ## NOT-RUN / 未决
 

@@ -24,7 +24,10 @@ fn cjk_count(s: &str) -> usize {
     s.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count()
 }
 
-/// 替代符/控制符比例——抽出来但全是 U+FFFD 或问号，等于没抽出来。
+/// 替代符/控制符比例——抽出来但全是 U+FFFD/控制符，等于没抽出来。
+///
+/// 注（codex #50 R1-P2）：**不计** ASCII 问号。问号在正常文本里合法，
+/// 把它算成乱码会误伤；此处只计 U+FFFD、NUL 与控制符。
 fn junk_ratio(s: &str) -> f64 {
     let total = s.chars().filter(|c| !c.is_whitespace()).count();
     if total == 0 {
@@ -37,13 +40,30 @@ fn junk_ratio(s: &str) -> f64 {
     junk as f64 / total as f64
 }
 
+/// 把 catch_unwind 的 payload 还原成可读字符串。
+///
+/// **不能丢 payload**（codex #50 R1-P1）：`pdf-extract` 在标准 CMap 上是
+/// **无条件 panic**，那句 `unsupported encoding UniGB-UCS2-H` 就是本轮
+/// 最关键的负载事实；收成一句 "panic" 会让证据无法用提交的命令复现。
+fn panic_payload(e: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = e.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic (payload 非字符串，无法还原)".to_string()
+    }
+}
+
 /// 候选一：pdf-extract（自带 Type0/CID + ToUnicode 解码）。整篇粒度。
-fn try_pdf_extract(path: &std::path::Path) -> Result<String, String> {
-    // 该 crate 会 panic 于部分畸形文件，spike 里捕获以免整轮中断。
+fn try_pdf_extract(path: &std::path::Path) -> Result<String, (String, bool)> {
+    // 该 crate 会 panic 于部分文件，spike 里捕获以免整轮中断；payload 保留。
     let p = path.to_path_buf();
-    std::panic::catch_unwind(move || pdf_extract::extract_text(&p))
-        .map_err(|_| "panic in pdf-extract".to_string())?
-        .map_err(|e| format!("{e}"))
+    match std::panic::catch_unwind(move || pdf_extract::extract_text(&p)) {
+        Ok(Ok(t)) => Ok(t),
+        Ok(Err(e)) => Err((format!("{e}"), false)),
+        Err(pl) => Err((panic_payload(pl), true)),
+    }
 }
 
 /// 候选二：pdf crate。逐页取文本。
@@ -67,7 +87,7 @@ fn try_pdf_crate(path: &std::path::Path) -> Result<Vec<String>, String> {
         }
         Ok(pages)
     })
-    .map_err(|_| "panic in pdf crate".to_string())?;
+    .map_err(panic_payload)?;
     out
 }
 
@@ -126,7 +146,9 @@ fn main() {
             "junk_ratio": (junk_ratio(text) * 1000.0).round() / 1000.0,
             "ms": a_ms,
         }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e, "ms": a_ms }),
+        Err((msg, panicked)) => serde_json::json!({
+            "ok": false, "panicked": panicked, "error": msg, "ms": a_ms
+        }),
     };
 
     // —— 候选二 ——
@@ -153,10 +175,15 @@ fn main() {
         Err(e) => serde_json::json!({ "ok": false, "error": e, "ms": b_ms }),
     };
 
-    let a_alive = a.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+    // codex #50 R1-P2：「抽到了」必须是**可用字符**，不能把未解码字节算进去。
+    // 判据：非空 且 乱码率 < 0.1。（`pdf` crate 在两份样本上乱码率 0.54/0.98，
+    // 按旧口径会被算成「抽到了」，那是错的。）
+    const JUNK_MAX: f64 = 0.1;
+    let usable = |t: &str| !t.trim().is_empty() && junk_ratio(t) < JUNK_MAX;
+    let a_alive = a.as_ref().map(|t| usable(t)).unwrap_or(false);
     let b_alive = b
         .as_ref()
-        .map(|p| p.iter().any(|t| !t.trim().is_empty()))
+        .map(|p| usable(&p.concat()))
         .unwrap_or(false);
 
     println!(
@@ -166,7 +193,8 @@ fn main() {
             "sample": label,
             "pdf_extract": a_json,
             "pdf_crate": b_json,
-            "either_extracted": a_alive || b_alive,
+            "either_extracted_usable": a_alive || b_alive,
+            "usable_criterion": "非空 且 乱码率 < 0.1（未解码字节不算抽到）",
             "note": "指标不含正文内容；样本仅本地读取。杀死条件见文件头。"
         }))
         .unwrap()
