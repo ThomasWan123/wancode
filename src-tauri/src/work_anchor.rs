@@ -23,11 +23,16 @@
 //! 其解析栈选型待功能面 spike 用真实样本定，见 W1 证据的 NOT-RUN）。
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::work_staging::ImportId;
 
-/// 锚点 wire 格式版本。形状变更必须 bump 并显式处理旧版本。
-pub const CURRENT_ANCHOR_SCHEMA: u32 = 1;
+/// 锚点 wire 格式版本。形状**或语义**变更都必须 bump。
+///
+/// v1 → v2：`normalize_for_equality` 补上 NFC。形状没变，但**摘录相等性的
+/// 判定语义变了**——v1 铸造的 excerpt 是非 NFC 形态，拿 v2 语义去比会误判。
+/// 语义变更同样要 bump，否则旧锚点会被静默按新规则解读。
+pub const CURRENT_ANCHOR_SCHEMA: u32 = 2;
 
 /// excerpt 长度上限（UTF-16 code unit，与偏移单位一致）。
 pub const MAX_EXCERPT_UTF16: usize = 500;
@@ -177,27 +182,20 @@ impl std::fmt::Display for AnchorError {
 }
 impl std::error::Error for AnchorError {}
 
-/// 相等性判定用的归一化：连续空白折叠为单空格 + 首尾去空白。
+/// 相等性判定用的归一化：**NFC + 连续空白折叠为单空格 + 首尾去空白**。
 ///
 /// **只用于比较，不用于定位**（定位在 raw 空间，见模块头）。CRLF 属于
-/// 「连续空白」，折叠后与 LF 等价——这正是跨运行时用例要覆盖的。
+/// 「连续空白」，折叠后与 LF 等价；组合字符经 NFC 后与预组合形式等价
+/// （`e`+U+0301 ≡ U+00E9）——两者都是跨运行时用例要覆盖的。
 ///
-/// # 已知缺口：NFC 尚未实现
-///
-/// 设计 §1.2 要求相等性判定为 **NFC + 空白折叠**；此处**只做空白折叠**。
-/// NFC 需要 `unicode-normalization` crate，而 wancode 是 grok-build
-/// workspace 成员、共用其 `Cargo.lock`；实测该 lock 与一次全新解析相差
-/// 2283 增 / 152 删——**与本改动无关的既有漂移**（不加任何依赖、仅跑
-/// `cargo metadata --offline` 即可复现）。为一个 crate 把这堆无关 churn
-/// 拖进 PR 不可评审，故 NFC 待 lock 漂移单独裁决后再补。
-///
-/// **后果（必须知情）**：组合字符等价（`e`+U+0301 vs U+00E9）当前**不**成立。
-/// 补上 NFC 会改变相等性语义，届时必须 bump [`CURRENT_ANCHOR_SCHEMA`]，
-/// 因为此前铸造的 excerpt 是非 NFC 形态。
+/// NFC 曾因依赖未落地而缺席（W3-a），现随那一次 vendored-lock 审计补上。
+/// 这**改变了相等性语义**，故同批把 [`CURRENT_ANCHOR_SCHEMA`] 从 1 提到 2：
+/// schema 1 时代铸造的 excerpt 是非 NFC 形态，用新语义去比会误判。
 pub fn normalize_for_equality(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let nfc: String = s.nfc().collect();
+    let mut out = String::with_capacity(nfc.len());
     let mut in_ws = false;
-    for ch in s.chars() {
+    for ch in nfc.chars() {
         if ch.is_whitespace() {
             if !in_ws {
                 out.push(' ');
@@ -367,7 +365,7 @@ mod tests {
     fn wire_shape_round_trips_and_pins_the_coordinate_system() {
         let a = pdf_anchor([0, 5], "hello");
         let json = serde_json::to_value(&a).unwrap();
-        assert_eq!(json["anchor_schema"], 1);
+        assert_eq!(json["anchor_schema"], CURRENT_ANCHOR_SCHEMA, "wire 上的 schema 必须跟随常量（NFC 落地时已由 1 提到 2）");
         assert_eq!(json["offset_unit"], "utf16");
         assert_eq!(json["range_kind"], "half_open_zero_based");
         assert_eq!(json["range_space"], "raw");
@@ -450,17 +448,17 @@ mod tests {
     }
 
     #[test]
-    fn combining_characters_locate_verbatim_nfc_equivalence_is_a_declared_gap() {
+    fn combining_characters_are_nfc_equal_yet_locate_verbatim() {
         // "é" 的两种写法：预组合 U+00E9 vs e + U+0301（组合尖音符）。
         let decomposed = "cafe\u{0301}";
         let precomposed = "caf\u{e9}";
-        // **当前**两者不等——NFC 未实现（见 normalize_for_equality 的缺口说明）。
-        // 本断言锁住「已知缺口」而不是假装它不存在：NFC 落地时它会失败，
-        // 那正是提醒去 bump anchor_schema 的信号。
-        assert_ne!(
+        // NFC 已落地：分解形与预组合形现在相等。此前这条断言的是 assert_ne
+        // 并注明「NFC 落地时它会失败，那正是提醒去 bump schema 的信号」——
+        // 它确实失败了，schema 也已从 1 提到 2。
+        assert_eq!(
             normalize_for_equality(decomposed),
             normalize_for_equality(precomposed),
-            "NFC 未实现时两者不应相等；若变为相等说明 NFC 已落地，需 bump schema"
+            "NFC 后分解形与预组合形必须相等"
         );
         // 锚点在**分解形态**的原文上：raw 长度是 5 个 UTF-16 单元。
         let a = pdf_anchor([0, utf16_len(decomposed)], decomposed);
