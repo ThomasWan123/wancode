@@ -50,20 +50,38 @@ impl WorkBlock {
         utf16_len(&self.raw)
     }
 
-    /// 块自身是否自洽：run 区间递增、不重叠、不越界。
+    /// 块自身是否自洽：runs 必须**铺满** `[0, len)`，无缺口、无重叠、无乱序。
     ///
     /// 解析器有 bug 时这里要能拦住——否则错误的 run 边界会被铸进锚点，
     /// 之后再排查就要跨解析器/锚点两层。
+    ///
+    /// 「铺满」是 codex #51 R1-P1 收紧的：此前只拒重叠/乱序/越界，于是
+    /// `runs: []`（有正文却一个 run 都没有）和有缺口的 runs（`[0,2)` 后接
+    /// `[4,5)`）会被判为合法，一路漏到 `mint` 才报 `RangeCoversNoRun`——
+    /// **那是错层**：它们是解析器 bug，不是「调用方选了个空区间」。落在
+    /// 缺口里的区间还会算出空的 `run_ordinals`，等于铸出一个指不到 run 的锚点。
+    ///
+    /// 具体规则：
+    ///   - `raw` 为空 ⇒ runs 必须为空（对空文本谈 run 无意义）；
+    ///   - `raw` 非空 ⇒ 至少一条 run；每条非空（`s < e`）；首条从 0 起；
+    ///     相邻条首尾相接（`s == prev_end`）；末条终于 `len`。
     pub fn is_well_formed(&self) -> bool {
         let len = self.len_utf16();
+        if len == 0 {
+            return self.runs.is_empty();
+        }
+        if self.runs.is_empty() {
+            return false;
+        }
         let mut prev_end = 0usize;
         for &[s, e] in &self.runs {
-            if s > e || e > len || s < prev_end {
+            // 首条须从 0 起，其余须与上一条首尾相接：两者都是 s == prev_end。
+            if s != prev_end || e <= s || e > len {
                 return false;
             }
             prev_end = e;
         }
-        true
+        prev_end == len
     }
 }
 
@@ -74,7 +92,8 @@ impl WorkBlock {
 pub enum MintError {
     /// 找不到该 `block_path`。
     BlockNotFound { path: String },
-    /// 块自身不自洽（run 区间乱序/重叠/越界）——解析器 bug。
+    /// 块自身不自洽——解析器 bug。判据见 [`WorkBlock::is_well_formed`]：
+    /// runs 必须铺满 `[0, len)`，无缺口/重叠/乱序/零长，非空正文至少一条 run。
     MalformedBlock { path: String },
     /// 请求的区间在块内非法（越界、start > end、劈开代理对）。
     BadRange { range: [usize; 2], block_len: usize },
@@ -298,19 +317,63 @@ mod tests {
         ));
     }
 
+    /// 解析器 bug 的各种形态，**全部**必须在铸造前变成 `MalformedBlock`——
+    /// 不能漏到 `mint` 才报 `RangeCoversNoRun`（codex #51 R1-P1：那是错层，
+    /// 且落在缺口里的区间会铸出 `run_ordinals` 为空、指不到 run 的锚点）。
     #[test]
-    fn malformed_block_from_a_buggy_parser_is_rejected() {
-        // run 区间重叠/乱序 = 解析器 bug，必须在铸造前拦住。
-        let bad = vec![WorkBlock {
+    fn malformed_blocks_from_a_buggy_parser_are_all_rejected_before_minting() {
+        let cases: Vec<(&str, Vec<[usize; 2]>)> = vec![
+            ("重叠", vec![[0, 4], [2, 6]]),
+            ("乱序", vec![[3, 6], [0, 3]]),
+            ("越界", vec![[0, 99]]),
+            ("有正文却零 run", vec![]),
+            ("有缺口", vec![[0, 2], [4, 6]]),
+            ("不从 0 起", vec![[1, 6]]),
+            ("末尾不铺满", vec![[0, 3]]),
+            ("零长 run", vec![[0, 3], [3, 3], [3, 6]]),
+        ];
+        for (name, runs) in cases {
+            let bad = vec![WorkBlock {
+                path: "body/p[0]".into(),
+                raw: "abcdef".into(), // len_utf16 = 6
+                runs,
+            }];
+            assert!(!bad[0].is_well_formed(), "{name}：应判为不自洽");
+            // 关键：区间**落在有效文本上**也必须先被块级校验拦住，
+            // 这样才能区分「解析器 bug」与「调用方给了空区间」。
+            assert!(
+                matches!(
+                    mint_docx_anchor(&bad, "body/p[0]", [0, 2], ImportId::mint(), &sha()),
+                    Err(MintError::MalformedBlock { .. })
+                ),
+                "{name}：必须是 MalformedBlock，不得漏到 RangeCoversNoRun"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_block_tiles_the_whole_text() {
+        // 正对照：首尾相接铺满全长 = 自洽。
+        let ok = WorkBlock {
             path: "body/p[0]".into(),
             raw: "abcdef".into(),
-            runs: vec![[0, 4], [2, 6]], // 重叠
-        }];
-        assert!(!bad[0].is_well_formed());
-        assert!(matches!(
-            mint_docx_anchor(&bad, "body/p[0]", [0, 3], ImportId::mint(), &sha()),
-            Err(MintError::MalformedBlock { .. })
-        ));
+            runs: vec![[0, 3], [3, 6]],
+        };
+        assert!(ok.is_well_formed());
+        // 空正文 + 空 runs 也自洽（对空文本谈 run 无意义）。
+        let empty = WorkBlock {
+            path: "body/p[1]".into(),
+            raw: String::new(),
+            runs: vec![],
+        };
+        assert!(empty.is_well_formed());
+        // 空正文却有 run = 不自洽。
+        let bogus = WorkBlock {
+            path: "body/p[2]".into(),
+            raw: String::new(),
+            runs: vec![[0, 0]],
+        };
+        assert!(!bogus.is_well_formed());
     }
 
     #[test]
