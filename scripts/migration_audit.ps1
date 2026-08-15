@@ -1,7 +1,7 @@
 ﻿# 迁移前后有效树等价审计——可由仓库/CI 重演的 materializer（#126 B1 复核定案 P0-1）
 #
 # 用法：powershell -File scripts/migration_audit.ps1 -BeforeSha <迁移前 wancode commit>
-#                  [-Mode equivalent|intentional-delta|version-only]
+#                  [-Mode equivalent|intentional-delta|version-only|dependency-delta]
 #                  [-Whitelist docs/design/v0.19-engine-file-whitelist.txt]
 #                  [-OutFile migration-audit-summary.json]
 #
@@ -19,7 +19,7 @@
 # 新 = grok-build-wiring.patch + grok-build-emergency.patch（B1 起）。
 param(
   [Parameter(Mandatory)][string]$BeforeSha,
-  [ValidateSet("equivalent", "intentional-delta", "version-only")][string]$Mode = "equivalent",
+  [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta")][string]$Mode = "equivalent",
   [string]$Whitelist,
   [string]$OutFile = "migration-audit-summary.json"
 )
@@ -210,6 +210,83 @@ $afterWiringSha = Get-FileSha $afterWiring
 $afterCargoSha = Get-FileSha $afterCargo
 $beforeWiringSha = if (Test-Path $beforeWiring) { Get-FileSha $beforeWiring } else { "missing" }
 $beforeCargoSha = Get-FileSha $beforeCargo
+
+# ── dependency-delta：只允许 Cargo.lock 因**新增依赖**而变化 ────────
+#
+# 为什么需要第四种模式：加依赖这件事三种既有模式都表达不了——
+#   equivalent       要求有效树逐字节相等（加依赖必然改 Cargo.lock）；
+#   version-only     V3 只许 wancode 版本行不同（加依赖会新增 [[package]]）；
+#   intentional-delta A1 要求引擎 commit **变**、A4 要求 lock **不变**，
+#                    而加依赖恰恰相反（commit 不动、lock 动）。
+# 硬套任何一种都只能靠放宽断言蒙混，那等于把门拆了。本模式逐项断言
+# 「commit 没动、树里只有 lock 变了、lock 只多不改不减、多出来的恰好是
+# 申报的那些、且没有引入原生链」。
+if ($Mode -eq "dependency-delta") {
+  # 解析 lock 的 name+version 集合（[[package]] 块）。
+  function Read-LockPackages([string]$path) {
+    $raw = [System.IO.File]::ReadAllText($path)
+    $set = @{}
+    $rx = "(?m)^\[\[package\]\]\s*$\s*^name = ""([^""]+)""\s*$\s*^version = ""([^""]+)""\s*$"
+    foreach ($m in [regex]::Matches($raw, $rx)) {
+      $set["$($m.Groups[1].Value) $($m.Groups[2].Value)"] = $true
+    }
+    if ($set.Count -eq 0) { throw "Cargo.lock 未解析出任何 package：$path" }
+    return $set
+  }
+  $beforePkgs = Read-LockPackages $beforeCargo
+  $afterPkgs  = Read-LockPackages $afterCargo
+  $added   = @($afterPkgs.Keys  | Where-Object { -not $beforePkgs.ContainsKey($_) } | Sort-Object)
+  $removed = @($beforePkgs.Keys | Where-Object { -not $afterPkgs.ContainsKey($_) }  | Sort-Object)
+
+  # 申报清单：清单里 declared_added_packages=「name version」逗号分隔。
+  # 申报是为了让「多出来什么」成为评审对象，而不是藏在 118 行 diff 里。
+  $declaredRaw = $afterBuildManifest.declared_added_packages
+  $declared = @()
+  if ($declaredRaw) { $declared = @($declaredRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object) }
+
+  $onlyCargoLock = $changed.Count -eq 1 -and $changed[0].path -eq "Cargo.lock" -and $changed[0].change -eq "modified"
+  $sysAdded = @($added | Where-Object { ($_ -split ' ')[0] -match '(?i)-sys$' })
+
+  Record-Check "D1_engine_commit_unchanged" ($beforeCommit -eq $afterCommit) "before=$beforeCommit after=$afterCommit"
+  Record-Check "D2_only_cargo_lock_changed" $onlyCargoLock $(if ($changed.Count) { (($changed | ForEach-Object { "$($_.change):$($_.path)" }) -join ', ') } else { "无有效树差异" })
+  Record-Check "D3_no_packages_removed_or_downgraded" ($removed.Count -eq 0) $(if ($removed.Count) { "消失/改版: $($removed -join '; ')" } else { "既有 package 一个都没少、没改版" })
+  Record-Check "D4_added_matches_declared" (($added -join '|') -ceq ($declared -join '|')) "added=[$($added -join '; ')] declared=[$($declared -join '; ')]"
+  Record-Check "D5_no_native_sys_added" ($sysAdded.Count -eq 0) $(if ($sysAdded.Count) { "新增原生链: $($sysAdded -join '; ')" } else { "无 *-sys 新增（W1 教训，机器强制）" })
+  Record-Check "D6_wiring_unchanged" ($beforeWiringSha -eq $afterWiringSha -and $afterBuildManifest.wiring_patch_sha256 -eq $afterWiringSha) "before=$beforeWiringSha after=$afterWiringSha manifest=$($afterBuildManifest.wiring_patch_sha256)"
+  Record-Check "D7_hashes_registered" ($digestAfter -eq $afterBuildManifest.effective_tree_sha256 -and $afterBuildManifest.cargo_lock_sha256 -eq $afterCargoSha -and $afterBuildManifest.emergency_patch_sha256 -eq "none" -and (Get-Item $afterEmergency).Length -eq 0) "tree=$digestAfter manifest_tree=$($afterBuildManifest.effective_tree_sha256) lock=$afterCargoSha manifest_lock=$($afterBuildManifest.cargo_lock_sha256) emergency=$($afterBuildManifest.emergency_patch_sha256)"
+
+  $summary = [ordered]@{
+    mode                          = "dependency-delta"
+    before_wancode_sha            = $before
+    after_wancode_sha             = $after
+    before_engine_commit          = $beforeCommit
+    after_engine_commit           = $afterCommit
+    added_packages                = $added
+    declared_added_packages       = $declared
+    removed_or_changed_packages   = $removed
+    cargo_lock_sha256_before      = $beforeCargoSha
+    cargo_lock_sha256_after       = $afterCargoSha
+    before_effective_tree_sha256  = $digestBefore
+    after_effective_tree_sha256   = $digestAfter
+    changed_files                 = @($changed)
+    checks                        = $checks
+    pass                          = ($failures.Count -eq 0)
+  }
+  $summary | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 $OutFile
+  Write-Host "[migration-audit] dependency-delta 摘要已写 $OutFile"
+  foreach ($name in $checks.Keys) {
+    $mark = if ($checks[$name].pass) { "PASS" } else { "FAIL" }
+    Write-Host "[migration-audit] $name=$mark — $($checks[$name].detail)"
+  }
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  if ($failures.Count) {
+    Write-Host "MIGRATION AUDIT FAIL：dependency-delta 有 $($failures.Count) 项断言失败" -ForegroundColor Red
+    $failures | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+  }
+  Write-Host "MIGRATION AUDIT OK：dependency-delta 七项全 PASS（新增 $($added.Count) 个 package，无 *-sys，无既有 package 变动）"
+  exit 0
+}
 
 # ── release version-only：只允许 Cargo.lock 的 wancode 版本变化 ─
 if ($Mode -eq "version-only") {
