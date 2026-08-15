@@ -71,6 +71,12 @@ jobs:
       # #126 B1 CI 三道断言（设计稿 §4）：HEAD==lock.commit；wiring/emergency/
       # cargo_lock 三文件哈希==清单（emergency none ⇔ 0 字节，非空则事故编号/
       # 到期版本齐备且未到期）；porcelain 精确集合 + effective_tree_sha256 复算。
+      # W3：PDFium 原生二进制按 vendor/pdfium.lock 取回并校验（来源政策 2：
+      # CI 钉死 URL + sha256，二进制不入库）。归档 sha256 在**解包前**校验；
+      # 不符/清单写 latest/误用 v8 变体 一律 fail-closed。
+      - name: PDFium 供应链取回与校验
+        shell: pwsh
+        run: powershell -File scripts/fetch_pdfium.ps1
       - name: 构建清单校验（audit_effective_tree verify）
         shell: pwsh
         run: |

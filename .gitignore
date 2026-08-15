@@ -26,3 +26,6 @@ dist-ssr
 # dogfood 实验产物
 blog-demo/
 .smoke-model-identity/
+
+# PDFium 原生二进制按 vendor/pdfium.lock 在构建期取回并校验（来源政策 2），不入库
+vendor/pdfium-runtime/
