@@ -76,7 +76,12 @@ jobs:
       # 不符/清单写 latest/误用 v8 变体 一律 fail-closed。
       - name: PDFium 供应链取回与校验
         shell: pwsh
-        run: powershell -File scripts/fetch_pdfium.ps1
+        # 直接调用，不再 spawn `powershell`：该步已是 pwsh（7.x），内部再起
+        # `powershell` 会降级到 Windows PowerShell 5.1——5.1 对无 BOM 文件按
+        # ANSI 代码页解释，runner 的代码页不是 UTF-8，中文字符串会全部损坏并
+        # 直接解析失败（z-code #52 R1-P1 实测）。脚本本身也补了 UTF-8 BOM，
+        # 与 audit_effective_tree.ps1 / bootstrap.ps1 同惯例，双保险。
+        run: ./scripts/fetch_pdfium.ps1
       - name: 构建清单校验（audit_effective_tree verify）
         shell: pwsh
         run: |

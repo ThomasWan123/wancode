@@ -1,4 +1,4 @@
-# 按 vendor/pdfium.lock 取回并**校验** PDFium 原生二进制（来源政策 2）。
+﻿# 按 vendor/pdfium.lock 取回并**校验** PDFium 原生二进制（来源政策 2）。
 #
 #   fetch_pdfium.ps1            取回 + 校验 + 解包到 vendor/pdfium-runtime/
 #   fetch_pdfium.ps1 -VerifyOnly  只校验已存在的产物（CI 复核用，不联网）
@@ -20,7 +20,7 @@ foreach ($line in Get-Content $lockPath) {
   $kv = $line -split '=', 2
   if ($kv.Count -eq 2) { $m[$kv[0].Trim()] = $kv[1].Trim() }
 }
-foreach ($k in @('release_tag','win_x64_url','win_x64_archive_sha256','win_x64_dll_path','win_x64_dll_sha256','win_x64_dll_bytes')) {
+foreach ($k in @('release_tag','win_x64_asset','win_x64_url','win_x64_archive_sha256','win_x64_dll_path','win_x64_dll_sha256','win_x64_dll_bytes')) {
   if (-not $m.ContainsKey($k)) { Write-Host "FETCH FAIL：清单缺字段 $k" -ForegroundColor Red; exit 1 }
 }
 # 禁用 latest —— 清单被人改成浮动 tag 时必须当场失败。
@@ -39,6 +39,13 @@ $dllPath = Join-Path $outDir ($m['win_x64_dll_path'] -replace '/', '\')
 
 function Test-Artifact {
   if (-not (Test-Path $dllPath)) { return $false }
+  # 许可证也是产物的一部分：再分发必须随附。此前只有 fetch 路径查、
+  # -VerifyOnly 不查，于是删掉 LICENSE 后复核仍报「已就位」——不完整的产物
+  # 被判为可用（本轮自查发现，非 z-code 提出）。
+  if (-not (Test-Path (Join-Path $outDir $m['license_file']))) {
+    Write-Host "VERIFY FAIL：缺许可证文件 $($m['license_file'])" -ForegroundColor Red
+    return $false
+  }
   $h = (Get-FileHash $dllPath -Algorithm SHA256).Hash.ToLower()
   $sz = (Get-Item $dllPath).Length
   if ($h -ne $m['win_x64_dll_sha256']) {
@@ -93,7 +100,11 @@ if (-not (Test-Artifact)) {
 }
 $lic = Join-Path $outDir $m['license_file']
 if (-not (Test-Path $lic)) {
-  Write-Host "FETCH FAIL：缺许可证文件 $($m['license_file'])——再分发必须随附" -ForegroundColor Red
+  # 与其它失败路径一致地清理（z-code #52 R1-P2）：此前这条只退出不删，
+  # 于是「任何失败都清理产物」名实不符。dll 虽已通过哈希校验，但缺许可证
+  # 的产物不可再分发，留着只会让下一次运行误判为「已就位」。
+  Remove-Item $outDir -Recurse -Force -EA SilentlyContinue
+  Write-Host "FETCH FAIL：缺许可证文件 $($m['license_file'])——再分发必须随附（已清理产物）" -ForegroundColor Red
   exit 1
 }
 Write-Host "FETCH OK：$($m['pdfium_version']) / $($m['win_x64_dll_bytes']) B / 许可证 $($m['wrapper_license']) + $($m['pdfium_license'])"
