@@ -243,6 +243,15 @@ pub fn resolve_docx_anchor(
             path: path.to_string(),
         });
     }
+    // **空区间必须拒**（z-code #51 R1-P1）：mint 侧用 `RangeCoversNoRun` 守着
+    // 「锚点必须落在实际文本上」，resolve 侧此前没守——同一不对称只修了一半。
+    // 致命处在于下面的序号比对会**空洞地通过**：`covered_run_ordinals` 对
+    // `[2,2)` 返回 `[]`，与伪造锚点声称的 `[]` 恰好相等；`utf16_slice` 又给
+    // `Ok("")` 与空 excerpt 相符。于是「指向虚无的引用」被判为可解析，
+    // 查看器会把它渲染成可点。必须在比对**之前**拦掉。
+    if raw_range[0] >= raw_range[1] || claimed_ordinals.is_empty() {
+        return Err(AnchorErrorOrMissing::EmptyAnchorRange { range: raw_range });
+    }
     // **校验 run_ordinals**（自审 F1 的核心）：此前它是 wire 上带着却从不检查
     // 的字段——实测把序号篡改成 `[99]` 仍能解析成功。定位靠 raw_range，所以
     // 取回的文本本身不会错；但一个从不校验的字段等于给了它「已核验」的假象，
@@ -272,6 +281,9 @@ pub enum AnchorErrorOrMissing {
     MalformedBlock { path: String },
     /// 锚点声称的 run 序号与块内实际 runs 不符（自审 F1）。
     RunOrdinalsMismatch { expected: Vec<u32>, claimed: Vec<u32> },
+    /// 锚点区间为空（或未覆盖任何 run）——引用必须落在实际文本上。
+    /// 与 mint 侧的 `RangeCoversNoRun` 对称（z-code #51 R1-P1）。
+    EmptyAnchorRange { range: [usize; 2] },
     KindMismatch,
 }
 
@@ -288,6 +300,11 @@ impl std::fmt::Display for AnchorErrorOrMissing {
             AnchorErrorOrMissing::MalformedBlock { path } => {
                 write!(f, "来源已失效：块 {path} 结构不自洽")
             }
+            AnchorErrorOrMissing::EmptyAnchorRange { range } => write!(
+                f,
+                "来源已失效：锚点区间 [{}, {}) 为空，未指向任何文本",
+                range[0], range[1]
+            ),
             AnchorErrorOrMissing::RunOrdinalsMismatch { expected, claimed } => write!(
                 f,
                 "来源已失效：run 序号不符（锚点声称 {claimed:?}，实际 {expected:?}）"
@@ -611,5 +628,51 @@ mod tests {
             ),
             other => panic!("期望 BadRange，实得 {other:?}"),
         }
+    }
+
+    /// z-code #51 R1-P1：**空区间锚点必须 fail-closed**。
+    ///
+    /// 这是我自审 F1 只修了一半留下的洞：序号比对会**空洞地通过**——
+    /// `covered_run_ordinals([2,2))` 返回 `[]`，与伪造锚点声称的 `[]` 相等；
+    /// `utf16_slice([2,2))` 又给 `Ok("")` 与空 excerpt 相符。于是一个指向
+    /// 虚无的引用被判为可解析，查看器会把它渲染成可点。
+    #[test]
+    fn empty_range_wire_anchor_fails_closed_on_resolve() {
+        let bs = blocks();
+        // 手工构造 mint 永远不会产出的组合（篡改/伪造的 wire 锚点同形）。
+        let ghost = Anchor::new(
+            ImportId::mint(),
+            sha(),
+            DocKind::Docx,
+            Locator::Docx {
+                block_path: "body/p[0]".into(),
+                run_ordinals: vec![],
+                raw_range: [2, 2],
+            },
+            "",
+        );
+        assert!(
+            matches!(
+                resolve_docx_anchor(&ghost, &bs, &sha()),
+                Err(AnchorErrorOrMissing::EmptyAnchorRange { .. })
+            ),
+            "空区间锚点必须拒绝，不得返回 Ok(\"\")"
+        );
+        // 仅 run_ordinals 为空、区间非空 —— 同样拒（mint 不会产出这种）。
+        let no_runs = Anchor::new(
+            ImportId::mint(),
+            sha(),
+            DocKind::Docx,
+            Locator::Docx {
+                block_path: "body/p[0]".into(),
+                run_ordinals: vec![],
+                raw_range: [0, 2],
+            },
+            "第一",
+        );
+        assert!(matches!(
+            resolve_docx_anchor(&no_runs, &bs, &sha()),
+            Err(AnchorErrorOrMissing::EmptyAnchorRange { .. })
+        ));
     }
 }
