@@ -92,11 +92,19 @@ impl WorkBlock {
 pub enum MintError {
     /// 找不到该 `block_path`。
     BlockNotFound { path: String },
+    /// 同一 `block_path` 出现多次——锚点会指向歧义位置（自审 F2）。
+    AmbiguousBlockPath { path: String },
     /// 块自身不自洽——解析器 bug。判据见 [`WorkBlock::is_well_formed`]：
     /// runs 必须铺满 `[0, len)`，无缺口/重叠/乱序/零长，非空正文至少一条 run。
     MalformedBlock { path: String },
-    /// 请求的区间在块内非法（越界、start > end、劈开代理对）。
-    BadRange { range: [usize; 2], block_len: usize },
+    /// 请求的区间在块内非法。`cause` 保留**具体原因**（越界 / 劈开代理对）——
+    /// 本模块别处专门论证过「失败原因要能区分」，这里也不该把两类挤成一类
+    /// （自审 F3）。
+    BadRange {
+        range: [usize; 2],
+        block_len: usize,
+        cause: AnchorError,
+    },
     /// 区间未覆盖任何 run——锚点必须落在实际文本上。
     RangeCoversNoRun { range: [usize; 2] },
 }
@@ -105,10 +113,15 @@ impl std::fmt::Display for MintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MintError::BlockNotFound { path } => write!(f, "块不存在: {path}"),
-            MintError::MalformedBlock { path } => write!(f, "块结构不自洽（解析器 bug）: {path}"),
-            MintError::BadRange { range, block_len } => {
-                write!(f, "区间 [{}, {}) 在长度 {block_len} 的块内非法", range[0], range[1])
+            MintError::AmbiguousBlockPath { path } => {
+                write!(f, "块路径重复（解析器 bug）: {path}")
             }
+            MintError::MalformedBlock { path } => write!(f, "块结构不自洽（解析器 bug）: {path}"),
+            MintError::BadRange { range, block_len, cause } => write!(
+                f,
+                "区间 [{}, {}) 在长度 {block_len} 的块内非法：{cause}",
+                range[0], range[1]
+            ),
             MintError::RangeCoversNoRun { range } => {
                 write!(f, "区间 [{}, {}) 未覆盖任何 run", range[0], range[1])
             }
@@ -116,6 +129,26 @@ impl std::fmt::Display for MintError {
     }
 }
 impl std::error::Error for MintError {}
+
+/// 唯一定位一个块。**重复 path 一律拒绝**（自审 F2）：此前用 `find` 静默取
+/// 第一个，若解析器产出重名块，锚点就指向一个歧义位置——而歧义正是锚点要
+/// 消除的东西。宁可拒收也不猜。
+fn find_unique_block<'a>(
+    blocks: &'a [WorkBlock],
+    path: &str,
+) -> Result<&'a WorkBlock, BlockLookupError> {
+    let mut it = blocks.iter().filter(|b| b.path == path);
+    let first = it.next().ok_or(BlockLookupError::NotFound)?;
+    if it.next().is_some() {
+        return Err(BlockLookupError::Ambiguous);
+    }
+    Ok(first)
+}
+
+enum BlockLookupError {
+    NotFound,
+    Ambiguous,
+}
 
 /// 区间覆盖到的 run 序号（半开区间相交即算覆盖；零长区间不覆盖任何 run）。
 fn covered_run_ordinals(block: &WorkBlock, [start, end]: [usize; 2]) -> Vec<u32> {
@@ -141,23 +174,27 @@ pub fn mint_docx_anchor(
     import_id: ImportId,
     source_sha256: &str,
 ) -> Result<Anchor, MintError> {
-    let block = blocks
-        .iter()
-        .find(|b| b.path == block_path)
-        .ok_or_else(|| MintError::BlockNotFound {
+    let block = find_unique_block(blocks, block_path).map_err(|e| match e {
+        BlockLookupError::NotFound => MintError::BlockNotFound {
             path: block_path.to_string(),
-        })?;
+        },
+        BlockLookupError::Ambiguous => MintError::AmbiguousBlockPath {
+            path: block_path.to_string(),
+        },
+    })?;
     if !block.is_well_formed() {
         return Err(MintError::MalformedBlock {
             path: block_path.to_string(),
         });
     }
     // 区间合法性交给 utf16_slice——它同时管越界与代理对，语义与解析侧同源。
-    let excerpt_raw =
-        utf16_slice(&block.raw, raw_range[0], raw_range[1]).map_err(|_| MintError::BadRange {
+    let excerpt_raw = utf16_slice(&block.raw, raw_range[0], raw_range[1]).map_err(|cause| {
+        MintError::BadRange {
             range: raw_range,
             block_len: block.len_utf16(),
-        })?;
+            cause,
+        }
+    })?;
     let run_ordinals = covered_run_ordinals(block, raw_range);
     if run_ordinals.is_empty() {
         return Err(MintError::RangeCoversNoRun { range: raw_range });
@@ -184,16 +221,40 @@ pub fn resolve_docx_anchor(
     blocks: &[WorkBlock],
     doc_sha256: &str,
 ) -> Result<String, AnchorErrorOrMissing> {
-    let path = match &anchor.locator {
-        Locator::Docx { block_path, .. } => block_path.as_str(),
+    let (path, claimed_ordinals, raw_range) = match &anchor.locator {
+        Locator::Docx { block_path, run_ordinals, raw_range } => {
+            (block_path.as_str(), run_ordinals, *raw_range)
+        }
         Locator::Pdf { .. } => return Err(AnchorErrorOrMissing::KindMismatch),
     };
-    let block = blocks
-        .iter()
-        .find(|b| b.path == path)
-        .ok_or_else(|| AnchorErrorOrMissing::BlockMissing {
+    let block = find_unique_block(blocks, path).map_err(|e| match e {
+        BlockLookupError::NotFound => AnchorErrorOrMissing::BlockMissing {
             path: path.to_string(),
-        })?;
+        },
+        BlockLookupError::Ambiguous => AnchorErrorOrMissing::AmbiguousBlockPath {
+            path: path.to_string(),
+        },
+    })?;
+    // 解析侧也必须校验块自洽（自审 F1）：铸造侧查了、解析侧不查，就是那种
+    // 「一边强制、一边放行」的不对称——W2-c 栽过同一形状（不变量只在构造器
+    // 里成立，信任边界上没强制）。runs 不自洽时下面的序号比对也无从谈起。
+    if !block.is_well_formed() {
+        return Err(AnchorErrorOrMissing::MalformedBlock {
+            path: path.to_string(),
+        });
+    }
+    // **校验 run_ordinals**（自审 F1 的核心）：此前它是 wire 上带着却从不检查
+    // 的字段——实测把序号篡改成 `[99]` 仍能解析成功。定位靠 raw_range，所以
+    // 取回的文本本身不会错；但一个从不校验的字段等于给了它「已核验」的假象，
+    // 且下游（查看器高亮 run、按 run 做 diff）会当真。按块内实际 runs 重算并
+    // 逐一比对，不符即 fail-closed。
+    let expected = covered_run_ordinals(block, raw_range);
+    if &expected != claimed_ordinals {
+        return Err(AnchorErrorOrMissing::RunOrdinalsMismatch {
+            expected,
+            claimed: claimed_ordinals.clone(),
+        });
+    }
     crate::work_anchor::resolve_anchor(anchor, doc_sha256, &block.raw)
         .map_err(AnchorErrorOrMissing::Anchor)
 }
@@ -205,6 +266,12 @@ pub fn resolve_docx_anchor(
 pub enum AnchorErrorOrMissing {
     Anchor(AnchorError),
     BlockMissing { path: String },
+    /// 同一 block_path 出现多次——歧义，不猜（自审 F2）。
+    AmbiguousBlockPath { path: String },
+    /// 块自身不自洽（解析器 bug）——解析侧同样拦（自审 F1）。
+    MalformedBlock { path: String },
+    /// 锚点声称的 run 序号与块内实际 runs 不符（自审 F1）。
+    RunOrdinalsMismatch { expected: Vec<u32>, claimed: Vec<u32> },
     KindMismatch,
 }
 
@@ -215,6 +282,16 @@ impl std::fmt::Display for AnchorErrorOrMissing {
             AnchorErrorOrMissing::BlockMissing { path } => {
                 write!(f, "来源已失效：块 {path} 不存在")
             }
+            AnchorErrorOrMissing::AmbiguousBlockPath { path } => {
+                write!(f, "来源已失效：块路径 {path} 重复，位置有歧义")
+            }
+            AnchorErrorOrMissing::MalformedBlock { path } => {
+                write!(f, "来源已失效：块 {path} 结构不自洽")
+            }
+            AnchorErrorOrMissing::RunOrdinalsMismatch { expected, claimed } => write!(
+                f,
+                "来源已失效：run 序号不符（锚点声称 {claimed:?}，实际 {expected:?}）"
+            ),
             AnchorErrorOrMissing::KindMismatch => write!(f, "来源已失效：定位子类型不符"),
         }
     }
@@ -451,5 +528,88 @@ mod tests {
         let b = split_block();
         let back: WorkBlock = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
         assert_eq!(b, back);
+    }
+
+    // ── 自审发现的三条（每条都由实测探针坐实，不是推测）────────────────
+
+    /// F1：`run_ordinals` 曾是 wire 上带着却**从不校验**的字段——实测把它
+    /// 篡改成 `[99]` 仍能解析成功。定位靠 raw_range 所以文本不会错，但一个
+    /// 从不校验的字段会给下游（高亮 run、按 run diff）「已核验」的假象。
+    #[test]
+    fn tampered_run_ordinals_fail_closed() {
+        let bs = blocks();
+        let mut a = mint_docx_anchor(&bs, "body/p[41]", [0, 3], ImportId::mint(), &sha()).unwrap();
+        if let Locator::Docx { run_ordinals, .. } = &mut a.locator {
+            *run_ordinals = vec![99];
+        }
+        assert!(
+            matches!(
+                resolve_docx_anchor(&a, &bs, &sha()),
+                Err(AnchorErrorOrMissing::RunOrdinalsMismatch { .. })
+            ),
+            "篡改的 run 序号必须 fail-closed"
+        );
+    }
+
+    /// F1 续：解析侧也要拦不自洽的块——此前只有铸造侧校验，是「一边强制、
+    /// 一边放行」的不对称。
+    #[test]
+    fn malformed_block_is_also_rejected_on_resolve() {
+        let bs = blocks();
+        let a = mint_docx_anchor(&bs, "body/p[41]", [0, 3], ImportId::mint(), &sha()).unwrap();
+        let broken = vec![WorkBlock {
+            path: "body/p[41]".into(),
+            raw: bs[1].raw.clone(),
+            runs: vec![],
+        }];
+        assert!(matches!(
+            resolve_docx_anchor(&a, &broken, &sha()),
+            Err(AnchorErrorOrMissing::MalformedBlock { .. })
+        ));
+    }
+
+    /// F2：重复 block_path 此前被 `find` 静默取第一个——歧义正是锚点该消除的
+    /// 东西，不能猜。铸造与解析两侧都要拒。
+    #[test]
+    fn duplicate_block_paths_are_ambiguous_and_rejected_on_both_sides() {
+        let dup = vec![
+            WorkBlock { path: "dup".into(), raw: "AAA".into(), runs: vec![[0, 3]] },
+            WorkBlock { path: "dup".into(), raw: "BBB".into(), runs: vec![[0, 3]] },
+        ];
+        assert!(matches!(
+            mint_docx_anchor(&dup, "dup", [0, 3], ImportId::mint(), &sha()),
+            Err(MintError::AmbiguousBlockPath { .. })
+        ));
+        let single = vec![dup[0].clone()];
+        let a = mint_docx_anchor(&single, "dup", [0, 3], ImportId::mint(), &sha()).unwrap();
+        assert!(matches!(
+            resolve_docx_anchor(&a, &dup, &sha()),
+            Err(AnchorErrorOrMissing::AmbiguousBlockPath { .. })
+        ));
+    }
+
+    /// F3：`BadRange` 曾把「越界」与「劈开代理对」挤成一类，丢掉了底层已经
+    /// 区分好的原因——本模块别处正为「原因要能区分」辩护过。
+    #[test]
+    fn bad_range_preserves_the_specific_cause() {
+        let bs = vec![WorkBlock {
+            path: "body/p[0]".into(),
+            raw: "a𝄞b".to_string(),
+            runs: vec![[0, 4]],
+        }];
+        match mint_docx_anchor(&bs, "body/p[0]", [1, 2], ImportId::mint(), &sha()) {
+            Err(MintError::BadRange { cause, .. }) => assert!(
+                matches!(cause, AnchorError::RangeSplitsSurrogatePair { .. }),
+                "劈开代理对必须保留为该原因，实得 {cause:?}"
+            ),
+            other => panic!("期望 BadRange，实得 {other:?}"),
+        }
+        match mint_docx_anchor(&bs, "body/p[0]", [0, 99], ImportId::mint(), &sha()) {
+            Err(MintError::BadRange { cause, .. }) => assert!(
+                matches!(cause, AnchorError::RangeOutOfBounds { .. }),
+                "越界必须保留为该原因，实得 {cause:?}"
+            ),
+            other => panic!("期望 BadRange，实得 {other:?}"),
+        }
     }
 }
