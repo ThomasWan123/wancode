@@ -1,0 +1,46 @@
+# PDFium 原生二进制供应链清单（v0.20 W3 / 来源政策 2：CI 钉死 URL + sha256）
+#
+# 为什么需要它：`pdfium-render` 只是 Rust 绑定，PDFium 本体是一个第三方
+# 预编译原生库，crates.io 不分发。设计稿 §1.1 要求「二进制来源/版本/
+# sha256/许可证入档」，§5 要求「实测打包体积对照打包门预算」——本文件就是
+# 那个档。
+#
+# 独立于 `grok-build.lock`：那个描述的是**引擎有效树**，其
+# effective_tree_sha256 覆盖引擎目录；PDFium 是 wancode 自己的运行时资产，
+# 混进去会污染引擎审计的语义。两条供应链分开钉、分开审。
+#
+# 硬约束：
+#   - **禁用 latest**：tag 必须钉死；升级 = 改本文件 + 重跑校验 + 走评审；
+#   - **取用前必须校验 sha256**，不符即 fail-closed，绝不"先用着"；
+#   - 二进制**不入库**（政策 2），CI/本地按 URL 取，取回即校验。
+#
+# 为什么选**无 V8** 版本（安全，不只是体积）：
+#   带 V8 的构建内嵌一个 JavaScript 引擎。我们解析的是**不受信文档**，而
+#   PDF 可以携带 JavaScript——把 JS 引擎请进解析路径等于凭空多一个攻击面。
+#   无 V8 版同时小 8.8MB。**升级时不得"顺手"换成 v8 变体。**
+
+upstream=https://github.com/bblanchon/pdfium-binaries
+release_tag=chromium/7999
+pdfium_version=153.0.7999.0
+
+# Windows x64（当前唯一目标架构；新增架构在此加同族三元组）
+win_x64_asset=pdfium-win-x64.tgz
+win_x64_url=https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7999/pdfium-win-x64.tgz
+win_x64_archive_sha256=55329d5cb5de8a379a2fc563106492d7f385a1f795d18970922c71f708f9fbb4
+win_x64_archive_bytes=3762593
+# 解包后 bin/pdfium.dll —— 打包门实测对象
+win_x64_dll_path=bin/pdfium.dll
+win_x64_dll_sha256=fb898a1f5ace57805834f390407500bdb6ef93eff326a252ad334a8aae809d8e
+win_x64_dll_bytes=7260672
+
+# 许可证：包装仓库 MIT（Benoit Blanchon）；PDFium 本体 BSD-3-Clause（Google）。
+# 两者均允许再分发，需随附版权与许可证文本。
+wrapper_license=MIT
+pdfium_license=BSD-3-Clause
+license_file=LICENSE
+
+# 打包门（设计 §5）：估算 ~5MB，**实测 6.9MB**，超出约 1.9MB。
+# 接进打包时必须实测安装包增量并对照预算；若破门，按 §5 评估按需下载
+# （其完整性校验须与更新链同级）或降级——那是需要用户裁定的决策点，
+# 不得由实现方静默选择。
+packaging_budget_note=measured-6.9MB-vs-design-estimate-5MB-pending-installer-delta
