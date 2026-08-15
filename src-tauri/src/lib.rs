@@ -17,6 +17,7 @@ pub mod surface_policy;
 pub mod work_staging;
 pub mod work_import;
 pub mod work_anchor;
+pub mod work_blocks;
 #[cfg(test)]
 mod work_seams;
 #[cfg(test)]
