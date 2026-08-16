@@ -556,6 +556,78 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         format!("same_id={same_id} lines {before_len}->{after_len}")
     );
 
+    // ── S9 记忆回路（C3 验收：flush + rewrite 真实引擎往返）────────
+    // 隔离 GROK_HOME 的 config 副本里显式开 [memory].enabled——引擎在
+    // **会话启动时**解析该开关，所以先写配置再起新会话。两次调用都是真实
+    // LLM 往返（flush 蒸馏当前会话；rewrite 一次性结构化改写）。
+    write("SMOKE S9-memory BEGIN");
+    {
+        let cfg_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
+        let enabled = match std::fs::read_to_string(&cfg_path) {
+            Ok(text) => {
+                let mut doc: toml_edit::DocumentMut = text.parse().unwrap_or_default();
+                crate::memory_ops::write_memory_enabled(&mut doc, true);
+                crate::config_core::write_config_atomic(&cfg_path, &doc.to_string()).is_ok()
+            }
+            Err(e) => {
+                write(&format!("SMOKE S9-memory config unreadable: {e}"));
+                false
+            }
+        };
+        if !enabled {
+            check!("S9-memory-roundtrip", false, "无法开启 [memory].enabled（隔离配置缺失/不可写）");
+        } else {
+            // 新会话（start_inner 会拆掉 S6 的会话——套件尾声，无后续依赖）。
+            let s9 = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                start_inner(app.clone(), &state, workspace.clone(), None, None),
+            )
+            .await;
+            let (s9_sid, s9_err) = match s9 {
+                Ok(Ok(r)) => (r.session_id.clone(), String::new()),
+                Ok(Err(e)) => (String::new(), format!("{e:#}")),
+                Err(_) => (String::new(), "session start timed out".to_string()),
+            };
+            if s9_sid.is_empty() {
+                check!("S9-memory-roundtrip", false, format!("session start: {s9_err}"));
+            } else {
+                // flush：引擎侧 did_flush 不随响应返回（Empty），回路本身
+                // 不报错即通过；记忆未启用时引擎会显式报错（不会假阳性）。
+                let flush = ext_call(&state, "x.ai/memory/flush", serde_json::json!({})).await;
+                let flush_ok = flush.is_ok();
+                // rewrite：断言返回结构化文本非空。
+                let rewrite = ext_call(
+                    &state,
+                    "x.ai/memory/rewrite",
+                    serde_json::json!({
+                        "rawText": "smoke 回路测试：本项目发版必须跑 scripts/release.ps1",
+                        "contextSummary": "wancode autotest S9",
+                    }),
+                )
+                .await;
+                let rewritten_len = rewrite
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| {
+                        v.get("result")
+                            .and_then(|r| r.get("rewritten"))
+                            .or_else(|| v.get("rewritten"))
+                            .and_then(|r| r.as_str())
+                    })
+                    .map(|s| s.trim().len())
+                    .unwrap_or(0);
+                check!(
+                    "S9-memory-roundtrip",
+                    flush_ok && rewritten_len > 0,
+                    format!(
+                        "flush_ok={flush_ok} rewritten_len={rewritten_len} flush_err={} rewrite_err={}",
+                        flush.as_ref().err().cloned().unwrap_or_default(),
+                        rewrite.as_ref().err().cloned().unwrap_or_default(),
+                    )
+                );
+            }
+        }
+    }
 
     write(&format!("SMOKE DONE pass={pass} fail={fail}"));
     std::process::exit(if fail > 0 { 1 } else { 0 });
