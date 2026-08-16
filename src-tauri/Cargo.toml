@@ -38,6 +38,18 @@ toml = { version = "0.9", features = ["preserve_order"] }
 url = "2"
 keyring = { version = "3", features = ["windows-native"] }
 sha2 = "0.10"
+# ── W3 解析栈（一次性加齐，见裁断：NFC + DOCX crate + PDF 栈同一轮）──
+# NFC：设计 §1.2 要求摘录相等性判定为 NFC + 空白折叠。补上它会改变相等性
+# 语义，故同批 bump CURRENT_ANCHOR_SCHEMA。
+unicode-normalization = "0.1"
+# DOCX：zip 只开 deflate（miniz_oxide 纯 Rust），避开 bzip2/lzma/zstd 的
+# *-sys 原生链（W1 spike 结论）。构建后核验 lock 无新增 *-sys。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+# PDF：pdfium-render 是绑定，PDFium 本体按 vendor/pdfium.lock 在构建期取回
+# 并校验（来源政策 2，见 scripts/fetch_pdfium.ps1）。运行期动态绑定，
+# 不静态链接。
+pdfium-render = "0.9"
 tempfile = "3"
 reqwest = { workspace = true }
 serde = { version = "1", features = ["derive"] }

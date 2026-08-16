@@ -1,4 +1,4 @@
-# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
+﻿# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
 #
 # wancode 不把引擎做成 git submodule —— 引擎必须放在仓库的【兄弟目录】
 # ../grok-build：src-tauri/Cargo.toml 通过 workspace = "../../grok-build"
@@ -27,8 +27,25 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=equivalent
+migration_audit_mode=dependency-delta
+#
+# 【dependency-delta · v0.20 W3】新增解析依赖
+#   引擎 commit **不动**（2f480062e），有效树里**只有 Cargo.lock 变**，
+#   变的方式**只是新增 package**——既有 package 一个没少、没降版。
+#   三种既有模式都表达不了这件事（equivalent 要求逐字节相等；version-only
+#   的 V3 只许 wancode 版本行不同；intentional-delta 的 A1/A4 要求
+#   「commit 变、lock 不变」，与此处恰好相反），故新增本模式，见
+#   scripts/migration_audit.ps1 的 D1–D7。
+#
+# declared_added_packages：**申报制**。多出来的 10 个 package 必须与本行
+# 逐字相等（D4），否则审计失败——目的是让「多出来什么」成为评审对象，
+# 而不是埋在 118 行 lock diff 里。其中直接依赖 3 个：
+#   zip、quick-xml（DOCX）、pdfium-render（PDF）；
+#   第 4 个直接依赖 unicode-normalization 已在树内，故不出现在新增里。
+# 其余 7 个为上述的传递依赖。D5 另行强制：**不得新增 *-sys**——W1 的教训
+# （原生链会把构建复杂度和供应链面一起放大），此前只是注释，现在是机器检查。
+declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=560d56ac79ad9c6d275afec3798d460367150241de5dcae0c3e1e4b1a2cf515e
-effective_tree_sha256=733d8e4fc7a6f1d3961bc5760d7cc6dc496df5d67d704bb201444966c1e24129
+cargo_lock_sha256=f89e1d05321b015ddbf35f71dd59168a9f2c6a7ef357c0c1ae4876360b8adf81
+effective_tree_sha256=cbb03b91cd59fc62ff999d95b5969c3452d23bc3001005912f8b63be94a705ad
