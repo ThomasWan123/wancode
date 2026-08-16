@@ -18,6 +18,7 @@ pub mod work_staging;
 pub mod work_import;
 pub mod work_anchor;
 pub mod work_blocks;
+pub mod cowork_escape_probe;
 #[cfg(test)]
 mod work_seams;
 #[cfg(test)]
