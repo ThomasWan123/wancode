@@ -146,6 +146,18 @@ fn main() {
         format!("{r:?}"),
     );
 
+    // ⑨ Job 不可用 → **拒绝解析**，不降级运行（z-code #56 R1-P2-1）。
+    //    这条存在的意义是让 ContainmentUnavailable 可被证伪——没有注入点，
+    //    那条分支就是永远跑不到、无人验证的死代码。
+    let r = with_mode(Some("nojob"), || {
+        parse_in_worker(&req(), ParseLimits::default())
+    });
+    check(
+        "no_job_means_refuse_not_degrade",
+        matches!(&r, Err(ParseFailure::ContainmentUnavailable(_))),
+        format!("{r:?}"),
+    );
+
     println!("\nCONTAINMENT DONE pass={pass} fail={fail}");
     if fail > 0 {
         std::process::exit(1);

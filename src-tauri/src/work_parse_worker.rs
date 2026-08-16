@@ -107,6 +107,9 @@ pub enum ParseFailure {
     OutputTooLarge { cap: u64 },
     /// worker 有序拒收。
     Rejected(String),
+    /// **无法建立进程树遏制**（Job 不可用）。见 `job_for_child` 的说明：
+    /// 这不是降级运行的理由，是拒绝解析的理由。
+    ContainmentUnavailable(String),
 }
 
 impl std::fmt::Display for ParseFailure {
@@ -124,6 +127,9 @@ impl std::fmt::Display for ParseFailure {
             Self::BadOutput(e) => write!(f, "解析进程输出不合协议：{e}"),
             Self::OutputTooLarge { cap } => write!(f, "解析输出超过上限 {cap} 字节"),
             Self::Rejected(r) => write!(f, "解析拒收：{r}"),
+            Self::ContainmentUnavailable(e) => {
+                write!(f, "无法建立进程树遏制（{e}），拒绝解析不受信文档")
+            }
         }
     }
 }
@@ -236,8 +242,19 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
 
     // 进程树治理：建独立 Job 并纳入 worker。失败不阻断解析——退化为
     // 「只能杀直接子进程」，比不解析强；但必须留痕，否则退化会静默发生。
+    // 拿不到 Job 就**不解析**。z-code #56 R1-P2-1 建议「至少打日志」，这里
+    // 修得更硬：`eprintln!` 在 GUI 进程里无人可见，而失去整树清杀意味着
+    // 设计 §1.1 的「超时可杀」不再成立——对不受信文档降级运行，等于把遏制
+    // 承诺悄悄变成尽力而为。宁可拒绝解析。
     #[cfg(windows)]
-    let job = job_for_child(&child, limits.max_process_bytes);
+    let job = match job_for_child(&child, limits.max_process_bytes) {
+        Ok(j) => j,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ParseFailure::ContainmentUnavailable(e));
+        }
+    };
 
     // stdin 必须**在独立线程里写**：worker 可能不读 stdin 就崩（abort 自测
     // 就是这种），此时 write 会因管道断裂阻塞或报错。放主线程会让超时形同虚设。
@@ -390,7 +407,15 @@ fn read_capped<R: Read>(
 }
 
 #[cfg(windows)]
-fn job_for_child(child: &std::process::Child, mem_cap: u64) -> *mut core::ffi::c_void {
+fn job_for_child(
+    child: &std::process::Child,
+    mem_cap: u64,
+) -> Result<*mut core::ffi::c_void, String> {
+    // 注入点：让「Job 不可用」这条分支可被证伪。没有它，
+    // ContainmentUnavailable 就是一条永远跑不到、无人验证的死代码。
+    if std::env::var("WANCODE_PARSE_WORKER_SELFTEST").as_deref() == Ok("nojob") {
+        return Err("selftest 注入：CreateJobObject 不可用".into());
+    }
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -400,8 +425,7 @@ fn job_for_child(child: &std::process::Child, mem_cap: u64) -> *mut core::ffi::c
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
-            eprintln!("[parse-worker] CreateJobObject 失败，退化为只杀直接子进程");
-            return std::ptr::null_mut();
+            return Err("CreateJobObject 失败".into());
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         // 不加 BREAKAWAY_OK：解析 worker **必须**随应用一起死，没有任何
@@ -416,14 +440,14 @@ fn job_for_child(child: &std::process::Child, mem_cap: u64) -> *mut core::ffi::c
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         ) == 0
         {
-            eprintln!("[parse-worker] SetInformationJobObject 失败，退化为只杀直接子进程");
-            return std::ptr::null_mut();
+            close_job(job);
+            return Err("SetInformationJobObject 失败".into());
         }
         if AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
-            eprintln!("[parse-worker] AssignProcessToJobObject 失败，退化为只杀直接子进程");
-            return std::ptr::null_mut();
+            close_job(job);
+            return Err("AssignProcessToJobObject 失败（可能在禁嵌套 Job 的环境）".into());
         }
-        job
+        Ok(job)
     }
 }
 

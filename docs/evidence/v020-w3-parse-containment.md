@@ -30,7 +30,7 @@ W1 spike 用的是裸 `Child::kill()`。Windows 上那只杀直接子进程，�
 不加 `BREAKAWAY_OK`：解析 worker 必须随应用一起死，没有任何正当理由脱离
 （与更新安装器相反，那个必须活过应用退出）。
 
-## 结果：8/8
+## 结果：R1 时 8/8，R2 追加一条后 **9/9**
 
 | 断言 | 结果 |
 | --- | --- |
@@ -43,7 +43,7 @@ W1 spike 用的是裸 `Child::kill()`。Windows 上那只杀直接子进程，�
 | `oversize_input_rejected_before_spawn` | `InputTooLarge` — 根本不起进程 |
 | `missing_source_is_unreadable` | `SourceUnreadable` |
 
-`CONTAINMENT DONE pass=8 fail=0`
+`CONTAINMENT DONE pass=8 fail=0`（R1）→ `pass=9 fail=0`（R2，见下）
 
 ## 这套测试抓到的真 bug（写它就是为了抓这个）
 
@@ -67,6 +67,25 @@ PASS output_flood_is_capped_not_deadlocked — Err(OutputTooLarge { cap: 4194304
 **用时上界**才抓得到。同理，`hang` 那条同时断言 `≥2s`——只断言 `is_err()` 的话，
 一个「立刻返回错误」的 bug 也会通过，而那恰恰说明超时机制没跑。
 
+## R1 后追加（z-code #56 复核）
+
+**P1 — 这套测试在 CI 里从未运行。** `ci.yml` 的 rust job 是**白名单显式列目标**，
+而 `work_parse_containment` 不在其中。也就是说：rust ✅ 49m8s 的绿里**不含这
+8 条断言**。我核了 `ci.yml:131` 与 run `31933312549` 的日志，finding 属实。
+
+这条特别值得记：本 PR 的全部安全承诺都压在这套对抗测试上，而它不会被自动
+执行——**一个不会被自动执行的对抗测试等于没有对抗测试**。已把
+`--test work_parse_containment` 加进 CI 白名单。
+
+**P2-1 — Job 失败原本静默降级。** 建议是「至少打日志」，实际改得更硬：
+拿不到 Job 就**拒绝解析**（`ContainmentUnavailable`）。理由是 `eprintln!` 在
+GUI 进程里无人可见，而失去整树清杀意味着设计 §1.1 的「超时可杀」不再成立；
+对不受信文档降级运行，等于把遏制承诺悄悄变成尽力而为。
+
+同时加了注入点 `WANCODE_PARSE_WORKER_SELFTEST=nojob` 让这条分支**可被证伪**
+——没有注入点，`ContainmentUnavailable` 就是一条永远跑不到、无人验证的死代码。
+新增断言 `no_job_means_refuse_not_degrade`，本地 **9/9**。
+
 ## NOT-RUN / 不在范围内
 
 - **解析器未接入**：`run_request` 目前对产品路径一律有序拒收。DOCX/PDF 解析、
@@ -76,6 +95,12 @@ PASS output_flood_is_capped_not_deadlocked — Err(OutputTooLarge { cap: 4194304
   设计 §1.1 要求「资源边界实测并定档」，实测随解析器接入那一 PR 做。
 - **内存上限未做行为验证**：Job 的 `ProcessMemoryLimit` 已设，但没有写一个
   「故意分配超限」的探针去证明它真的会拦。本轮不声称它已验证。
+- **P2-2 孙进程逃逸未覆盖**（z-code 提出）：`Ended::Exited` 只保证直接子进程
+  退出，孙进程靠关 Job 句柄时的 `KILL_ON_JOB_CLOSE` 清掉。逻辑对，但**没有
+  测试**——要造一个真的起孙进程的 worker 才能证。本轮不声称已验证。
+- **P2-3 stderr 路径不对称**（z-code 提出）：stdout 超限即杀，stderr 超限仍读干。
+  worker 若往 stderr 无限写，那条读取线程会陪到墙钟。影响小（stderr 只是诊断，
+  且墙钟仍兜底），但机制确实不对称，本轮**未改**。
 - **本机构建注记**（与被测代码无关）：本机并行链接会争抢 `wancode_lib.dll`
   报 LNK1104，需 `-j 1`。已确认是**环境问题不是本 PR 引入**——已有的
   `job_breakaway` 测试目标同样复现。

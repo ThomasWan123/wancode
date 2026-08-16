@@ -128,7 +128,7 @@ jobs:
         env:
           COMPLIANCE_SUMMARY_PATH: ${{ github.workspace }}/compliance-summary-4a.json
           COMPLIANCE_SUMMARY_PATH_4B: ${{ github.workspace }}/compliance-summary-4b.json
-        run: cargo test --locked -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance --test provider_compliance_4b --test work_surface_engine
+        run: cargo test --locked -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance --test provider_compliance_4b --test work_surface_engine --test work_parse_containment
       # v0.19 2c：同一引擎连接内，Code 全局重载插件后，Chat 仍须保持
       # registry/hook 为空，且 provider 请求只能携带 web_search/web_fetch。
       - name: Chat 本地扩展 fan-out 回归
