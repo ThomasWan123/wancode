@@ -3,9 +3,8 @@
 //! 约束原文：「解析跑在独立工作进程（超时可杀），Pdfium 原生崩溃/panic
 //! 不得带倒主应用；失败即整体拒收，暂存区无半成品。」
 //!
-//! 本模块**只做外壳**，不含任何解析逻辑——解析器随后续 PR 接入
-//! `run_request` 的 dispatch。这样做是为了让「隔离是否真的成立」能被单独
-//! 评审和单独证伪，不和解析器的正确性搅在一起。
+//! 外壳与解析器分层：外壳只管进程隔离、超时、上限与协议，解析逻辑一律在
+//! `run_request` 的 dispatch 之后。DOCX 已接入（`work_docx`），**PDF 尚未**。
 //!
 //! ## 为什么外壳能保证「暂存区无半成品」
 //!
@@ -57,8 +56,17 @@ pub enum DocKind {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum ParseResponse {
-    Ok { text: String },
+    Ok { doc: ParsedDoc },
     Err { reason: String },
+}
+
+/// 解析产物。按文档类型分支——DOCX 直接给块序列，锚点铸造就在这上面做。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ParsedDoc {
+    Docx { blocks: Vec<crate::work_blocks::WorkBlock> },
+    /// 仅自测使用，产品路径不产生。
+    Echo { text: String },
 }
 
 /// 资源边界（设计 §1.1 安全面「资源边界实测并定档」）。
@@ -168,7 +176,7 @@ pub fn run_as_worker_if_requested() {
     }
 }
 
-/// 实际解析。**本 PR 尚未接入解析器**——见文件头。
+/// 实际解析。DOCX 已接入；PDF 未接入，返回有序拒收。
 fn run_request(req: &ParseRequest) -> ParseResponse {
     // 自测钩子：让隔离本身可被证伪（见 tests）。仅在 worker 进程内生效，
     // 不影响产品路径。
@@ -203,14 +211,33 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
             }
             "echo" => {
                 return ParseResponse::Ok {
-                    text: format!("echo:{}", req.source_path),
+                    doc: ParsedDoc::Echo {
+                        text: format!("echo:{}", req.source_path),
+                    },
                 }
             }
             _ => {}
         }
     }
-    ParseResponse::Err {
-        reason: "解析器尚未接入（W3-P2 外壳 PR）".to_string(),
+    match req.kind {
+        DocKind::Docx => {
+            match crate::work_docx::parse_docx(
+                std::path::Path::new(&req.source_path),
+                crate::work_docx::DocxLimits::default(),
+            ) {
+                Ok(blocks) => ParseResponse::Ok {
+                    doc: ParsedDoc::Docx { blocks },
+                },
+                // 解析器的每一种拒收都是**有序**拒收——它们说明防线按预期
+                // 工作。崩溃/挂死走的是壳那边的 Crashed/Timeout。
+                Err(e) => ParseResponse::Err {
+                    reason: e.to_string(),
+                },
+            }
+        }
+        DocKind::Pdf => ParseResponse::Err {
+            reason: "PDF 解析器尚未接入".to_string(),
+        },
     }
 }
 
@@ -220,7 +247,10 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
 ///
 /// 无论 worker 怎么死，本函数都返回；调用方**永远**只能拿到「完整成功」或
 /// 「整体拒收」，没有中间态。
-pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String, ParseFailure> {
+pub fn parse_in_worker(
+    req: &ParseRequest,
+    limits: ParseLimits,
+) -> Result<ParsedDoc, ParseFailure> {
     let meta = std::fs::metadata(&req.source_path)
         .map_err(|e| ParseFailure::SourceUnreadable(e.to_string()))?;
     if meta.len() > limits.max_input_bytes {
@@ -373,7 +403,7 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
     }
 
     match serde_json::from_str::<ParseResponse>(&stdout) {
-        Ok(ParseResponse::Ok { text }) => Ok(text),
+        Ok(ParseResponse::Ok { doc }) => Ok(doc),
         Ok(ParseResponse::Err { reason }) => Err(ParseFailure::Rejected(reason)),
         Err(e) => Err(ParseFailure::BadOutput(format!(
             "{e}（前 200 字节：{}）",
