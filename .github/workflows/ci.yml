@@ -168,6 +168,13 @@ jobs:
       - name: 校验合规证据文件
         shell: pwsh
         run: python scripts/verify_compliance_evidence.py
+      # B2：合规矩阵页必须由已提交证据重新生成而无 diff——防止手改页面
+      # 与证据脱节（页面是「OpenAI-compatible」承诺的对外形态）。
+      - name: 合规矩阵页新鲜度门
+        shell: pwsh
+        run: |
+          python scripts/test_gen_compat_matrix.py
+          python scripts/gen_compat_matrix.py --check
       - name: 上传合规摘要 artifact（4b）
         uses: actions/upload-artifact@v4
         with:
