@@ -79,19 +79,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let app_data = app.path().app_data_dir().expect("app_data_dir");
         // ① 新建 Work 会话：workspace 参数**故意传用户项目目录**，用于证明
         // Work 不会用它当 cwd（Work 必须落在自己的暂存目录）。
-        let started = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work),
-        )
-        .await;
+        let started =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work).await;
         let r = match started {
-            Ok(Ok(r)) => r,
-            other => {
-                let why = match other {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    Err(_) => "timed out after 120 seconds".to_string(),
-                    Ok(Ok(_)) => unreachable!(),
-                };
+            Ok(r) => r,
+            Err(e) => {
+                let why = format!("{e:#}");
                 check!("S7-work-start", false, why);
                 write(&format!("SMOKE DONE pass={pass} fail={fail}"));
                 std::process::exit(1);
@@ -185,18 +178,15 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
         // ④ 带**对立意图**恢复：binding 必须权威（层与工作区都不变），
         // 且不铸第二个工作区。
-        let resumed = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            spawn_start(
-                app.clone(),
-                workspace.clone(),
-                Some(r.session_id.clone()),
-                NewSurfaceIntent::Code, // 故意对立
-            ),
+        let resumed = spawn_start(
+            app.clone(),
+            workspace.clone(),
+            Some(r.session_id.clone()),
+            NewSurfaceIntent::Code, // 故意对立
         )
         .await;
         let resume_ok = match &resumed {
-            Ok(Ok(rr)) => {
+            Ok(rr) => {
                 rr.session_id == r.session_id
                     && rr.surface_kind == crate::surface::SurfaceKind::Work
                     && rr.workspace_id.as_deref() == Some(ws_id.as_str())
@@ -205,12 +195,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             _ => false,
         };
         let resume_detail = match &resumed {
-            Ok(Ok(rr)) => format!(
+            Ok(rr) => format!(
                 "kind={:?} ws={:?} cwd={}",
                 rr.surface_kind, rr.workspace_id, rr.cwd
             ),
-            Ok(Err(e)) => format!("err={e:#}"),
-            Err(_) => "timed out".to_string(),
+            Err(e) => format!("err={e:#}"),
         };
         check!("S7-work-resume-opposing", resume_ok, resume_detail);
 
@@ -243,13 +232,10 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 改成 Cowork 再恢复，cwd 会变回项目目录，引擎直接 FS_NOT_FOUND，
         // 仍然到不了门。因此这里**在项目目录里新建一个 Code 会话**（cwd 与
         // 恢复时一致），再把它的 sidecar 翻成 Cowork。
-        let code_started = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Code),
-        )
-        .await;
+        let code_started =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Code).await;
         let blocked_sid = match &code_started {
-            Ok(Ok(cr)) => cr.session_id.clone(),
+            Ok(cr) => cr.session_id.clone(),
             _ => String::new(),
         };
         let cowork_json = serde_json::json!({
@@ -262,14 +248,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let sidecar = surface.gate().store().path_for(&blocked_sid);
         let pre = std::fs::write(&sidecar, cowork_json.as_bytes());
         let ws_dirs_before = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            spawn_start(
-                app.clone(),
-                workspace.clone(),
-                Some(blocked_sid.clone()),
-                NewSurfaceIntent::Code,
-            ),
+        let blocked = spawn_start(
+            app.clone(),
+            workspace.clone(),
+            Some(blocked_sid.clone()),
+            NewSurfaceIntent::Code,
         )
         .await;
         let after_handle = {
@@ -279,9 +262,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 锁住失败**边界**：必须是 launchability 门拒绝（SURFACE_NOT_LAUNCHABLE），
         // 而不是 LoadSession 早失败或任何别的原因。
         let err_text = match &blocked {
-            Ok(Err(e)) => format!("{e:#}"),
-            Ok(Ok(_)) => "unexpected success".to_string(),
-            Err(_) => "timeout".to_string(),
+            Err(e) => format!("{e:#}"),
+            Ok(_) => "unexpected success".to_string(),
         };
         let rejected_at_gate = err_text.contains("SURFACE_NOT_LAUNCHABLE");
         // 后置条件：**没有任何 handle**（失败启动先拆旧会话、且绝不发布新
@@ -302,15 +284,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let blocked_marker = std::fs::create_dir_all(&marker_path).is_ok();
         let bindings_before = dir_entry_names(surface.gate().store().root_dir());
         let ws_before2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
-        let fresh_fail = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work),
-        )
-        .await;
+        let fresh_fail =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work).await;
         let fresh_err = match &fresh_fail {
-            Ok(Err(e)) => format!("{e:#}"),
-            Ok(Ok(_)) => "unexpected success".to_string(),
-            Err(_) => "timeout".to_string(),
+            Err(e) => format!("{e:#}"),
+            Ok(_) => "unexpected success".to_string(),
         };
         let failed_at_marker = fresh_err.contains("CRASH_RECOVERY_MARKER_FAILED");
         let handle_after_fresh_fail = {
@@ -349,24 +327,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
     // ── S1 会话启动（默认模型）──────────────────────────────────────
     write("SMOKE S1-start BEGIN");
-    let started = match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        spawn_start(
-            app.clone(),
-            workspace.clone(),
-            None,
-            crate::surface_policy::NewSurfaceIntent::Code,
-        ),
+    let started = spawn_start(
+        app.clone(),
+        workspace.clone(),
+        None,
+        crate::surface_policy::NewSurfaceIntent::Code,
     )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            check!("S1-start", false, "timed out after 120 seconds");
-            write(&format!("SMOKE DONE pass={pass} fail={fail}"));
-            std::process::exit(1);
-        }
-    };
+    .await;
     let (sid, cwd) = match &started {
         Ok(r) => {
             check!("S1-start", true, format!("session={}", r.session_id));
@@ -566,20 +533,16 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         } else {
             // 新会话（spawn_start 与 start_inner 一样会拆掉 S6 的会话——
             // 套件尾声，无后续依赖）。
-            let s9 = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                spawn_start(
-                    app.clone(),
-                    workspace.clone(),
-                    None,
-                    crate::surface_policy::NewSurfaceIntent::Code,
-                ),
+            let s9 = spawn_start(
+                app.clone(),
+                workspace.clone(),
+                None,
+                crate::surface_policy::NewSurfaceIntent::Code,
             )
             .await;
             let (s9_sid, s9_err) = match s9 {
-                Ok(Ok(r)) => (r.session_id.clone(), String::new()),
-                Ok(Err(e)) => (String::new(), format!("{e:#}")),
-                Err(_) => (String::new(), "session start timed out".to_string()),
+                Ok(r) => (r.session_id.clone(), String::new()),
+                Err(e) => (String::new(), format!("{e:#}")),
             };
             if s9_sid.is_empty() {
                 check!("S9-memory-flush", false, format!("session start: {s9_err}"));
@@ -613,7 +576,7 @@ async fn spawn_start(
     resume: Option<String>,
     intent: crate::surface_policy::NewSurfaceIntent,
 ) -> Result<crate::agent::StartResult, String> {
-    tauri::async_runtime::spawn(async move {
+    let mut task = tauri::async_runtime::spawn(async move {
         let state = app.state::<crate::agent::AgentState>();
         // Code 走 canonical 包装器（顺带保活 start_inner——否则它在 autotest
         // 全走 spawn_start 后变成死代码，clippy -D warnings 会拦）。
@@ -634,9 +597,18 @@ async fn spawn_start(
             .await
             .map_err(|e| format!("{e:#}")),
         }
-    })
-    .await
-    .map_err(|e| format!("start task join: {e}"))?
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(120), &mut task).await {
+        Ok(joined) => joined.map_err(|e| format!("start task join: {e}"))?,
+        Err(_) => {
+            // Dropping a Tokio JoinHandle detaches the task. Explicit abort is
+            // required or a timed-out session start can keep mutating state and
+            // make later smoke assertions nondeterministic.
+            task.abort();
+            let _ = task.await;
+            Err("timed out after 120 seconds (start task aborted)".to_string())
+        }
+    }
 }
 
 /// 目录下的条目名（排序后可比）。用于「未被改动」「无新增」类断言。
