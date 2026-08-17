@@ -13,7 +13,7 @@ WANCODE_DOCX_SAMPLE="<path>\某文档.docx" cargo test -p wancode --lib real_sam
 WANCODE_DOCX_SAMPLE="<path>\某文档.docx" cargo test -p wancode --test work_parse_containment
 ```
 
-## 相对 W3 spike 补上的三件事
+## 相对 W3 spike 补上的事
 
 spike 证的是「能不能抽出来」，产品代码还得证「抽不出来时会不会安静地出错」。
 
@@ -30,10 +30,17 @@ spike 证的是「能不能抽出来」，产品代码还得证「抽不出来�
 **③ zip 炸弹两道闸。** 解压前先看声明的解压后体积；解压时再按上限截断读取
 （读 `cap+1` 字节，读满即超限）。第二道是必需的：声明值是攻击者可控的。
 
+**④ 按命名空间 URI 认元素（#57 R1-P1）。** 字面匹配 `w:p`/`w:r`/`w:t` 会把
+前缀别名或默认 xmlns 的合法 WordprocessingML 抽成 `Ok([])`，worker 再序列化成
+空 `ParsedDoc::Docx`。改为 `NsReader` 按
+`http://schemas.openxmlformats.org/wordprocessingml/2006/main` 的 local name
+认 `p`/`r`/`t`；`w:t` 内 CDATA 当正文；从未见过 Word NS 元素则
+`UnrecognizedWordprocessing`，绝不把「没认出来」当成空文档。
+
 另外，**路径穿越在这里结构性不适用**：我们从不落盘，只按精确名
 `word/document.xml` 取一个条目读进内存。没有写路径，`../` 无处施展。
 
-## 单元断言 7/7
+## 单元断言 12/12
 
 | 断言 | 意图 |
 | --- | --- |
@@ -44,8 +51,18 @@ spike 证的是「能不能抽出来」，产品代码还得证「抽不出来�
 | `blank_paragraph_skipped_but_index_advances` | 空段不产块，但**段号照进**——否则锚点指错段 |
 | `block_cap_is_enforced` | 块数上限 |
 | `surrogate_pair_counts_as_two_utf16_units` | emoji = 2 个 UTF-16 单元；按 char 计会整体错位 |
+| `alternate_prefix_bound_to_word_ns_is_parsed` | `word:` 绑到标准 Word NS 必须抽出正文，不能 `Ok([])` |
+| `default_xmlns_word_ns_is_parsed` | 默认 xmlns、无前缀的合法结构必须抽出 |
+| `cdata_inside_t_is_text_not_dropped` | `w:t` 内 CDATA 是正文 |
+| `no_word_namespace_is_rejected_not_empty_ok` | 非 Word XML → `UnrecognizedWordprocessing`，禁止 `Ok([])` |
+| `wrong_namespace_on_w_prefix_is_rejected` | 字面 `w:*` 绑错 NS → 拒收，禁止误抽 |
 
-全量：`264 passed; 0 failed`。clippy `-D warnings` exit 0。
+RED-first：上述 5 条新断言在字面 `w:*` 匹配器上 **5 failed**（交替前缀/`Ok([])`、CDATA 空块、错 NS 误抽 `hi`）。改 URI 匹配后 12/12。
+
+全量：`269 passed; 0 failed; 1 ignored`。clippy `-D warnings` exit 0。
+本轮未重跑 `work_parse_containment`（沙箱 target 把 `panic=abort` 的 dev
+产物和 `panic=unwind` 的 test 产物混在一起，编不过；与本次解析器改动
+无关）。worker 仍只调用 `parse_docx`，P1-1 的回归在 `work_docx` 单元里。
 
 ## 真实样本（本地，非 CI）
 
@@ -83,3 +100,7 @@ REAL DOCX 锚点：铸造=189 跨独立再解析取回成功=189
 - **`w:tab` / `w:br` 等不产文本的元素**：当前不产生任何字符，因此不影响
   tiling。但这意味着抽取文本里**没有制表/换行信息**——对锚点无害，对将来
   的只读查看器排版还原有影响，届时需单独设计。
+- **本 PR 的 GitHub CI 在改 base 为 main 之前不会跑**（#57 R1-P2）：`ci.yml`
+  只触发 `pull_request: branches: [main]`，当前 base 是 #56 分支。ACCEPT
+  需要 exact-head 的 `versions`/`frontend`/`rust`，因此本 head **不能**被
+  ACCEPT。等 #56 合并后改 base、等三项检查绿，再发一轮 READY。
