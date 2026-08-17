@@ -98,3 +98,9 @@ harness = false
 [[test]]
 name = "work_surface_engine"
 harness = false
+
+# W3-P2 崩溃遏制：worker 是自我重入的（父起 current_exe()），worker 分支
+# 必须在 main 里最先分流，标准 harness 承载不了——与 job_breakaway 同因。
+[[test]]
+name = "work_parse_containment"
+harness = false

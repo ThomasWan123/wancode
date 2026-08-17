@@ -18,6 +18,7 @@ pub mod work_staging;
 pub mod work_import;
 pub mod work_anchor;
 pub mod work_blocks;
+pub mod work_parse_worker;
 #[cfg(test)]
 mod work_seams;
 #[cfg(test)]
@@ -107,6 +108,9 @@ fn setup_job_object() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 最早处：若本进程是解析 worker，跑完即退出，绝不建应用 Job、不起
+    // tauri、不碰任何应用状态。它是个哑管道（work_parse_worker 文件头）。
+    work_parse_worker::run_as_worker_if_requested();
     #[cfg(windows)]
     setup_job_object();
     // 引擎的 worktree DB（xai-fast-worktree::resolve_grok_home）只认
