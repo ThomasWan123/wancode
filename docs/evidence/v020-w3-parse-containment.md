@@ -30,20 +30,22 @@ W1 spike 用的是裸 `Child::kill()`。Windows 上那只杀直接子进程，�
 不加 `BREAKAWAY_OK`：解析 worker 必须随应用一起死，没有任何正当理由脱离
 （与更新安装器相反，那个必须活过应用退出）。
 
-## 结果：R1 时 8/8，R2 追加一条后 **9/9**
+## 结果：R3 后 **10/10**
 
 | 断言 | 结果 |
 | --- | --- |
 | `positive_control_echo` | Ok — **正对照**，没有它「全判失败」会看起来全绿 |
 | `no_parser_yet_is_orderly_rejection` | `Rejected` — 证明 dispatch 真走到了，不是崩在半路 |
-| `abort_is_contained_as_crashed` | `Crashed { code: -1073740791 }`（0xC0000409），父进程存活 |
-| `hang_is_killed_at_deadline` | `Timeout{2s}`，用时 2.007s |
-| `non_json_output_is_bad_output` | `BadOutput` — 正常退出但协议被破坏，不得当成功 |
-| `output_flood_is_capped_not_deadlocked` | `OutputTooLarge`，用时 **15.9ms** |
-| `oversize_input_rejected_before_spawn` | `InputTooLarge` — 根本不起进程 |
+| `abort_is_contained_as_crashed` | `Crashed`，父进程存活 |
+| `hang_is_killed_at_deadline` | `Timeout{2s}` |
+| `non_json_output_is_bad_output` | `BadOutput` |
+| `output_flood_is_capped_not_deadlocked` | `OutputTooLarge` |
+| `oversize_input_rejected_before_spawn` | `InputTooLarge` |
 | `missing_source_is_unreadable` | `SourceUnreadable` |
+| `no_job_means_refuse_not_degrade` | `ContainmentUnavailable` |
+| `wait_error_still_reaps_worker` | `SpawnFailed` + hang worker PID 已死，远早于墙钟 |
 
-`CONTAINMENT DONE pass=8 fail=0`（R1）→ `pass=9 fail=0`（R2，见下）
+CI（head `fe5c64a7` 当时的 9 条，run [`31942677745`](https://github.com/ThomasWan123/wancode/actions/runs/31942677745)）：versions ✅ / frontend ✅ / rust ✅，rust 日志含 `work_parse_containment` 与 `no_job_means_refuse_not_degrade`。R3 新断言随本 head 的 rust job 跑。
 
 ## 这套测试抓到的真 bug（写它就是为了抓这个）
 
@@ -84,7 +86,22 @@ GUI 进程里无人可见，而失去整树清杀意味着设计 §1.1 的「超
 
 同时加了注入点 `WANCODE_PARSE_WORKER_SELFTEST=nojob` 让这条分支**可被证伪**
 ——没有注入点，`ContainmentUnavailable` 就是一条永远跑不到、无人验证的死代码。
-新增断言 `no_job_means_refuse_not_degrade`，本地 **9/9**。
+新增断言 `no_job_means_refuse_not_degrade`，本地 **9/9**。CI 已在
+run `31942677745` 上跑到这条（R2 P2 所说「证据档仍写 NOT-RUN」已过时，本轮改掉）。
+
+## R3（z-code #56 复核 head `fe5c64a7`）
+
+**P1 — `try_wait` 出错绕过整条清理路径。** 属实。`child.try_wait()` 返回 `Err`
+时旧代码直接 `return SpawnFailed`，不 `terminate_job`、不 `kill`/`wait`、不
+`close_job`、不 join 读线程。等待循环出错会留下 worker、泄漏 Job 句柄、读线程
+堵在管道上——违反「无论 worker 怎么死都返回且整树受控」。
+
+修法：等待错误与超时/超限走同一出口（杀 Job、杀/等子进程、关 Job、join 读线程），
+再返回 `SpawnFailed`。注入点是父进程专用的
+`WANCODE_PARSE_PARENT_SELFTEST=waiterr`（不传给 worker，避免和 hang 抢同一个
+变量）。hang worker 把 PID 写到文件，断言返回后该 PID 已死。
+
+反向路径：真正的 `try_wait` 成功退出仍走 `Ended::Exited`，正对照 echo 覆盖。
 
 ## NOT-RUN / 不在范围内
 

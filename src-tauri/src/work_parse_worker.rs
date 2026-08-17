@@ -176,9 +176,16 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
         match mode.as_str() {
             // 原生崩溃的替身：非正常终止，父进程必须报 Crashed 而非挂死。
             "abort" => std::process::abort(),
-            "hang" => loop {
-                std::thread::sleep(Duration::from_secs(3600));
-            },
+            "hang" => {
+                // 给父进程自测写 PID：waiterr 路径必须能证明挂死 worker 被清掉，
+                // 而不是只返回错误、进程还在跑（#56 R2-P1）。
+                if let Ok(p) = std::env::var("WANCODE_PARSE_WORKER_PIDFILE") {
+                    let _ = std::fs::write(p, std::process::id().to_string());
+                }
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
             "garbage" => {
                 print!("这不是 JSON");
                 let _ = std::io::stdout().flush();
@@ -236,6 +243,11 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
     if let Ok(v) = std::env::var("WANCODE_PARSE_WORKER_SELFTEST") {
         cmd.env("WANCODE_PARSE_WORKER_SELFTEST", v);
     }
+    // 仅自测：让 hang worker 把自己的 PID 写到文件，供父进程断言清杀。
+    // 产品路径不设此变量。不要把 PARENT_SELFTEST 传给 worker。
+    if let Ok(v) = std::env::var("WANCODE_PARSE_WORKER_PIDFILE") {
+        cmd.env("WANCODE_PARSE_WORKER_PIDFILE", v);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| ParseFailure::SpawnFailed(e.to_string()))?;
@@ -287,6 +299,7 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
         Exited(std::process::ExitStatus),
         TimedOut,
         OutputOverCap,
+        WaitFailed(String),
     }
 
     let start = Instant::now();
@@ -298,10 +311,19 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
             let _ = child.wait();
             break Ended::OutputOverCap;
         }
-        match child.try_wait() {
+        match poll_worker(&mut child) {
             Ok(Some(st)) => break Ended::Exited(st),
             Ok(None) => {}
-            Err(e) => return Err(ParseFailure::SpawnFailed(e.to_string())),
+            Err(e) => {
+                // 等待出错也必须走同一清理出口：杀 Job、杀/等子进程。
+                // 旧实现这里直接 return，Job 句柄泄漏、worker 可能还在跑、
+                // 读取线程还堵在管道上（#56 R2-P1）。
+                #[cfg(windows)]
+                terminate_job(job);
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ended::WaitFailed(e.to_string());
+            }
         }
         if start.elapsed() >= limits.wall_clock {
             #[cfg(windows)]
@@ -332,6 +354,7 @@ pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<String
                 after: limits.wall_clock,
             })
         }
+        Ended::WaitFailed(e) => return Err(ParseFailure::SpawnFailed(e)),
         Ended::Exited(st) => st,
     };
 
@@ -404,6 +427,18 @@ fn read_capped<R: Read>(
         return Err("OVER_CAP".into());
     }
     String::from_utf8(buf).map_err(|e| format!("输出非 UTF-8：{e}"))
+}
+
+/// 轮询 worker 是否已退出。父进程自测可注入失败，走与超时/超限同一清理出口。
+fn poll_worker(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    if std::env::var("WANCODE_PARSE_PARENT_SELFTEST").as_deref() == Ok("waiterr") {
+        // 给 hang worker 一点时间把 PID 落到文件，否则断言「进程已死」没有 PID。
+        std::thread::sleep(Duration::from_millis(200));
+        return Err(std::io::Error::other("selftest 注入：try_wait 失败"));
+    }
+    child.try_wait()
 }
 
 #[cfg(windows)]

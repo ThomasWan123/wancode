@@ -34,6 +34,30 @@ fn with_mode<T>(mode: Option<&str>, f: impl FnOnce() -> T) -> T {
     out
 }
 
+#[cfg(windows)]
+fn process_still_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(windows))]
+fn process_still_running(_pid: u32) -> bool {
+    false
+}
+
 fn main() {
     // 必须最先：本进程可能是被父进程重入起来的 worker。
     run_as_worker_if_requested();
@@ -156,6 +180,51 @@ fn main() {
         "no_job_means_refuse_not_degrade",
         matches!(&r, Err(ParseFailure::ContainmentUnavailable(_))),
         format!("{r:?}"),
+    );
+
+    // ⑩ try_wait 出错必须走同一清理出口（#56 R2-P1）。
+    //    hang worker 会一直活着：旧实现直接 return SpawnFailed，不杀 Job、
+    //    不 join 读线程，worker 残留。新实现必须 SpawnFailed **且** PID 已死，
+    //    且远早于墙钟（证明不是被 Timeout 兜住的）。
+    let pidfile = std::env::temp_dir().join(format!(
+        "wancode-waiterr-{}.pid",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&pidfile);
+    let limits = ParseLimits {
+        wall_clock: Duration::from_secs(30),
+        ..ParseLimits::default()
+    };
+    let t0 = Instant::now();
+    let r = {
+        unsafe {
+            std::env::set_var("WANCODE_PARSE_WORKER_SELFTEST", "hang");
+            std::env::set_var("WANCODE_PARSE_PARENT_SELFTEST", "waiterr");
+            std::env::set_var("WANCODE_PARSE_WORKER_PIDFILE", &pidfile);
+        }
+        let out = parse_in_worker(&req(), limits);
+        unsafe {
+            std::env::remove_var("WANCODE_PARSE_WORKER_SELFTEST");
+            std::env::remove_var("WANCODE_PARSE_PARENT_SELFTEST");
+            std::env::remove_var("WANCODE_PARSE_WORKER_PIDFILE");
+        }
+        out
+    };
+    let took = t0.elapsed();
+    let pid = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let _ = std::fs::remove_file(&pidfile);
+    let worker_gone = match pid {
+        Some(p) => !process_still_running(p),
+        None => false,
+    };
+    check(
+        "wait_error_still_reaps_worker",
+        matches!(&r, Err(ParseFailure::SpawnFailed(e)) if e.contains("try_wait"))
+            && took < Duration::from_secs(5)
+            && worker_gone,
+        format!("{r:?} 用时={took:?} pid={pid:?} worker_gone={worker_gone}（必须 SpawnFailed、远早于 30s 墙钟、且 hang worker PID 已死）"),
     );
 
     println!("\nCONTAINMENT DONE pass={pass} fail={fail}");
