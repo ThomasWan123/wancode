@@ -4,7 +4,7 @@
 //! run、`<w:t>` 是文本。一句话常被拆进多个 run（格式一变就断开）——这正是
 //! 锚点要记 `run_ordinals` 的原因。
 //!
-//! ## 相对 spike 补上的三件事
+//! ## 相对 spike 补上的事
 //!
 //! **① run 之外的文本。** spike 无条件把 `<w:t>` 的文本追加进 `raw`，不管
 //! 它是否在某个 `<w:r>` 里。真遇到这种结构时 `runs` 会**留缺口**，而
@@ -18,6 +18,13 @@
 //!
 //! **③ zip 炸弹。** 解压**前**先看声明的解压后体积，超限即拒；解压时再按
 //! 上限截断读取，双保险（声明值是攻击者可控的）。
+//!
+//! **④ 按命名空间 URI 认元素，而不是字面前缀 `w:`。** XML 前缀是别名。
+//! 合法 WordprocessingML 可以把标准 Word NS 绑到 `word:`、默认 xmlns、或
+//! 任何前缀；只匹配 `w:p`/`w:r`/`w:t` 会把整篇抽成 `Ok([])`，worker 再
+//! 序列化成空 `ParsedDoc::Docx`。CDATA 同理：只收 `Event::Text` 会把
+//! `w:t` 里的 CDATA 丢掉。未见过 Word NS 元素时有序拒收
+//! （`UnrecognizedWordprocessing`），绝不把「没认出来」当成空文档。
 //!
 //! ## 路径穿越为何不适用
 //!
@@ -71,6 +78,10 @@ pub enum DocxError {
     MalformedBlock { path: String },
     TooManyBlocks { cap: usize },
     BlockTooLong { path: String, cap: usize },
+    /// `document.xml` 里从未出现绑定到 WordprocessingML 标准命名空间的元素。
+    /// 常见原因：前缀是别名但解析器按字面 `w:*` 匹配、或根本不是 Word 文档。
+    /// 绝不能当成「空文档」成功返回——那会把合法正文静默吃掉。
+    UnrecognizedWordprocessing,
 }
 
 impl std::fmt::Display for DocxError {
@@ -98,6 +109,10 @@ impl std::fmt::Display for DocxError {
             Self::BlockTooLong { path, cap } => {
                 write!(f, "块 {path} 长度超过上限 {cap}")
             }
+            Self::UnrecognizedWordprocessing => write!(
+                f,
+                "document.xml 不含 WordprocessingML 标准命名空间元素，拒收（避免把合法正文当成空文档）"
+            ),
         }
     }
 }
@@ -144,11 +159,67 @@ pub fn parse_docx(
     parse_document_xml(&xml, limits)
 }
 
+/// WordprocessingML 主命名空间。前缀是别名，匹配必须看 URI。
+const WORD_NS: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+fn bound_wml(ns: &quick_xml::name::ResolveResult<'_>) -> bool {
+    matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.0 == WORD_NS)
+}
+
+fn ingest_text(
+    s: &str,
+    in_text: bool,
+    cur: &mut Option<WorkBlock>,
+    run_start: Option<usize>,
+    dropped_outside_run: &mut usize,
+) {
+    if in_text {
+        match (cur.as_mut(), run_start) {
+            // 只在 run 内累计：这样 runs 天然铺满 raw。
+            (Some(b), Some(_)) => b.raw.push_str(s),
+            // 段落内、run 外，或段落外的 w:t：记账，稍后整篇拒收。
+            (Some(_), None) | (None, _) => *dropped_outside_run += s.chars().count(),
+        }
+    } else if s.chars().any(|c| !c.is_whitespace()) {
+        // 不在 w:t 里的非空白文本/CDATA：不是「标签间空白」，不能静默丢掉。
+        *dropped_outside_run += s.chars().count();
+    }
+}
+
+fn finish_paragraph(
+    cur: &mut Option<WorkBlock>,
+    para_idx: &mut usize,
+    blocks: &mut Vec<WorkBlock>,
+    limits: &DocxLimits,
+) -> Result<(), DocxError> {
+    if let Some(b) = cur.take() {
+        if !b.raw.trim().is_empty() {
+            if b.len_utf16() > limits.max_block_utf16 {
+                return Err(DocxError::BlockTooLong {
+                    path: b.path,
+                    cap: limits.max_block_utf16,
+                });
+            }
+            if !b.is_well_formed() {
+                return Err(DocxError::MalformedBlock { path: b.path });
+            }
+            if blocks.len() >= limits.max_blocks {
+                return Err(DocxError::TooManyBlocks {
+                    cap: limits.max_blocks,
+                });
+            }
+            blocks.push(b);
+        }
+        *para_idx += 1;
+    }
+    Ok(())
+}
+
 /// 与 IO 分离，便于直接喂构造出的 XML 做对抗测试。
 pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock>, DocxError> {
     use quick_xml::events::Event;
 
-    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut reader = quick_xml::NsReader::from_str(xml);
     let mut buf = Vec::new();
     let mut blocks: Vec<WorkBlock> = Vec::new();
     let mut para_idx = 0usize;
@@ -157,85 +228,100 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
     let mut run_start: Option<usize> = None;
     // run 之外被丢弃的字符数——非零即整篇拒收（见文件头 ①）。
     let mut dropped_outside_run = 0usize;
+    // 是否见过绑定到 Word NS 的元素。未见过却返回 Ok([]) 就是把合法正文
+    // 静默吃掉（#57 R1-P1）。
+    let mut saw_word_ns = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
-            // 实体展开炸弹的前提是 DTD。见到就拒，不试图「安全地」处理它。
-            Ok(Event::DocType(_)) => return Err(DocxError::DoctypeRejected),
-            Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"w:p" => {
-                    cur = Some(WorkBlock {
-                        path: format!("body/p[{para_idx}]"),
-                        raw: String::new(),
-                        runs: Vec::new(),
-                    });
-                }
-                b"w:r" => {
-                    if let Some(b) = &cur {
-                        run_start = Some(b.len_utf16());
-                    }
-                }
-                b"w:t" => in_text = true,
-                _ => {}
-            },
-            Ok(Event::Text(t)) => {
-                if in_text {
-                    let s = t
-                        .unescape()
-                        .map_err(|e| DocxError::XmlError(e.to_string()))?;
-                    match (&mut cur, run_start) {
-                        // 只在 run 内累计：这样 runs 天然铺满 raw。
-                        (Some(b), Some(_)) => b.raw.push_str(&s),
-                        // 段落内、run 外的正文：记账，稍后整篇拒收。
-                        (Some(_), None) => dropped_outside_run += s.chars().count(),
-                        // 段落外的 w:t：同样记账，不静默吞掉。
-                        (None, _) => dropped_outside_run += s.chars().count(),
+        match reader.read_resolved_event_into(&mut buf) {
+            Ok((_, Event::DocType(_))) => return Err(DocxError::DoctypeRejected),
+            Ok((ns, Event::Start(e))) => {
+                let name = e.local_name();
+                let local = name.as_ref();
+                if bound_wml(&ns) {
+                    saw_word_ns = true;
+                    match local {
+                        b"p" => {
+                            cur = Some(WorkBlock {
+                                path: format!("body/p[{para_idx}]"),
+                                raw: String::new(),
+                                runs: Vec::new(),
+                            });
+                        }
+                        b"r" => {
+                            if let Some(b) = &cur {
+                                run_start = Some(b.len_utf16());
+                            }
+                        }
+                        b"t" => in_text = true,
+                        _ => {}
                     }
                 }
             }
-            Ok(Event::End(e)) => match e.name().as_ref() {
-                b"w:t" => in_text = false,
-                b"w:r" => {
-                    if let (Some(b), Some(st)) = (&mut cur, run_start.take()) {
-                        let en = b.len_utf16();
-                        // 零宽 run（无文本）不记：记了会破坏「每条非空」。
-                        if en > st {
-                            b.runs.push([st, en]);
-                        }
-                    }
-                }
-                b"w:p" => {
-                    if let Some(b) = cur.take() {
-                        if !b.raw.trim().is_empty() {
-                            if b.len_utf16() > limits.max_block_utf16 {
-                                return Err(DocxError::BlockTooLong {
-                                    path: b.path,
-                                    cap: limits.max_block_utf16,
-                                });
-                            }
-                            // 解析器 bug 当场拦，不许漏进锚点层。
-                            if !b.is_well_formed() {
-                                return Err(DocxError::MalformedBlock { path: b.path });
-                            }
-                            if blocks.len() >= limits.max_blocks {
-                                return Err(DocxError::TooManyBlocks {
-                                    cap: limits.max_blocks,
-                                });
-                            }
-                            blocks.push(b);
-                        }
+            Ok((ns, Event::Empty(e))) => {
+                let name = e.local_name();
+                let local = name.as_ref();
+                if bound_wml(&ns) {
+                    saw_word_ns = true;
+                    if local == b"p" {
                         para_idx += 1;
                     }
                 }
-                _ => {}
-            },
-            Ok(Event::Eof) => break,
+            }
+            Ok((_, Event::Text(t))) => {
+                let s = t
+                    .unescape()
+                    .map_err(|e| DocxError::XmlError(e.to_string()))?;
+                ingest_text(
+                    &s,
+                    in_text,
+                    &mut cur,
+                    run_start,
+                    &mut dropped_outside_run,
+                );
+            }
+            Ok((_, Event::CData(t))) => {
+                let s = t
+                    .decode()
+                    .map_err(|e| DocxError::XmlError(e.to_string()))?;
+                ingest_text(
+                    &s,
+                    in_text,
+                    &mut cur,
+                    run_start,
+                    &mut dropped_outside_run,
+                );
+            }
+            Ok((ns, Event::End(e))) => {
+                let name = e.local_name();
+                let local = name.as_ref();
+                if bound_wml(&ns) {
+                    match local {
+                        b"t" => in_text = false,
+                        b"r" => {
+                            if let (Some(b), Some(st)) = (&mut cur, run_start.take()) {
+                                let en = b.len_utf16();
+                                // 零宽 run（无文本）不记：记了会破坏「每条非空」。
+                                if en > st {
+                                    b.runs.push([st, en]);
+                                }
+                            }
+                        }
+                        b"p" => finish_paragraph(&mut cur, &mut para_idx, &mut blocks, &limits)?,
+                        _ => {}
+                    }
+                }
+            }
+            Ok((_, Event::Eof)) => break,
             Err(e) => return Err(DocxError::XmlError(e.to_string())),
             _ => {}
         }
         buf.clear();
     }
 
+    if !saw_word_ns {
+        return Err(DocxError::UnrecognizedWordprocessing);
+    }
     if dropped_outside_run > 0 {
         return Err(DocxError::TextOutsideRun {
             dropped_chars: dropped_outside_run,
@@ -249,7 +335,9 @@ mod tests {
     use super::*;
 
     fn p(inner: &str) -> String {
-        format!(r#"<w:document><w:body>{inner}</w:body></w:document>"#)
+        format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{inner}</w:body></w:document>"#
+        )
     }
 
     /// 正对照：两个 run 拼成一段，runs 必须**铺满**。
@@ -324,6 +412,62 @@ mod tests {
         let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
         assert_eq!(b[0].runs, vec![[0, 2], [2, 3]]);
         assert!(b[0].is_well_formed());
+    }
+
+    const WML_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    /// 前缀是别名：`word:` 绑定到标准 Word NS。按字面匹配 `w:p` 会抽成空文档。
+    #[test]
+    fn alternate_prefix_bound_to_word_ns_is_parsed() {
+        let xml = format!(
+            r#"<word:document xmlns:word="{WML_NS}"><word:body><word:p><word:r><word:t>你好</word:t></word:r></word:p></word:body></word:document>"#
+        );
+        let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].raw, "你好");
+        assert_eq!(b[0].runs, vec![[0, 2]]);
+        assert!(b[0].is_well_formed());
+    }
+
+    /// 默认命名空间绑定到 Word NS、元素无前缀。同样是合法 WordprocessingML。
+    #[test]
+    fn default_xmlns_word_ns_is_parsed() {
+        let xml = format!(
+            r#"<document xmlns="{WML_NS}"><body><p><r><t>世界</t></r></p></body></document>"#
+        );
+        let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(b[0].raw, "世界");
+        assert!(b[0].is_well_formed());
+    }
+
+    /// CDATA 在 `w:t` 内是正文，不是「不支持的事件」该被丢掉。
+    #[test]
+    fn cdata_inside_t_is_text_not_dropped() {
+        let xml = p(r#"<w:p><w:r><w:t><![CDATA[cdata正文]]></w:t></w:r></w:p>"#);
+        let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(b[0].raw, "cdata正文");
+        assert_eq!(b[0].runs, vec![[0, 7]]);
+        assert!(b[0].is_well_formed());
+    }
+
+    /// 不含 Word NS 的 XML 必须有序拒收，绝不能 `Ok([])`。
+    #[test]
+    fn no_word_namespace_is_rejected_not_empty_ok() {
+        let xml = r#"<root><p><r><t>hello</t></r></p></root>"#;
+        assert_eq!(
+            parse_document_xml(xml, DocxLimits::default()),
+            Err(DocxError::UnrecognizedWordprocessing)
+        );
+    }
+
+    /// `w` 前缀绑到别的 NS：字面 `w:p` 会误抽，按 URI 则应拒收。
+    #[test]
+    fn wrong_namespace_on_w_prefix_is_rejected() {
+        let xml = r#"<w:document xmlns:w="http://example.com/not-word"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#;
+        assert_eq!(
+            parse_document_xml(xml, DocxLimits::default()),
+            Err(DocxError::UnrecognizedWordprocessing)
+        );
     }
 }
 
