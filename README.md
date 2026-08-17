@@ -37,7 +37,7 @@ Work and Cowork surfaces remain on the roadmap. They were intentionally deferred
 
 ## Highlights
 
-- **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints.
+- **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints, with a published [provider compatibility matrix](docs/provider-compatibility.md) generated from CI evidence.
 - **Streaming conversations** — Markdown rendering, collapsible reasoning, and tool-call cards.
 - **Approval controls** — ask, allow for the current session, or reject sensitive actions.
 - **Inline diff review** — inspect proposed file changes before they are written.

@@ -1,0 +1,41 @@
+{
+  "comment": "B2 input: shared mock contract evidence and real-provider evidence are separate. A provider row may be VERIFIED, PARTIAL, or NOT-RUN; links are validated by the generator.",
+  "providers": [
+    {
+      "name": "Zhipu GLM Coding Plan",
+      "preset_id": "glm-coding",
+      "endpoint": "open.bigmodel.cn/api/coding/paas/v4",
+      "live_status": "PARTIAL",
+      "live_verification": "Dogfood/release log records real GLM use and smoke through v0.18.9; provider-isolated 4a/4b execution is NOT-RUN.",
+      "live_evidence": [
+        { "label": "dogfood and release log", "href": "dogfood-log.md" }
+      ]
+    },
+    {
+      "name": "Zhipu Open Platform (pay-as-you-go)",
+      "preset_id": "glm-open",
+      "endpoint": "open.bigmodel.cn/api/paas/v4",
+      "live_status": "NOT-RUN",
+      "live_verification": "Separate live endpoint verification has not been run.",
+      "live_evidence": []
+    },
+    {
+      "name": "DeepSeek",
+      "preset_id": "deepseek",
+      "endpoint": "api.deepseek.com/v1",
+      "live_status": "PARTIAL",
+      "live_verification": "The v0.18.9 release gate log records a combined real-API smoke 6/6 using GLM and DeepSeek; provider-isolated 4a/4b execution is NOT-RUN.",
+      "live_evidence": [
+        { "label": "v0.18.9 release gate log", "href": "dogfood-log.md" }
+      ]
+    },
+    {
+      "name": "Custom OpenAI-compatible endpoint",
+      "preset_id": "custom",
+      "endpoint": "user-supplied",
+      "live_status": "NOT-RUN",
+      "live_verification": "User-supplied endpoints cannot be verified as one provider class.",
+      "live_evidence": []
+    }
+  ]
+}
