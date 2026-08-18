@@ -12,7 +12,8 @@
 
 use std::time::{Duration, Instant};
 use wancode_lib::work_parse_worker::{
-    parse_in_worker, run_as_worker_if_requested, DocKind, ParseFailure, ParseLimits, ParseRequest,
+    parse_in_worker, run_as_worker_if_requested, DocKind, ParseFailure, ParseLimits,
+    ParseRequest, ParsedDoc,
 };
 
 fn req() -> ParseRequest {
@@ -78,14 +79,14 @@ fn main() {
     let r = with_mode(Some("echo"), || parse_in_worker(&req(), ParseLimits::default()));
     check(
         "positive_control_echo",
-        matches!(&r, Ok(t) if t.starts_with("echo:")),
+        matches!(&r, Ok(ParsedDoc::Echo { text }) if text.starts_with("echo:")),
         format!("{r:?}"),
     );
 
-    // ② 未接解析器时是**有序拒收**，不是崩溃——证明 dispatch 真的走到了。
+    // ② PDF 解析器尚未接入 → **有序拒收**，不是崩溃，证明 dispatch 走到了。
     let r = with_mode(None, || parse_in_worker(&req(), ParseLimits::default()));
     check(
-        "no_parser_yet_is_orderly_rejection",
+        "unwired_kind_is_orderly_rejection",
         matches!(&r, Err(ParseFailure::Rejected(_))),
         format!("{r:?}"),
     );
@@ -181,6 +182,31 @@ fn main() {
         matches!(&r, Err(ParseFailure::ContainmentUnavailable(_))),
         format!("{r:?}"),
     );
+    // ⑩ 端到端：真实 DOCX 走完整 worker 路径（隔离 + 解析 + 协议往返）。
+    //    样本不入库，未设环境变量即跳过——CI 上这条永远 NOT-RUN。
+    match std::env::var("WANCODE_DOCX_SAMPLE") {
+        Ok(sample) => {
+            let r = parse_in_worker(
+                &ParseRequest {
+                    kind: DocKind::Docx,
+                    source_path: sample,
+                },
+                ParseLimits::default(),
+            );
+            check(
+                "real_docx_end_to_end_through_worker",
+                matches!(&r, Ok(ParsedDoc::Docx { blocks })
+                    if !blocks.is_empty() && blocks.iter().all(|b| b.is_well_formed())),
+                match &r {
+                    Ok(ParsedDoc::Docx { blocks }) => {
+                        format!("块={}，全部 well-formed", blocks.len())
+                    }
+                    other => format!("{other:?}"),
+                },
+            );
+        }
+        Err(_) => println!("SKIP real_docx_end_to_end_through_worker — 未设 WANCODE_DOCX_SAMPLE"),
+    }
 
     // ⑩ try_wait 出错必须走同一清理出口（#56 R2-P1）。
     //    hang worker 会一直活着：旧实现直接 return SpawnFailed，不杀 Job、
