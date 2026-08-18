@@ -26,6 +26,11 @@
 //! `w:t` 里的 CDATA 丢掉。未见过 Word NS 元素时有序拒收
 //! （`UnrecognizedWordprocessing`），绝不把「没认出来」当成空文档。
 //!
+//! **⑤ 嵌套段落不得覆盖外层 `cur`。** Word 文本框/绘图里的 `<w:p>` 会挂在
+//! 外层段落下面；直接 `cur = Some(...)` 会丢掉已经抽出的外层正文，成功返回
+//! 只剩内层。开始新段落前先收口当前段；内层结束后若还在外层里，再开一段
+//! 承接段尾文本。正文按出现顺序落成块，不静默缺字。
+//!
 //! ## 路径穿越为何不适用
 //!
 //! 我们**从不落盘**：只按精确名 `word/document.xml` 取一个条目读进内存。
@@ -186,6 +191,15 @@ fn ingest_text(
     }
 }
 
+fn close_open_run(cur: &mut Option<WorkBlock>, run_start: &mut Option<usize>) {
+    if let (Some(b), Some(st)) = (cur.as_mut(), run_start.take()) {
+        let en = b.len_utf16();
+        if en > st {
+            b.runs.push([st, en]);
+        }
+    }
+}
+
 fn finish_paragraph(
     cur: &mut Option<WorkBlock>,
     para_idx: &mut usize,
@@ -226,6 +240,9 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
     let mut cur: Option<WorkBlock> = None;
     let mut in_text = false;
     let mut run_start: Option<usize> = None;
+    // 嵌套 <w:p>（文本框等）的深度。>0 表示仍在外层段里，结束内层后要
+    // 再开一块承接段尾，不能把外层上下文丢掉。
+    let mut p_depth = 0usize;
     // run 之外被丢弃的字符数——非零即整篇拒收（见文件头 ①）。
     let mut dropped_outside_run = 0usize;
     // 是否见过绑定到 Word NS 的元素。未见过却返回 Ok([]) 就是把合法正文
@@ -242,11 +259,21 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
                     saw_word_ns = true;
                     match local {
                         b"p" => {
+                            if cur.is_some() {
+                                close_open_run(&mut cur, &mut run_start);
+                                finish_paragraph(
+                                    &mut cur,
+                                    &mut para_idx,
+                                    &mut blocks,
+                                    &limits,
+                                )?;
+                            }
                             cur = Some(WorkBlock {
                                 path: format!("body/p[{para_idx}]"),
                                 raw: String::new(),
                                 runs: Vec::new(),
                             });
+                            p_depth += 1;
                         }
                         b"r" => {
                             if let Some(b) = &cur {
@@ -298,16 +325,24 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
                 if bound_wml(&ns) {
                     match local {
                         b"t" => in_text = false,
-                        b"r" => {
-                            if let (Some(b), Some(st)) = (&mut cur, run_start.take()) {
-                                let en = b.len_utf16();
-                                // 零宽 run（无文本）不记：记了会破坏「每条非空」。
-                                if en > st {
-                                    b.runs.push([st, en]);
-                                }
+                        b"r" => close_open_run(&mut cur, &mut run_start),
+                        b"p" => {
+                            close_open_run(&mut cur, &mut run_start);
+                            finish_paragraph(
+                                &mut cur,
+                                &mut para_idx,
+                                &mut blocks,
+                                &limits,
+                            )?;
+                            p_depth = p_depth.saturating_sub(1);
+                            if p_depth > 0 {
+                                cur = Some(WorkBlock {
+                                    path: format!("body/p[{para_idx}]"),
+                                    raw: String::new(),
+                                    runs: Vec::new(),
+                                });
                             }
                         }
-                        b"p" => finish_paragraph(&mut cur, &mut para_idx, &mut blocks, &limits)?,
                         _ => {}
                     }
                 }
@@ -468,6 +503,41 @@ mod tests {
             parse_document_xml(xml, DocxLimits::default()),
             Err(DocxError::UnrecognizedWordprocessing)
         );
+    }
+
+    /// Codex #65 R1-P1：嵌套 `<w:p>` 不得覆盖外层段、丢掉已抽出的正文。
+    /// 外层段首「甲」、嵌套「乙」、段尾「丙」必须都还在；允许整篇有序拒收，
+    /// 禁止 `Ok` 且缺字。
+    #[test]
+    fn nested_paragraph_does_not_drop_surrounding_text() {
+        let before_only = p(
+            r#"<w:p><w:r><w:t>甲</w:t></w:r><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:p>"#,
+        );
+        match parse_document_xml(&before_only, DocxLimits::default()) {
+            Ok(b) => {
+                let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
+                assert!(
+                    joined.contains('甲'),
+                    "嵌套 <p> 覆盖 cur 会丢掉外层段首，得 {joined:?}"
+                );
+                assert!(joined.contains('乙'), "嵌套段正文必须在，得 {joined:?}");
+                assert!(b.iter().all(|x| x.is_well_formed()));
+            }
+            Err(_) => {}
+        }
+        let before_and_after = p(
+            r#"<w:p><w:r><w:t>甲</w:t></w:r><w:p><w:r><w:t>乙</w:t></w:r></w:p><w:r><w:t>丙</w:t></w:r></w:p>"#,
+        );
+        match parse_document_xml(&before_and_after, DocxLimits::default()) {
+            Ok(b) => {
+                let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
+                assert!(joined.contains('甲'), "段首不得丢，得 {joined:?}");
+                assert!(joined.contains('乙'), "嵌套段不得丢，得 {joined:?}");
+                assert!(joined.contains('丙'), "段尾不得丢，得 {joined:?}");
+                assert!(b.iter().all(|x| x.is_well_formed()));
+            }
+            Err(_) => {}
+        }
     }
 }
 

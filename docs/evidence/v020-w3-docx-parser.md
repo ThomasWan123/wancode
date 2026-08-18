@@ -37,10 +37,15 @@ spike 证的是「能不能抽出来」，产品代码还得证「抽不出来�
 认 `p`/`r`/`t`；`w:t` 内 CDATA 当正文；从未见过 Word NS 元素则
 `UnrecognizedWordprocessing`，绝不把「没认出来」当成空文档。
 
+**⑤ 嵌套段落不得覆盖外层 `cur`（#65 R1-P1）。** 外层段已抽出的正文在遇到
+内层 `<w:p>` 时会被 `cur = Some(...)` 丢掉，成功返回只剩内层。改为开始新
+段前先收口当前段；内层结束后若还在外层里，再开一块承接段尾。夹具
+`nested_paragraph_does_not_drop_surrounding_text`：甲+乙 与 甲+乙+丙。
+
 另外，**路径穿越在这里结构性不适用**：我们从不落盘，只按精确名
 `word/document.xml` 取一个条目读进内存。没有写路径，`../` 无处施展。
 
-## 单元断言 12/12
+## 单元断言 13/13
 
 | 断言 | 意图 |
 | --- | --- |
@@ -56,13 +61,14 @@ spike 证的是「能不能抽出来」，产品代码还得证「抽不出来�
 | `cdata_inside_t_is_text_not_dropped` | `w:t` 内 CDATA 是正文 |
 | `no_word_namespace_is_rejected_not_empty_ok` | 非 Word XML → `UnrecognizedWordprocessing`，禁止 `Ok([])` |
 | `wrong_namespace_on_w_prefix_is_rejected` | 字面 `w:*` 绑错 NS → 拒收，禁止误抽 |
+| `nested_paragraph_does_not_drop_surrounding_text` | 嵌套 `<w:p>` 不得丢掉外层段首/段尾；旧代码 Ok 只剩「乙」 |
 
-RED-first：上述 5 条新断言在字面 `w:*` 匹配器上 **5 failed**（交替前缀/`Ok([])`、CDATA 空块、错 NS 误抽 `hi`）。改 URI 匹配后 12/12。
+RED-first：`nested_paragraph_does_not_drop_surrounding_text` 在覆盖 `cur` 的旧代码上 **failed**（`Ok` 得 `"乙"`）。改段栈后 13/13。
 
-全量：`269 passed; 0 failed; 1 ignored`。clippy `-D warnings` exit 0。
+全量：`cargo test -p wancode --lib work_docx` **15 passed**（含 2 条未设样本即 SKIP 的真实探针）。clippy `-D warnings` exit 0。
 本轮未重跑 `work_parse_containment`（沙箱 target 把 `panic=abort` 的 dev
 产物和 `panic=unwind` 的 test 产物混在一起，编不过；与本次解析器改动
-无关）。worker 仍只调用 `parse_docx`，P1-1 的回归在 `work_docx` 单元里。
+无关）。worker 仍只调用 `parse_docx`，嵌套段回归在 `work_docx` 单元里。
 
 ## 真实样本（本地，非 CI）
 
@@ -100,7 +106,9 @@ REAL DOCX 锚点：铸造=189 跨独立再解析取回成功=189
 - **`w:tab` / `w:br` 等不产文本的元素**：当前不产生任何字符，因此不影响
   tiling。但这意味着抽取文本里**没有制表/换行信息**——对锚点无害，对将来
   的只读查看器排版还原有影响，届时需单独设计。
-- **本 PR 的 GitHub CI 在改 base 为 main 之前不会跑**（#57 R1-P2）：`ci.yml`
-  只触发 `pull_request: branches: [main]`，当前 base 是 #56 分支。ACCEPT
-  需要 exact-head 的 `versions`/`frontend`/`rust`，因此本 head **不能**被
-  ACCEPT。等 #56 合并后改 base、等三项检查绿，再发一轮 READY。
+- **嵌套段被拆成相邻块**：文本框里的 `<w:p>` 会先收口外层片段再作为独立块，
+  不再静默丢字；不还原绘图/文本框布局。
+- **前 head `2a7a71b0ecada1a163047df363c1994f9b3a934c`** 三项 required checks
+  已绿（Actions run `32037071895`），base 即当时 `main` `fef7eba`。本文件此
+  前仍写「base 不是 main、不能 ACCEPT」，与事实不符（#65 R1-P2）。新 head
+  的 CI 见 PR 证据表。
