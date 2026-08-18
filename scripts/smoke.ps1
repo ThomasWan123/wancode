@@ -1,13 +1,19 @@
 # WanCode 引擎级 smoke 套件（v0.13 重构安全网）
 #
-# 用法：  pwsh -File scripts/smoke.ps1 [-SkipBuild]
+# 用法：  pwsh -File scripts/smoke.ps1 [-SkipBuild] [-Only <work|c1-escape>]
 #
 # 6 个场景（会话启动/基本回复/忙时排队/回合插话/git 状态+贮藏/会话恢复）
 # 全部走真实引擎与真实模型 API，断言落在磁盘与 git2 层——不碰 UI 坐标。
 # 结果：%TEMP%\wancode-autotest.log，进程退出码 0=全过。
 #
+# -Only work      只跑 S7 Work 全流程（零 API 成本）。
+# -Only c1-escape 只跑 C1-b 逃逸探针实跑（真模型回合，有 API 成本）；
+#                 PASS=得出确定结论（Blocked/Escaped），FAIL=证据不足或基建失败；
+#                 证据 JSON 复制到 %TEMP%\wancode-c1-evidence.json，档位由
+#                 codex 复核 + 用户裁定（见 docs/design/v0.20-work-cowork-increment.md §2.1）。
+#
 # 前置：~/.grok 已配置模型（smoke 用默认模型；消耗少量 API 调用）。
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [string]$Only = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -62,6 +68,10 @@ Remove-Item $log -EA SilentlyContinue
 Set-Location $env:TEMP
 Write-Host "[smoke] launching with WANCODE_AUTOTEST=$fixture"
 $env:WANCODE_AUTOTEST = $fixture
+if ($Only -ne "") {
+  $env:WANCODE_AUTOTEST_ONLY = $Only
+  Write-Host "[smoke] WANCODE_AUTOTEST_ONLY=$Only"
+}
 # v0.19-2a 复核 P0：GROK_HOME 一并隔离——此前只隔了 sidecar，会话本体仍写
 # 真实 ~/.grok，每跑一次 smoke 就在真实现场铸一个无归属孤儿（迁移标记后
 # 创建、binding 在隔离根里随夹具销毁）。整个引擎家目录指到夹具内，
@@ -76,6 +86,7 @@ $stderr = Join-Path $env:TEMP "wancode-smoke-stderr.log"
 Remove-Item $stderr -EA SilentlyContinue
 $proc = Start-Process -FilePath $exe -WorkingDirectory $env:TEMP -PassThru -RedirectStandardError $stderr
 $env:WANCODE_AUTOTEST = $null
+$env:WANCODE_AUTOTEST_ONLY = $null
 $env:GROK_HOME = $null
 
 # 轮询日志直到 SMOKE DONE（上限 8 分钟——含多次真实模型回合）
@@ -95,6 +106,19 @@ if (Test-Path $stderr) { Write-Host "──── stderr ────"; Get-Cont
 Get-Process wancode -EA SilentlyContinue |
   Where-Object { $_.Path -eq $exe } |
   Stop-Process -Force -Confirm:$false
+
+# C1-b：证据 JSON 在夹具删除前复制出来——档位裁定（codex 复核 + 用户裁定）
+# 依赖这份产物，不能随夹具销毁。
+if ($Only -eq "c1-escape") {
+  $ev = Join-Path $fixture "c1-escape\c1-escape-evidence.json"
+  if (Test-Path $ev) {
+    $out = Join-Path $env:TEMP "wancode-c1-evidence.json"
+    Copy-Item $ev $out -Force
+    Write-Host "[smoke] C1 evidence: $out"
+  } else {
+    Write-Host "[smoke] C1 evidence NOT produced (run failed before evidence write)"
+  }
+}
 Remove-Item -Recurse -Force $fixture -EA SilentlyContinue
 
 if (-not $done) { Write-Host "[smoke] 超时或未完成"; exit 1 }

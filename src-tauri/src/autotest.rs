@@ -18,7 +18,8 @@ use crate::git_ops::{git_stash, git_status_ext, session_git_root};
 pub async fn autotest(app: AppHandle, workspace: String) {
     let log = std::env::temp_dir().join("wancode-autotest.log");
     let _ = std::fs::remove_file(&log);
-    let write = |s: &str| {
+    // move 持有路径：闭包由此 'static，C1 逃逸探针分支要把它 Arc 进独立任务。
+    let write = move |s: &str| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
             let _ = writeln!(f, "{s}");
@@ -43,6 +44,28 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     let only_work = std::env::var("WANCODE_AUTOTEST_ONLY")
         .map(|v| v.eq_ignore_ascii_case("work"))
         .unwrap_or(false);
+    // C1-b：`WANCODE_AUTOTEST_ONLY=c1-escape` 只跑逃逸探针实跑（真模型回合，
+    // 有 API 成本，手动触发；PASS/FAIL 语义见 cowork_escape_run.rs 文件头）。
+    let only_c1 = std::env::var("WANCODE_AUTOTEST_ONLY")
+        .map(|v| v.eq_ignore_ascii_case("c1-escape"))
+        .unwrap_or(false);
+    if only_c1 {
+        write("SMOKE S8-c1-escape BEGIN");
+        // Arc 化：逃逸探针的每个回合在独立任务里跑（断栈——嵌套 poll 在
+        // debug 构建下压爆过 tokio worker 栈），spawn 要求 'static。
+        // 本分支随后即 process::exit，write 的移动不影响其余套件。
+        let write_arc: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(write);
+        let (p2, f2) = crate::cowork_escape_run::run(
+            app.clone(),
+            std::path::Path::new(&workspace),
+            write_arc.clone(),
+        )
+        .await;
+        pass += p2;
+        fail += f2;
+        write_arc.as_ref()(&format!("SMOKE DONE pass={pass} fail={fail}"));
+        std::process::exit(if fail > 0 { 1 } else { 0 });
+    }
     // ── S7 Work 全流程（W2.5 / codex #47 ①②③④⑦）─────────────────
     // 这一段走的是**生产入口** start_inner_with_intent(..., Work)，不是把
     // 副作用手工摆出来：新建 → 持久 binding 读回 → 经 work_import 命令边界
