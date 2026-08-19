@@ -94,6 +94,12 @@ pub struct StartResult {
     pub workspace_id: Option<String>,
     /// 当前策略规则代号（派生用，见 surface::CURRENT_POLICY_VERSION）。
     pub policy_version: u32,
+    /// C2：当前模型的推理强度菜单（来自 `_meta["x.ai/sessionConfig"]` 的
+    /// mode 条目）。空 = 当前模型不支持强度选择，前端不得显示选择器。
+    pub effort_options: Vec<crate::effort::EffortChoice>,
+    /// C2：当前选中的强度档 id（菜单里的 selected 项；引擎未下发为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_effort: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Default)]
@@ -103,6 +109,13 @@ pub struct ModelOption {
     pub endpoint_label: String,
     /// #127-2：能力 + 归属诊断（聊天目录链适配器产出；前端徽章在 PR 3）。
     pub caps: crate::caps_snapshot::ResolvedModelCaps,
+    /// C2：该模型是否支持推理强度（引擎能力位；false 时下面两个字段恒为空）。
+    pub supports_effort: bool,
+    /// C2：该模型 catalog 声明的强度菜单（空 = 引擎回落 legacy 五档）。
+    pub effort_options: Vec<crate::effort::EffortChoice>,
+    /// C2：该模型 config.toml 里配置的默认强度档。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -551,7 +564,9 @@ pub(crate) async fn start_inner_with_intent(
         None
     };
     let mut model_block: Option<serde_json::Value> = None;
-    let (session_id, session_models) = if let Some(sid) = resume {
+    // C2：两条路径（新建/恢复）都带 `x.ai/sessionConfig` meta——强度菜单与
+    // 当前档在会话打开时下发，热切换后的菜单由前端按 ModelOption 能力位推导。
+    let (session_id, session_models, session_config_meta) = if let Some(sid) = resume {
         let mut req = acp::LoadSessionRequest::new(acp::SessionId::new(sid.clone()), cwd.clone())
             .mcp_servers(mcp_servers);
         if let Some(meta) = session_meta.clone() {
@@ -575,7 +590,7 @@ pub(crate) async fn start_inner_with_intent(
             return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
                 &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
         }
-        (acp::SessionId::new(sid), resp.models)
+        (acp::SessionId::new(sid), resp.models, resp.meta)
     } else {
         let mut req = acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers);
         if let Some(meta) = session_meta {
@@ -594,7 +609,7 @@ pub(crate) async fn start_inner_with_intent(
             return Err(anyhow!("{}", crate::surface_policy::policy_blocked_message(
                 &crate::surface_policy::SurfacePolicyError::LocalExtensionsPolicyNotApplied)));
         }
-        (resp.session_id, resp.models)
+        (resp.session_id, resp.models, resp.meta)
     };
     // ── v0.19-2a 最低身份事务链：引擎返回 ID → 写 binding → 成功后才
     // 安装 handle/返回前端。写失败即取消本次 Agent——绝不暴露可发送的
@@ -676,6 +691,8 @@ pub(crate) async fn start_inner_with_intent(
                             &id,
                             &caps_config_doc,
                         );
+                        let (supports_effort, effort_options, default_effort) =
+                            crate::effort::parse_model_effort_meta(am.meta.as_ref());
                         ModelOption {
                             name: am.name.clone(),
                             endpoint_label: am
@@ -687,6 +704,9 @@ pub(crate) async fn start_inner_with_intent(
                                 .to_string(),
                             caps,
                             id,
+                            supports_effort,
+                            effort_options,
+                            default_effort,
                         }
                     })
                     .collect(),
@@ -711,6 +731,19 @@ pub(crate) async fn start_inner_with_intent(
         schedule_skill_baseline_refresh(acp_tx.clone());
     }
 
+    let (mut effort_options, current_effort) =
+        crate::effort::parse_session_config_effort(session_config_meta.as_ref());
+    // sessionConfig 的 mode 条目只有展示 id；自定义菜单真正发往引擎的
+    // canonical value 在当前 ModelInfo.meta.reasoningEfforts。按 id 合并，
+    // 否则 `deep -> xhigh` 会错误发送 deep 并被引擎静默忽略。
+    if let Some(current_model) = current_model_id.as_deref().and_then(|id| {
+        model_options.iter().find(|option| option.id == id)
+    }) {
+        crate::effort::reconcile_session_effort_values(
+            &mut effort_options,
+            &current_model.effort_options,
+        );
+    }
     Ok(StartResult {
         session_id: session_id.0.to_string(),
         models: model_ids,
@@ -726,6 +759,8 @@ pub(crate) async fn start_inner_with_intent(
             .map(|w| w.as_str().to_string()),
         policy_version: crate::surface::derive_effective_policy(surface_binding.surface_kind)
             .policy_version,
+        effort_options,
+        current_effort,
     })
 }
 
