@@ -7,7 +7,7 @@
 #   时要解密密钥、读 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 环境变量；但
 #   Windows/PowerShell 在 spawn 子进程时会丢弃**空字符串**环境变量
 #   （子进程看到 undefined），于是 tauri 回退到交互式密码提示 → 后台
-#   构建无 stdin → 卡死/跳过签名。用 `signer sign -f <key> -p ""`
+#   构建无 stdin → 卡死/跳过签名。用 `signer sign -f <key> --password=`
 #   （空密码走 CLI 参数，不受此坑影响）在 build 后补签，稳定可靠。
 param(
   [Parameter(Mandatory = $true)][string]$Version,
@@ -63,10 +63,9 @@ $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
 
 Write-Host "[3/4] 补签 setup.exe（signer sign，空密码走 CLI 参数）..."
-# -p 传空密码：PowerShell spawn 原生进程时会把空字符串参数整个丢掉，
-# $setup 就顶上变成了密码、FILE 缺参报错。'""' 让 Windows 参数解析
-# 得到一个真正的空字符串。（bash 里不需要这个把戏。）
-npx --yes @tauri-apps/cli signer sign -f $key -p '""' $setup
+# 当前 Tauri CLI/Clap 接受 `--password=` 作为明确的空密码。不要传
+# `-p '""'`：新版 CLI 会把两个引号字符当成真实密码并报 Wrong password。
+npx --yes @tauri-apps/cli signer sign -f $key --password= $setup
 if ($LASTEXITCODE -ne 0) { throw "签名失败" }
 $sig = Get-Content "$setup.sig" -Raw
 
