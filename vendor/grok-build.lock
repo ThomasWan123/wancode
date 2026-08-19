@@ -1,4 +1,4 @@
-﻿# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
+# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
 #
 # wancode 不把引擎做成 git submodule —— 引擎必须放在仓库的【兄弟目录】
 # ../grok-build：src-tauri/Cargo.toml 通过 workspace = "../../grok-build"
