@@ -6,6 +6,7 @@ import { IconX, IconPencil } from "../../icons";
 import { ModalDialog } from "../dialogs/ModalDialog";
 
 import { parseResolvedCaps, type Cap } from "../../caps";
+import { MemoryPanel } from "./MemoryPanel";
 
 /* #127-3 能力徽章：三态三色。unknown 灰 "?" ——不虚标。 */
 function CapBadge({ label, cap }: { label: string; cap: Cap }) {
@@ -28,7 +29,7 @@ const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: str
 };
 
 export function SettingsModal(props: Record<string, any>) {
-  const { showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, testModel, theme, updateMsg, version, workspace, hooks, t } = props;
+  const { showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, sessionId, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, surface, testModel, theme, updateMsg, version, workspace, hooks, t } = props;
   return (
     <>
       {showSettings && (
@@ -46,6 +47,7 @@ export function SettingsModal(props: Record<string, any>) {
                 ["mcp", t.navMcp],
                 ["skills", t.navSkills],
                 ["hooks", t.navHooks],
+                ["memory", t.navMemory],
                 ["about", t.navAbout],
               ] as const).map(([id, label]) => (
                 <button
@@ -534,6 +536,9 @@ export function SettingsModal(props: Record<string, any>) {
               </div>
               <div className="modal-hint">{t.hooksHint}</div>
             </div>
+            )}
+            {settingsTab === "memory" && (
+              <MemoryPanel sessionId={sessionId} surface={surface} workspace={workspace} t={t} />
             )}
             {settingsTab === "about" && (
             <>

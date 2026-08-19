@@ -27,7 +27,8 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=dependency-delta
+migration_audit_mode=wancode-lock-delta
+declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
 #   引擎 commit **不动**（2f480062e），有效树里**只有 Cargo.lock 变**，
@@ -47,5 +48,5 @@ migration_audit_mode=dependency-delta
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=f89e1d05321b015ddbf35f71dd59168a9f2c6a7ef357c0c1ae4876360b8adf81
-effective_tree_sha256=cbb03b91cd59fc62ff999d95b5969c3452d23bc3001005912f8b63be94a705ad
+cargo_lock_sha256=0f0dc145e134a8ca353e88340c7929dc6ec98b5ddce9228695a2fd846b7d3865
+effective_tree_sha256=56a1981c61e25acaeb85aab060a015c7b0c1f456dcc896b162794bc9b60ffc4d

@@ -22,7 +22,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
-import { parseModelOptions, type ModelOption } from "./modelOption";
+import { effortIdForValue, effortStateForModel, parseCurrentEffort, parseEffortChoices, parseModelOptions, type EffortChoice, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
@@ -278,6 +278,11 @@ function App() {
   // 选择器是否展开。会话级阻塞可以收起（用户也许想先翻历史），但收起不等于
   // 解除——阻塞在引擎里，只有真正选定模型才会消失。
   const [modelBlockOpen, setModelBlockOpen] = useState(true);
+  // C2：推理强度菜单与当前档。空菜单 = 当前模型不支持，选择器不渲染。
+  const [effortOptions, setEffortOptions] = useState<EffortChoice[]>([]);
+  const effortOptionsRef = useRef<EffortChoice[]>(effortOptions);
+  effortOptionsRef.current = effortOptions;
+  const [currentEffort, setCurrentEffort] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState("");
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -288,7 +293,7 @@ function App() {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [mcpServers, setMcpServers] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "mcp" | "skills" | "hooks" | "about">("models");
+  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "mcp" | "skills" | "hooks" | "memory" | "about">("models");
   const [ctx, setCtx] = useState<{ used: number; total: number; pct: number } | null>(null);
   const [rewindPoints, setRewindPoints] = useState<any[] | null>(null);
   const [rewindMode, setRewindMode] = useState("all");
@@ -1374,6 +1379,16 @@ function App() {
           refreshRosterForSurfaceRef.current();
           return;
         }
+        // C2：模型/强度切换的引擎广播（leader 模式多端同步；本端自己的
+        // 切换也会收到回声）。只同步强度当前档——模型 id 由切换事务的
+        // 响应驱动，避免回声与本地乐观更新打架。
+        if (m === "x.ai/session_notification") {
+          const u = e.payload?.params?.update;
+          if (u?.sessionUpdate === "model_changed") {
+            setCurrentEffort(effortIdForValue(effortOptionsRef.current, u.reasoning_effort));
+          }
+          return;
+        }
         if (
           m === "x.ai/mcp_initialized" ||
           m === "x.ai/mcp/init_progress" ||
@@ -1500,6 +1515,7 @@ function App() {
         surface_kind: SurfaceKind;
         workspace_id?: string;
         policy_version: number;
+        effort_options?: unknown; current_effort?: unknown;
       }>(
         "agent_start",
         {
@@ -1544,13 +1560,17 @@ function App() {
         localStorage.setItem("wancode-workspace", r.cwd);
       }
       if (r.models?.length) setModels(r.models);
-      setModelOptions(parseModelOptions(r.model_options));
+      const parsedOptions = parseModelOptions(r.model_options);
+      setModelOptions(parsedOptions);
       {
         // #127-3：config.toml 损坏导致的全员能力 unknown 必须有可见原因
         const ci = parseFileIssue(r.caps_config_issue);
         if (ci) setError(t.capsConfigIssue(ci.kind, ci.message));
       }
       if (r.current_model_id) setModel(r.current_model_id);
+      // C2：会话打开时引擎下发当前模型的强度菜单与当前档；空菜单 = 不支持。
+      setEffortOptions(parseEffortChoices(r.effort_options));
+      setCurrentEffort(parseCurrentEffort(r.current_effort));
       // 恢复出来的会话可能因模型身份无法确定而被引擎挂起发送。这不是错误
       // 弹窗能解决的事——只有用户知道当初用的是哪个接入点，所以载荷跟着
       // 加载结果一起回来，直接进选择器状态。
@@ -1836,6 +1856,28 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  // C2：热切换模型后按引擎能力位推导强度选择器状态（sessionConfig 只在
+  // 会话打开时下发一次；引擎事务完成后 ModelChanged 广播会回校准当前档）。
+  function onModelSwitched(m: string) {
+    const es = effortStateForModel(modelOptions.find((o) => o.id === m));
+    setEffortOptions(es.options);
+    setCurrentEffort(es.current);
+  }
+
+  // C2：切强度 = 用当前模型 id 重发 setModel（引擎同一条事务路径，能力
+  // 校验在引擎侧）。乐观更新 + 失败回滚。
+  function onEffortChange(effort: string) {
+    if (!sessionIdRef.current || !model || !effort) return;
+    const prev = currentEffort;
+    setCurrentEffort(effort);
+    const wireValue = effortOptions.find((choice) => choice.id === effort)?.value;
+    if (!wireValue) return;
+    invoke("agent_set_model", { model, effort: wireValue }).catch((e) => {
+      setCurrentEffort(prev);
+      setError(String(e));
+    });
   }
 
   /// Mid-turn steering: inject the composer text into the RUNNING turn
@@ -2407,7 +2449,7 @@ function App() {
         />
       )}
 
-      <SettingsModal {...{ showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, testModel, theme, updateMsg, version, workspace, hooks, t }} />
+      <SettingsModal {...{ showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, sessionId, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, surface, testModel, theme, updateMsg, version, workspace, hooks, t }} />
 
       {surface === "code" && <GitPanel {...{ applyWorktree, changeLetter, commitMsg, createPr, prBusy, prStatus, forkIntoWorktree, gitBranches, gitInfo, gitOp, refreshGit, removeWorktree, sendText, setCommitMsg, setError, setGitBranches, setItems, setShowGit, showGit, worktrees, wtBusy, wtMsg, t, lang }} />}
 
@@ -2427,7 +2469,7 @@ function App() {
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
         {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />}

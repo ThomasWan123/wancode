@@ -59,6 +59,8 @@ jobs:
             powershell -File scripts/migration_audit.ps1 -Mode intentional-delta -BeforeSha $before -Whitelist docs/design/v0.19-engine-file-whitelist.txt -OutFile migration-audit-summary.json
           } elseif ($mode -eq "dependency-delta") {
             powershell -File scripts/migration_audit.ps1 -Mode dependency-delta -BeforeSha $before -OutFile migration-audit-summary.json
+          } elseif ($mode -eq "wancode-lock-delta") {
+            powershell -File scripts/migration_audit.ps1 -Mode wancode-lock-delta -BeforeSha $before -OutFile migration-audit-summary.json
           } elseif ($mode -eq "version-only") {
             powershell -File scripts/migration_audit.ps1 -Mode version-only -BeforeSha $before -OutFile migration-audit-summary.json
           } elseif ($mode -eq "equivalent") {

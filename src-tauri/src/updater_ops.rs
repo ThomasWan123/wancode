@@ -7,9 +7,69 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use semver::Version;
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
+
+const SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy)]
+struct UpdateSource {
+    name: &'static str,
+    endpoint: &'static str,
+}
+
+#[cfg(not(feature = "updater-test-endpoint"))]
+const UPDATE_SOURCES: &[UpdateSource] = &[
+    UpdateSource {
+        name: "origin",
+        endpoint: "https://github.com/ThomasWan123/wancode/releases/latest/download/latest.json",
+    },
+    UpdateSource {
+        name: "gh-proxy",
+        endpoint: "https://gh-proxy.com/https://github.com/ThomasWan123/wancode/releases/latest/download/latest-gh-proxy.json",
+    },
+];
+
+#[cfg(feature = "updater-test-endpoint")]
+const UPDATE_SOURCES: &[UpdateSource] = &[UpdateSource {
+    name: "release-test",
+    endpoint:
+        "https://github.com/ThomasWan123/wancode/releases/download/v0.18.8-rc.1/latest-test.json",
+}];
+
+struct Candidate {
+    source: UpdateSource,
+    version: Version,
+    update: Update,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceFailure {
+    source: &'static str,
+    stage: &'static str,
+    detail: String,
+}
+
+fn failure_message(prefix: &str, failures: &[SourceFailure]) -> String {
+    let ledger = serde_json::to_string(failures).unwrap_or_else(|_| "[]".to_string());
+    format!("{prefix}；逐源记录={ledger}")
+}
+
+fn highest_version_indexes(versions: &[Version]) -> Vec<usize> {
+    let Some(highest) = versions.iter().max() else {
+        return Vec::new();
+    };
+    versions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, version)| (version == highest).then_some(index))
+        .collect()
+}
 
 /// download 与 install 两条命令之间暂存的安装器。
 #[derive(Clone)]
@@ -40,47 +100,151 @@ pub async fn updater_download(
     app: AppHandle,
     state: State<'_, PendingUpdate>,
 ) -> Result<Option<String>, String> {
-    #[allow(unused_mut)]
-    let mut builder = app.updater_builder();
-    // 编译期测试开关（见 Cargo.toml [features]）：只存在于验收用的
-    // 0.18.7-test 构建，正式包没有这段代码。
-    #[cfg(feature = "updater-test-endpoint")]
-    {
-        builder = builder
-            .endpoints(vec![tauri::Url::parse(
-                "https://github.com/ThomasWan123/wancode/releases/download/v0.18.8-rc.1/latest-test.json",
-            )
-            .map_err(|e| format!("测试更新源 URL 解析失败: {e}"))?])
-            .map_err(|e| format!("设置测试更新源失败: {e}"))?;
-    }
-    let updater = builder
-        .build()
-        .map_err(|e| format!("updater 初始化失败: {e}"))?;
-    let Some(update) = updater.check().await.map_err(|e| format!("检查更新失败: {e}"))? else {
-        return Ok(None);
-    };
-    let version = update.version.clone();
+    // 新一轮检查开始即作废旧暂存，避免失败后仍可用旧 version 调安装命令。
+    *state.0.lock().unwrap() = None;
 
-    let progress_app = app.clone();
-    let version_for_progress = version.clone();
-    let mut received: u64 = 0;
-    let bytes = update
-        .download(
+    let mut candidates = Vec::new();
+    let mut failures = Vec::new();
+    let mut successful_checks = 0usize;
+    for source in UPDATE_SOURCES {
+        let endpoint = match tauri::Url::parse(source.endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                failures.push(SourceFailure {
+                    source: source.name,
+                    stage: "manifest-url",
+                    detail: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let builder = match app
+            .updater_builder()
+            .endpoints(vec![endpoint])
+            .map(|builder| builder.timeout(SOURCE_TIMEOUT))
+        {
+            Ok(builder) => builder,
+            Err(error) => {
+                failures.push(SourceFailure {
+                    source: source.name,
+                    stage: "manifest-config",
+                    detail: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let updater = match builder.build() {
+            Ok(updater) => updater,
+            Err(error) => {
+                failures.push(SourceFailure {
+                    source: source.name,
+                    stage: "manifest-config",
+                    detail: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let checked =
+            tokio::time::timeout(SOURCE_TIMEOUT + Duration::from_secs(2), updater.check()).await;
+        match checked {
+            Ok(Ok(Some(update))) => match Version::parse(&update.version) {
+                Ok(version) => {
+                    successful_checks += 1;
+                    candidates.push(Candidate {
+                        source: *source,
+                        version,
+                        update,
+                    });
+                }
+                Err(error) => failures.push(SourceFailure {
+                    source: source.name,
+                    stage: "manifest-version",
+                    detail: error.to_string(),
+                }),
+            },
+            Ok(Ok(None)) => successful_checks += 1,
+            Ok(Err(error)) => failures.push(SourceFailure {
+                source: source.name,
+                stage: "manifest-check",
+                detail: error.to_string(),
+            }),
+            Err(_) => failures.push(SourceFailure {
+                source: source.name,
+                stage: "manifest-timeout",
+                detail: format!("超过 {} 秒", SOURCE_TIMEOUT.as_secs()),
+            }),
+        }
+    }
+
+    if candidates.is_empty() {
+        return if successful_checks > 0 {
+            Ok(None)
+        } else {
+            Err(failure_message("所有更新清单源均不可用", &failures))
+        };
+    }
+
+    // 只尝试最高版本组；最高版本下载失败时绝不静默退回旧版本。
+    let versions: Vec<Version> = candidates
+        .iter()
+        .map(|candidate| candidate.version.clone())
+        .collect();
+    let selected = highest_version_indexes(&versions);
+    let target_version = candidates[selected[0]].update.version.clone();
+    let mut verified = None;
+    for index in selected {
+        let candidate = &candidates[index];
+        let progress_app = app.clone();
+        let version_for_progress = target_version.clone();
+        let source_for_progress = candidate.source.name;
+        let mut received: u64 = 0;
+        let download = candidate.update.download(
             move |chunk, total| {
                 received += chunk as u64;
                 let pct: i32 = match total {
-                    Some(t) if t > 0 => ((received * 100) / t).min(100) as i32,
+                    Some(total) if total > 0 => ((received * 100) / total).min(100) as i32,
                     _ => -1,
                 };
                 let _ = progress_app.emit(
                     "updater://progress",
-                    serde_json::json!({ "version": version_for_progress, "pct": pct }),
+                    serde_json::json!({
+                        "version": version_for_progress,
+                        "pct": pct,
+                        "source": source_for_progress,
+                    }),
                 );
             },
             || {},
+        );
+        match tokio::time::timeout(DOWNLOAD_TIMEOUT, download).await {
+            Ok(Ok(bytes)) if !bytes.is_empty() => {
+                verified = Some(bytes);
+                break;
+            }
+            Ok(Ok(_)) => failures.push(SourceFailure {
+                source: candidate.source.name,
+                stage: "download-empty",
+                detail: "下载结果为 0 字节".to_string(),
+            }),
+            Ok(Err(error)) => failures.push(SourceFailure {
+                source: candidate.source.name,
+                stage: "download-verify",
+                detail: error.to_string(),
+            }),
+            Err(_) => failures.push(SourceFailure {
+                source: candidate.source.name,
+                stage: "download-timeout",
+                detail: format!("超过 {} 秒", DOWNLOAD_TIMEOUT.as_secs()),
+            }),
+        }
+    }
+    let bytes = verified.ok_or_else(|| {
+        failure_message(
+            &format!("v{target_version} 的所有候选源均下载或验签失败（未降级）"),
+            &failures,
         )
-        .await
-        .map_err(|e| format!("下载失败: {e}"))?;
+    })?;
+    let version = target_version;
 
     // 落盘到真随机后缀的临时目录（tempfile 的 CSPRNG 命名 + 独占创建），
     // keep() 解除自动删除——目录要活到 install，且事后可取证（这次破案
@@ -99,6 +263,36 @@ pub async fn updater_download(
         sha256: sha256_hex(&bytes),
     });
     Ok(Some(version))
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    #[test]
+    fn highest_version_group_preserves_source_priority() {
+        let versions = [
+            Version::parse("0.20.0").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+            Version::parse("0.19.9").unwrap(),
+        ];
+        assert_eq!(highest_version_indexes(&versions), vec![0, 1]);
+    }
+
+    #[test]
+    fn highest_version_failure_cannot_select_a_lower_version() {
+        let versions = [
+            Version::parse("0.20.1").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+        ];
+        assert_eq!(highest_version_indexes(&versions), vec![0]);
+    }
+
+    #[test]
+    fn empty_candidate_set_is_explicit() {
+        assert!(highest_version_indexes(&[]).is_empty());
+    }
 }
 
 /// 以 breakaway 方式拉起已下载的安装器；确认存活后退出应用。
@@ -127,7 +321,9 @@ pub async fn updater_install(
     // 启动前把待执行文件重新哈希，与下载时验签通过的那份字节比对。
     let on_disk = std::fs::read(&staged.path).map_err(|e| format!("读取已下载安装器失败: {e}"))?;
     if sha256_hex(&on_disk) != staged.sha256 {
-        return Err("已下载安装器与验签内容不一致（文件已被改动），已拒绝执行；请重新检查更新".into());
+        return Err(
+            "已下载安装器与验签内容不一致（文件已被改动），已拒绝执行；请重新检查更新".into(),
+        );
     }
     let path = staged.path;
 

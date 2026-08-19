@@ -281,15 +281,32 @@ pub async fn sessions_roster(state: State<'_, AgentState>) -> Result<serde_json:
 
 #[tauri::command]
 pub async fn memory_flush(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    // session_id 由 ext_call 统一注入（引擎 MemoryFlushRequest 要 snake_case）。
     ext_ok(&state, "x.ai/memory/flush", serde_json::json!({})).await
 }
 
+/// C3：把原始笔记交给引擎做一次 LLM 结构化改写，返回 `{rewritten}`。
+/// 引擎契约是 `{sessionId, rawText, contextSummary}`（camelCase；sessionId
+/// 由 ext_call 注入）——此前这里发的是 `{text}`，两个必填键全缺，调用
+/// 必败；本命令从未被前端调用过，所以坏而未显。
+///
+/// 锁定引擎仍把推理模型硬编码为 `grok-build`，第三方端点不可用；因此 C3
+/// 只修正 wire 契约，不把本命令暴露为产品入口，也不把已知失败计作验收通过。
 #[tauri::command]
 pub async fn memory_rewrite(
     state: State<'_, AgentState>,
-    text: String,
+    raw_text: String,
+    context_summary: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    ext_ok(&state, "x.ai/memory/rewrite", serde_json::json!({ "text": text })).await
+    ext_ok(
+        &state,
+        "x.ai/memory/rewrite",
+        serde_json::json!({
+            "rawText": raw_text,
+            "contextSummary": context_summary.unwrap_or_default(),
+        }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -899,10 +916,16 @@ impl ModelSwitchError {
 
 /// Switch the active model live, without restarting the session or losing
 /// context (ACP `session/setModel`). Mirrors Claude Code's `/model`.
+///
+/// C2：`effort` 非空时在同一请求 meta 里带 `reasoningEffort`——引擎对强度
+/// 覆盖做能力校验（不支持的模型忽略并 warn），并广播 ModelChanged 让本端
+/// 与其他订阅端同步。切强度 = 用当前模型 id 重发 setModel（引擎事务同一条
+/// 路径，不新增侧门）。
 #[tauri::command]
 pub async fn agent_set_model(
     state: State<'_, AgentState>,
     model: String,
+    effort: Option<String>,
 ) -> Result<(), ModelSwitchError> {
     let (acp_tx, session_id, surface_kind) = {
         let guard = state.handle.lock().await;
@@ -927,14 +950,19 @@ pub async fn agent_set_model(
         crate::surface_policy::ensure_chat_model_allowed(&doc, &model)
             .map_err(|error| ModelSwitchError::SurfacePolicyBlocked { error })?;
     }
-    let _: acp::SetSessionModelResponse = acp_send(
-        acp::SetSessionModelRequest::new(
-            session_id,
-            acp::ModelId::new(std::sync::Arc::from(model.as_str())),
-        ),
-        &acp_tx,
-    )
-    .await
-    .map_err(|e| ModelSwitchError::from_acp(&e))?;
+    let mut req = acp::SetSessionModelRequest::new(
+        session_id,
+        acp::ModelId::new(std::sync::Arc::from(model.as_str())),
+    );
+    if let Some(effort) = effort {
+        req = req.meta(
+            serde_json::json!({ "reasoningEffort": effort })
+                .as_object()
+                .cloned(),
+        );
+    }
+    let _: acp::SetSessionModelResponse = acp_send(req, &acp_tx)
+        .await
+        .map_err(|e| ModelSwitchError::from_acp(&e))?;
     Ok(())
 }

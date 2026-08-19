@@ -4,7 +4,7 @@ use tauri::{AppHandle, Manager, State};
 use xai_acp_lib::acp_send;
 use agent_client_protocol as acp;
 
-use crate::agent::{ext_call, start_inner, AgentState};
+use crate::agent::{ext_call, AgentState};
 use crate::git_ops::{git_stash, git_status_ext, session_git_root};
 
 /// Self-test driven by `WANCODE_AUTOTEST=<workspace-dir>`: exercises the full
@@ -79,26 +79,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let app_data = app.path().app_data_dir().expect("app_data_dir");
         // ① 新建 Work 会话：workspace 参数**故意传用户项目目录**，用于证明
         // Work 不会用它当 cwd（Work 必须落在自己的暂存目录）。
-        let started = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Work,
-            ),
-        )
-        .await;
+        let started =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work).await;
         let r = match started {
-            Ok(Ok(r)) => r,
-            other => {
-                let why = match other {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    Err(_) => "timed out after 120 seconds".to_string(),
-                    Ok(Ok(_)) => unreachable!(),
-                };
+            Ok(r) => r,
+            Err(e) => {
+                let why = format!("{e:#}");
                 check!("S7-work-start", false, why);
                 write(&format!("SMOKE DONE pass={pass} fail={fail}"));
                 std::process::exit(1);
@@ -192,20 +178,15 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
         // ④ 带**对立意图**恢复：binding 必须权威（层与工作区都不变），
         // 且不铸第二个工作区。
-        let resumed = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                Some(r.session_id.clone()),
-                NewSurfaceIntent::Code, // 故意对立
-            ),
+        let resumed = spawn_start(
+            app.clone(),
+            workspace.clone(),
+            Some(r.session_id.clone()),
+            NewSurfaceIntent::Code, // 故意对立
         )
         .await;
         let resume_ok = match &resumed {
-            Ok(Ok(rr)) => {
+            Ok(rr) => {
                 rr.session_id == r.session_id
                     && rr.surface_kind == crate::surface::SurfaceKind::Work
                     && rr.workspace_id.as_deref() == Some(ws_id.as_str())
@@ -214,12 +195,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             _ => false,
         };
         let resume_detail = match &resumed {
-            Ok(Ok(rr)) => format!(
+            Ok(rr) => format!(
                 "kind={:?} ws={:?} cwd={}",
                 rr.surface_kind, rr.workspace_id, rr.cwd
             ),
-            Ok(Err(e)) => format!("err={e:#}"),
-            Err(_) => "timed out".to_string(),
+            Err(e) => format!("err={e:#}"),
         };
         check!("S7-work-resume-opposing", resume_ok, resume_detail);
 
@@ -252,20 +232,10 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 改成 Cowork 再恢复，cwd 会变回项目目录，引擎直接 FS_NOT_FOUND，
         // 仍然到不了门。因此这里**在项目目录里新建一个 Code 会话**（cwd 与
         // 恢复时一致），再把它的 sidecar 翻成 Cowork。
-        let code_started = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Code,
-            ),
-        )
-        .await;
+        let code_started =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Code).await;
         let blocked_sid = match &code_started {
-            Ok(Ok(cr)) => cr.session_id.clone(),
+            Ok(cr) => cr.session_id.clone(),
             _ => String::new(),
         };
         let cowork_json = serde_json::json!({
@@ -278,16 +248,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let sidecar = surface.gate().store().path_for(&blocked_sid);
         let pre = std::fs::write(&sidecar, cowork_json.as_bytes());
         let ws_dirs_before = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                Some(blocked_sid.clone()),
-                NewSurfaceIntent::Code,
-            ),
+        let blocked = spawn_start(
+            app.clone(),
+            workspace.clone(),
+            Some(blocked_sid.clone()),
+            NewSurfaceIntent::Code,
         )
         .await;
         let after_handle = {
@@ -297,9 +262,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 锁住失败**边界**：必须是 launchability 门拒绝（SURFACE_NOT_LAUNCHABLE），
         // 而不是 LoadSession 早失败或任何别的原因。
         let err_text = match &blocked {
-            Ok(Err(e)) => format!("{e:#}"),
-            Ok(Ok(_)) => "unexpected success".to_string(),
-            Err(_) => "timeout".to_string(),
+            Err(e) => format!("{e:#}"),
+            Ok(_) => "unexpected success".to_string(),
         };
         let rejected_at_gate = err_text.contains("SURFACE_NOT_LAUNCHABLE");
         // 后置条件：**没有任何 handle**（失败启动先拆旧会话、且绝不发布新
@@ -320,22 +284,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let blocked_marker = std::fs::create_dir_all(&marker_path).is_ok();
         let bindings_before = dir_entry_names(surface.gate().store().root_dir());
         let ws_before2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
-        let fresh_fail = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Work,
-            ),
-        )
-        .await;
+        let fresh_fail =
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work).await;
         let fresh_err = match &fresh_fail {
-            Ok(Err(e)) => format!("{e:#}"),
-            Ok(Ok(_)) => "unexpected success".to_string(),
-            Err(_) => "timeout".to_string(),
+            Err(e) => format!("{e:#}"),
+            Ok(_) => "unexpected success".to_string(),
         };
         let failed_at_marker = fresh_err.contains("CRASH_RECOVERY_MARKER_FAILED");
         let handle_after_fresh_fail = {
@@ -374,19 +327,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
     // ── S1 会话启动（默认模型）──────────────────────────────────────
     write("SMOKE S1-start BEGIN");
-    let started = match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        start_inner(app.clone(), &state, workspace.clone(), None, None),
+    let started = spawn_start(
+        app.clone(),
+        workspace.clone(),
+        None,
+        crate::surface_policy::NewSurfaceIntent::Code,
     )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            check!("S1-start", false, "timed out after 120 seconds");
-            write(&format!("SMOKE DONE pass={pass} fail={fail}"));
-            std::process::exit(1);
-        }
-    };
+    .await;
     let (sid, cwd) = match &started {
         Ok(r) => {
             check!("S1-start", true, format!("session={}", r.session_id));
@@ -547,7 +494,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
     // ── S6 会话恢复（同 id 续接，历史保留）────────────────────────
     let before_len = chat_text().lines().count();
-    let resumed = start_inner(app.clone(), &state, workspace.clone(), None, Some(sid.clone())).await;
+    let resumed = spawn_start(
+        app.clone(),
+        workspace.clone(),
+        Some(sid.clone()),
+        crate::surface_policy::NewSurfaceIntent::Code,
+    )
+    .await;
     let same_id = resumed.as_ref().map(|r| r.session_id == sid).unwrap_or(false);
     let after_len = chat_text().lines().count();
     check!(
@@ -556,9 +509,106 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         format!("same_id={same_id} lines {before_len}->{after_len}")
     );
 
+    // ── S9 记忆回路（C3 验收：flush 真实引擎往返）───────────────
+    // 隔离 GROK_HOME 的 config 副本里显式开 [memory].enabled——引擎在
+    // **会话启动时**解析该开关，所以先写配置再起新会话并做真实 flush。
+    // rewrite 暂不纳入产品入口/验收：锁定引擎把模型硬编码为 `grok-build`，
+    // 第三方端点不可用；G26 引擎例外获批前，不能把该失败当 PASS。
+    write("SMOKE S9-memory BEGIN");
+    {
+        let cfg_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
+        let enabled = match std::fs::read_to_string(&cfg_path) {
+            Ok(text) => {
+                let mut doc: toml_edit::DocumentMut = text.parse().unwrap_or_default();
+                crate::memory_ops::write_memory_enabled(&mut doc, true);
+                crate::config_core::write_config_atomic(&cfg_path, &doc.to_string()).is_ok()
+            }
+            Err(e) => {
+                write(&format!("SMOKE S9-memory config unreadable: {e}"));
+                false
+            }
+        };
+        if !enabled {
+            check!("S9-memory-roundtrip", false, "无法开启 [memory].enabled（隔离配置缺失/不可写）");
+        } else {
+            // 新会话（spawn_start 与 start_inner 一样会拆掉 S6 的会话——
+            // 套件尾声，无后续依赖）。
+            let s9 = spawn_start(
+                app.clone(),
+                workspace.clone(),
+                None,
+                crate::surface_policy::NewSurfaceIntent::Code,
+            )
+            .await;
+            let (s9_sid, s9_err) = match s9 {
+                Ok(r) => (r.session_id.clone(), String::new()),
+                Err(e) => (String::new(), format!("{e:#}")),
+            };
+            if s9_sid.is_empty() {
+                check!("S9-memory-flush", false, format!("session start: {s9_err}"));
+            } else {
+                // flush：引擎侧 did_flush 不随响应返回（Empty），回路本身
+                // 不报错即通过；记忆未启用时引擎会显式报错（不会假阳性）。
+                let flush = ext_call(&state, "x.ai/memory/flush", serde_json::json!({})).await;
+                check!(
+                    "S9-memory-flush",
+                    flush.is_ok(),
+                    format!("flush_err={}", flush.as_ref().err().cloned().unwrap_or_default())
+                );
+            }
+        }
+    }
 
     write(&format!("SMOKE DONE pass={pass} fail={fail}"));
     std::process::exit(if fail > 0 { 1 } else { 0 });
+}
+
+/// 在**独立任务**里启动会话（debug 构建的栈安全网）。
+///
+/// autotest() 是一个巨型 future；start_inner 又嵌着引擎的深异步链。两者的
+/// poll 帧在 debug 构建下叠加超过 tokio worker 默认栈（C1 逃逸探针与 C3
+/// S9 首跑都实测 `tokio-rt-worker has overflowed its stack`）。把会话启动
+/// spawn 成全新任务后，它的 poll 链从干净栈开始——JoinHandle.await 本身
+/// 不嵌套 poll。release 构建帧小本可不炸，但 smoke 跑的就是 debug。
+async fn spawn_start(
+    app: AppHandle,
+    workspace: String,
+    resume: Option<String>,
+    intent: crate::surface_policy::NewSurfaceIntent,
+) -> Result<crate::agent::StartResult, String> {
+    let mut task = tauri::async_runtime::spawn(async move {
+        let state = app.state::<crate::agent::AgentState>();
+        // Code 走 canonical 包装器（顺带保活 start_inner——否则它在 autotest
+        // 全走 spawn_start 后变成死代码，clippy -D warnings 会拦）。
+        match intent {
+            crate::surface_policy::NewSurfaceIntent::Code => {
+                crate::agent::start_inner(app.clone(), &state, workspace, None, resume)
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            }
+            other => crate::agent::start_inner_with_intent(
+                app.clone(),
+                &state,
+                workspace,
+                None,
+                resume,
+                other,
+            )
+            .await
+            .map_err(|e| format!("{e:#}")),
+        }
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(120), &mut task).await {
+        Ok(joined) => joined.map_err(|e| format!("start task join: {e}"))?,
+        Err(_) => {
+            // Dropping a Tokio JoinHandle detaches the task. Explicit abort is
+            // required or a timed-out session start can keep mutating state and
+            // make later smoke assertions nondeterministic.
+            task.abort();
+            let _ = task.await;
+            Err("timed out after 120 seconds (start task aborted)".to_string())
+        }
+    }
 }
 
 /// 目录下的条目名（排序后可比）。用于「未被改动」「无新增」类断言。

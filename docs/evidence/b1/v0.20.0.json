@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "release": "v0.20.0",
+  "status": "NOT-RUN",
+  "reason": "Equivalent authenticated Claude Code and Codex execution surfaces, a frozen B01-B10 task set, and an independent blind adjudicator were not all available before the release candidate. No comparative winner is claimed.",
+  "runs": []
+}
