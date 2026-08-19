@@ -1,36 +1,40 @@
-# WanCode v0.19.0
+# WanCode v0.20.0
 
-WanCode is a multi-model desktop AI coding agent for Windows. It combines a native Tauri interface with a Rust agent runtime and supports Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints.
+WanCode v0.20 extends the Windows desktop agent with document work, clearer
+model controls, auditable compatibility evidence, and a safer update path.
 
-## What is new in v0.19
+## Highlights
 
-Version 0.19 introduces two explicit session surfaces:
+- **Work surface:** import DOCX documents into a read-only local staging area,
+  extract structured blocks in a bounded worker process, and preserve exact
+  UTF-16 source anchors for fail-closed citation resolution.
+- **Reasoning effort:** capability-gated effort choices follow the selected
+  model instead of advertising unsupported controls.
+- **Project memory:** refresh and rewrite operations are wired into Settings
+  with explicit backend round trips.
+- **Provider evidence:** the public compatibility matrix is generated from
+  committed CI summaries and cannot promote missing live evidence to a pass.
+- **Multi-source updater:** origin and gh-proxy manifests are checked
+  independently, only the highest available version is eligible, and each
+  candidate must pass the updater's pinned minisign verification before launch.
+- **Cowork safety evidence:** the real-engine/worktree escape probe is included,
+  while the Cowork product surface stays gated under the conservative tier.
 
-- **Chat** is designed for general questions and research. It runs from a private application directory, exposes only the built-in web tools, and disables local plugins, disk hooks, MCP, LSP, plugin skills, plugin commands, and extension-enabled subagents for the complete session lifetime.
-- **Code** is the full development environment. It retains repository access, terminal commands, Git workflows, hooks, skills, MCP, LSP, plugins, and subagents.
+## Release quality and limits
 
-The selected surface is not a frontend preference. WanCode binds it to the session identity, persists it in a fail-closed sidecar, derives the current policy in the Rust backend, and requires an explicit engine handshake before exposing the session to the UI.
+Frontend, Rust, provider, surface, parser-containment, and release-manifest
+contracts are part of the release gate. The B1 three-product competitive round
+is explicitly `NOT-RUN` because equivalent authenticated competitor surfaces,
+frozen tasks, and an independent blind adjudicator were not all available. No
+"better than Codex/Claude Code" result is claimed.
 
-## Core capabilities
-
-- Configure multiple model providers without editing source code.
-- Read and edit project files with inline diff review and approval controls.
-- Run terminal commands and multi-step tool workflows.
-- Search, restore, rename, branch, and rewind sessions.
-- Use Git helpers, MCP servers, hooks, skills, project instructions, and model-supported image input in Code sessions.
-- Store provider credentials in the operating-system keyring.
-- Receive signed in-app updates on Windows.
-
-## Release quality
-
-The v0.19 release passed the full frontend and Rust CI suite, engine routing and identity-chain tests, Chat extension fan-out regression tests, reproducible effective-tree audits, signed installer validation, and both fresh-install and existing-configuration GUI smoke tests.
-
-Work and Cowork surfaces remain planned. They were intentionally deferred so the Chat and Code lifecycle boundary could ship as a complete, testable contract.
+This personal-use release follows the approved honest-unsigned policy:
+Windows Authenticode is not claimed. Update integrity is provided by the pinned
+minisign key, published hashes, and the updater's signature verification.
 
 ## Download
 
-Download the signed Windows x64 installer or MSI package from the [WanCode v0.19.0 release page](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0).
+Download the Windows x64 installer from the
+[WanCode v0.20.0 release page](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.0).
 
-## Credits
-
-WanCode uses the open-source [grok-build](https://github.com/ThomasWan123/grok-build) agent runtime under the Apache License 2.0. The WanCode desktop application is also licensed under Apache 2.0.
+WanCode and its grok-build-derived runtime are licensed under Apache 2.0.

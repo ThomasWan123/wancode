@@ -22,22 +22,25 @@ Unlike single-provider clients, WanCode treats model choice as a first-class fea
 
 The desktop client is built with Tauri 2, React, and TypeScript. Its Rust agent runtime is based on the open-source [grok-build](https://github.com/ThomasWan123/grok-build) project and is pinned through a reproducible, audited vendor manifest.
 
-## Current release: v0.19.0
+## Current release: v0.20.0
 
-[WanCode v0.19.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0) introduces explicit **Chat** and **Code** session surfaces.
+[WanCode v0.20.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.0) adds a usable **Work** surface, capability-aware model controls, auditable provider evidence, and verified multi-source updates while preserving the Chat/Code boundary introduced in v0.19.
 
 | Surface | Intended use | Local capabilities |
 |---|---|---|
 | **Chat** | General questions, research, and web-assisted conversations | Uses a private application runtime directory and built-in web tools. Local plugins, disk hooks, MCP servers, LSP servers, plugin skills, plugin commands, and extension-enabled subagents are disabled for the complete session lifetime. |
 | **Code** | Repository work and software development | Keeps the full coding toolchain, workspace access, Git integration, terminal access, hooks, skills, MCP, LSP, plugins, and subagents. |
+| **Work** | Local document understanding | Imports DOCX files into a read-only staging area, extracts anchored blocks in a crash-contained worker, and keeps local extension capabilities disabled by default. |
 
 Surface identity is bound when a session is created and stored in a fail-closed WanCode sidecar. Restored sessions must resolve to their original surface, and the engine must explicitly confirm that the requested policy was applied before WanCode exposes the session handle.
 
-Work and Cowork surfaces remain on the roadmap. They were intentionally deferred so v0.19 could ship the Chat and Code security boundary with complete lifecycle coverage.
+Cowork remains gated. v0.20 ships its real-engine escape probe and records the conservative isolation verdict, but does not expose an unsafe task-delegation surface.
 
 ## Highlights
 
 - **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints, with a published [provider compatibility matrix](docs/provider-compatibility.md) generated from CI evidence.
+- **Capability-aware controls** — reasoning effort appears only for models that declare support; project-memory refresh and edit controls are wired to the engine.
+- **Document Work surface** — staged DOCX import, fail-closed UTF-16 anchors, and bounded worker-process parsing.
 - **Streaming conversations** — Markdown rendering, collapsible reasoning, and tool-call cards.
 - **Approval controls** — ask, allow for the current session, or reject sensitive actions.
 - **Inline diff review** — inspect proposed file changes before they are written.
@@ -46,7 +49,7 @@ Work and Cowork surfaces remain on the roadmap. They were intentionally deferred
 - **Project context** — loads `AGENTS.md` and supports compatible project instruction files.
 - **Developer tools** — file browser, terminal, Git helpers, MCP configuration, hooks, skills, and image input where supported by the selected model.
 - **Safe first-run setup** — provider credentials are saved only after a successful connection test.
-- **Automatic updates** — signed Windows updater artifacts are published with each release.
+- **Automatic updates** — origin and transport-only mirror manifests are checked independently; the highest version wins and every installer remains bound to the pinned minisign trust key.
 
 ## Quick start
 
@@ -55,7 +58,7 @@ Prebuilt releases currently target Windows x64.
 1. Download the NSIS `-setup.exe` or MSI package from [GitHub Releases](https://github.com/ThomasWan123/wancode/releases/latest).
 2. Launch WanCode and choose a provider in the first-run wizard.
 3. Paste your API key. WanCode tests the connection before saving the configuration.
-4. Choose **Chat** for a restricted conversation session, or open a project and choose **Code** for the complete development toolchain.
+4. Choose **Chat** for a restricted conversation session, **Code** for the complete development toolchain, or **Work** for local document understanding.
 
 > **Zhipu endpoint note:** the monthly GLM Coding Plan and the pay-as-you-go Open Platform use different endpoints and non-interchangeable API keys. Select the provider card that matches your subscription.
 
@@ -125,9 +128,9 @@ powershell -File scripts/smoke.ps1
 
 ## Project status
 
-- **Latest stable release:** [v0.19.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.19.0)
-- **Available surfaces:** Chat and Code
-- **Planned surfaces:** Work and Cowork
+- **Latest stable release:** [v0.20.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.0)
+- **Available surfaces:** Chat, Code, and Work
+- **Gated surface:** Cowork
 - **Platform:** Windows x64
 - **License:** Apache License 2.0
 

@@ -235,8 +235,21 @@ if ($Mode -eq "dependency-delta") {
   }
   $beforePkgs = Read-LockPackages $beforeCargo
   $afterPkgs  = Read-LockPackages $afterCargo
-  $added   = @($afterPkgs.Keys  | Where-Object { -not $beforePkgs.ContainsKey($_) } | Sort-Object)
-  $removed = @($beforePkgs.Keys | Where-Object { -not $afterPkgs.ContainsKey($_) }  | Sort-Object)
+  # App releases also change the workspace member's own version. Keep that
+  # orthogonal to dependency admission: filter only the wancode package from
+  # the add/remove sets, then bind its exact version to tauri.conf below.
+  $added   = @($afterPkgs.Keys  | Where-Object { -not $beforePkgs.ContainsKey($_) -and $_ -notmatch '^wancode ' } | Sort-Object)
+  $removed = @($beforePkgs.Keys | Where-Object { -not $afterPkgs.ContainsKey($_) -and $_ -notmatch '^wancode ' }  | Sort-Object)
+
+  function Read-DependencyDeltaWanCodeVersion([string]$path) {
+    $raw = [System.IO.File]::ReadAllText($path)
+    $rx = [regex]'(?ms)\[\[package\]\]\r?\nname = "wancode"\r?\nversion = "([^"]+)"'
+    $matches = $rx.Matches($raw)
+    if ($matches.Count -ne 1) { throw "Cargo.lock 中 wancode package 必须恰好一项：$path（实际 $($matches.Count)）" }
+    return $matches[0].Groups[1].Value
+  }
+  $afterWanCodeVersion = Read-DependencyDeltaWanCodeVersion $afterCargo
+  $appVersion = (Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
 
   # 申报清单：清单里 declared_added_packages=「name version」逗号分隔。
   # 申报是为了让「多出来什么」成为评审对象，而不是藏在 118 行 diff 里。
@@ -254,6 +267,7 @@ if ($Mode -eq "dependency-delta") {
   Record-Check "D5_no_native_sys_added" ($sysAdded.Count -eq 0) $(if ($sysAdded.Count) { "新增原生链: $($sysAdded -join '; ')" } else { "无 *-sys 新增（W1 教训，机器强制）" })
   Record-Check "D6_wiring_unchanged" ($beforeWiringSha -eq $afterWiringSha -and $afterBuildManifest.wiring_patch_sha256 -eq $afterWiringSha) "before=$beforeWiringSha after=$afterWiringSha manifest=$($afterBuildManifest.wiring_patch_sha256)"
   Record-Check "D7_hashes_registered" ($digestAfter -eq $afterBuildManifest.effective_tree_sha256 -and $afterBuildManifest.cargo_lock_sha256 -eq $afterCargoSha -and $afterBuildManifest.emergency_patch_sha256 -eq "none" -and (Get-Item $afterEmergency).Length -eq 0) "tree=$digestAfter manifest_tree=$($afterBuildManifest.effective_tree_sha256) lock=$afterCargoSha manifest_lock=$($afterBuildManifest.cargo_lock_sha256) emergency=$($afterBuildManifest.emergency_patch_sha256)"
+  Record-Check "D8_wancode_version_matches_app" ($afterWanCodeVersion -eq $appVersion) "lock=$afterWanCodeVersion app=$appVersion"
 
   $summary = [ordered]@{
     mode                          = "dependency-delta"
@@ -284,7 +298,7 @@ if ($Mode -eq "dependency-delta") {
     $failures | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
     exit 1
   }
-  Write-Host "MIGRATION AUDIT OK：dependency-delta 七项全 PASS（新增 $($added.Count) 个 package，无 *-sys，无既有 package 变动）"
+  Write-Host "MIGRATION AUDIT OK：dependency-delta 八项全 PASS（新增 $($added.Count) 个 package，无 *-sys，无既有 package 变动）"
   exit 0
 }
 
