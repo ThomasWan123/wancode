@@ -1,6 +1,6 @@
 # v0.20 Direction — pragmatic plan after the v0.19.1 reissue
 
-Status: PROPOSED (cc draft, awaiting codex review). Horizon: ~4–6 weeks.
+Status: IN DELIVERY. Horizon: v0.20 release train.
 Decision owner: user. Execution: task split in §4.
 
 ## 0. Where we stand (2026-08-11)
@@ -30,7 +30,7 @@ structurally cannot follow.
 | # | Item | Why | Exit criterion |
 |---|---|---|---|
 | A1 | Code signing | **DEFERRED by user scope ruling (2026-08-11): WanCode is currently a personal-use product.** Authenticode is a distribution-trust signal, not an operator security control; the update chain is already minisign-verified independently, which covers this owner's present personal-use threat model. Provider selection and cost data live in the dated research note in project memory, not in this strategic doc | Reactivation triggers (any one): public promotion push, a real external user base, marketplace/store distribution, or strict-EDR environments. Until then releases follow the v0.19.1 honest-unsigned pattern (explicit disclosure + SHA-256 + minisign chain). `require_authenticode` stays available behind workflow_dispatch for the day it flips |
-| A2 | Reconcile + merge QA system (PR #29) | PR #31 merged 2026-08-10; PR #29 remains Draft with its scorecard bound to the withdrawn v0.19.0 candidate (NO-GO) | #29 reconciled to the v0.19.1 evidence/decision, then merged; scorecard becomes the standing release template |
+| A2 | Reconcile + merge QA system (PR #29) | The professional QA assets are integrated into the v0.20 release branch; the withdrawn v0.19.0 scorecard remains historical evidence and a separate v0.19.1 reconciliation records the approved honest-unsigned decision | Quality templates and both historical/final release records are durable; future release decisions start from the standing scorecard template |
 | A3 | Multi-mirror updater failover | gh-proxy is a single point of failure with a recorded zero-byte incident; retry ≠ failover | Mirrors are **transport-only, never trust roots**: the same minisign-signed manifest and artifact identity must verify under the pinned updater key regardless of source; signature/hash/version mismatch fails closed and advances to the next source without executing bytes; downloaded bytes are re-verified before launch. Ordered mirror list with origin fallback; failure surfaced in UI. E2E covers positive origin/mirror controls plus zero-byte, truncation, corruption, stale-manifest, timeout, mismatched-signature, and origin-fallback cases |
 
 ## 2. Track B — Prove "better" (measurement, not claims)
