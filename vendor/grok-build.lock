@@ -1,4 +1,4 @@
-﻿# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
+# grok-build 引擎构建清单（#126 B1：lock 升级为 build manifest）
 #
 # wancode 不把引擎做成 git submodule —— 引擎必须放在仓库的【兄弟目录】
 # ../grok-build：src-tauri/Cargo.toml 通过 workspace = "../../grok-build"
@@ -27,8 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=wancode-lock-delta
-declared_added_wancode_dependencies=semver
+migration_audit_mode=equivalent
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
 #   引擎 commit **不动**（2f480062e），有效树里**只有 Cargo.lock 变**，

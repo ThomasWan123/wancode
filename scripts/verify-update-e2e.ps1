@@ -160,10 +160,16 @@ function Restore-Registry {
     if (-not $script:RegPolluted -or $script:RegRestored) { return }
     cmd /c "reg delete `"$UninstKey`" /f 2>nul" | Out-Null
     cmd /c "reg delete `"$ManuKey`" /f 2>nul"   | Out-Null
-    cmd /c "reg import `"$script:SnapUninst`" 2>nul" | Out-Null
-    $r1 = $LASTEXITCODE
-    cmd /c "reg import `"$script:SnapManu`" 2>nul"   | Out-Null
-    $r2 = $LASTEXITCODE
+    $r1 = 0
+    $r2 = 0
+    if ($script:PreUninstExists) {
+        cmd /c "reg import `"$script:SnapUninst`" 2>nul" | Out-Null
+        $r1 = $LASTEXITCODE
+    }
+    if ($script:PreManuExists) {
+        cmd /c "reg import `"$script:SnapManu`" 2>nul" | Out-Null
+        $r2 = $LASTEXITCODE
+    }
     $script:RegRestored = $true
     Step 'Registry restore (reg import of pre-run snapshot)' (($r1 -eq 0) -and ($r2 -eq 0)) ("import exit codes: $r1,$r2")
 }
@@ -377,18 +383,26 @@ Step 'Preflight: no wancode.exe running outside isolated dir' $true ''
 # registry + shortcut snapshot
 $script:SnapUninst = Join-Path $WorkDir 'snapshot-uninstall.reg'
 $script:SnapManu   = Join-Path $WorkDir 'snapshot-manu.reg'
-cmd /c "reg export `"$UninstKey`" `"$script:SnapUninst`" /y" | Out-Null
-$e1 = $LASTEXITCODE
-cmd /c "reg export `"$ManuKey`" `"$script:SnapManu`" /y" | Out-Null
-$e2 = $LASTEXITCODE
 $script:PreUninstText = Get-RegText $UninstKey
 $script:PreManuText   = Get-RegText $ManuKey
+$script:PreUninstExists = ($script:PreUninstText -ne '<absent>')
+$script:PreManuExists   = ($script:PreManuText -ne '<absent>')
+$e1 = 0
+$e2 = 0
+if ($script:PreUninstExists) {
+    cmd /c "reg export `"$UninstKey`" `"$script:SnapUninst`" /y" | Out-Null
+    $e1 = $LASTEXITCODE
+}
+if ($script:PreManuExists) {
+    cmd /c "reg export `"$ManuKey`" `"$script:SnapManu`" /y" | Out-Null
+    $e2 = $LASTEXITCODE
+}
 Step 'Preflight: registry snapshot (Uninstall\wancode + Software\wanwe\wancode)' (($e1 -eq 0) -and ($e2 -eq 0)) ("export exit codes: $e1,$e2")
 $script:PreRealDisplayVersion = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\wancode' -EA SilentlyContinue).DisplayVersion
 if (($e1 -ne 0) -or ($e2 -ne 0)) {
-    # Fail closed (Codex review): the installer WILL rewrite these keys; if the
-    # snapshot doesn't exist there is nothing to restore from afterwards.
-    # Running on would trade a skipped test for corrupted real-install state.
+    # Existing keys must be exportable before installers run. An absent key is
+    # a valid baseline: restoration deletes installer-created keys and leaves
+    # it absent, which Final-Audit verifies via the captured '<absent>' text.
     throw "registry snapshot failed (export codes $e1,$e2) - aborting BEFORE any installer runs"
 }
 
