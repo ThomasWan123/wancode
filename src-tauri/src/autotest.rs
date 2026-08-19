@@ -4,7 +4,7 @@ use tauri::{AppHandle, Manager, State};
 use xai_acp_lib::acp_send;
 use agent_client_protocol as acp;
 
-use crate::agent::{ext_call, start_inner, AgentState};
+use crate::agent::{ext_call, AgentState};
 use crate::git_ops::{git_stash, git_status_ext, session_git_root};
 
 /// Self-test driven by `WANCODE_AUTOTEST=<workspace-dir>`: exercises the full
@@ -81,14 +81,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // Work 不会用它当 cwd（Work 必须落在自己的暂存目录）。
         let started = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Work,
-            ),
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work),
         )
         .await;
         let r = match started {
@@ -194,11 +187,9 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 且不铸第二个工作区。
         let resumed = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
+            spawn_start(
                 app.clone(),
-                &state,
                 workspace.clone(),
-                None,
                 Some(r.session_id.clone()),
                 NewSurfaceIntent::Code, // 故意对立
             ),
@@ -254,14 +245,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 恢复时一致），再把它的 sidecar 翻成 Cowork。
         let code_started = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Code,
-            ),
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Code),
         )
         .await;
         let blocked_sid = match &code_started {
@@ -280,11 +264,9 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let ws_dirs_before = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let blocked = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
+            spawn_start(
                 app.clone(),
-                &state,
                 workspace.clone(),
-                None,
                 Some(blocked_sid.clone()),
                 NewSurfaceIntent::Code,
             ),
@@ -322,14 +304,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let ws_before2 = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let fresh_fail = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::agent::start_inner_with_intent(
-                app.clone(),
-                &state,
-                workspace.clone(),
-                None,
-                None,
-                NewSurfaceIntent::Work,
-            ),
+            spawn_start(app.clone(), workspace.clone(), None, NewSurfaceIntent::Work),
         )
         .await;
         let fresh_err = match &fresh_fail {
@@ -376,7 +351,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     write("SMOKE S1-start BEGIN");
     let started = match tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        start_inner(app.clone(), &state, workspace.clone(), None, None),
+        spawn_start(
+            app.clone(),
+            workspace.clone(),
+            None,
+            crate::surface_policy::NewSurfaceIntent::Code,
+        ),
     )
     .await
     {
@@ -547,7 +527,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
     // ── S6 会话恢复（同 id 续接，历史保留）────────────────────────
     let before_len = chat_text().lines().count();
-    let resumed = start_inner(app.clone(), &state, workspace.clone(), None, Some(sid.clone())).await;
+    let resumed = spawn_start(
+        app.clone(),
+        workspace.clone(),
+        Some(sid.clone()),
+        crate::surface_policy::NewSurfaceIntent::Code,
+    )
+    .await;
     let same_id = resumed.as_ref().map(|r| r.session_id == sid).unwrap_or(false);
     let after_len = chat_text().lines().count();
     check!(
@@ -556,9 +542,101 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         format!("same_id={same_id} lines {before_len}->{after_len}")
     );
 
+    // ── S9 记忆回路（C3 验收：flush 真实引擎往返）───────────────
+    // 隔离 GROK_HOME 的 config 副本里显式开 [memory].enabled——引擎在
+    // **会话启动时**解析该开关，所以先写配置再起新会话并做真实 flush。
+    // rewrite 暂不纳入产品入口/验收：锁定引擎把模型硬编码为 `grok-build`，
+    // 第三方端点不可用；G26 引擎例外获批前，不能把该失败当 PASS。
+    write("SMOKE S9-memory BEGIN");
+    {
+        let cfg_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
+        let enabled = match std::fs::read_to_string(&cfg_path) {
+            Ok(text) => {
+                let mut doc: toml_edit::DocumentMut = text.parse().unwrap_or_default();
+                crate::memory_ops::write_memory_enabled(&mut doc, true);
+                crate::config_core::write_config_atomic(&cfg_path, &doc.to_string()).is_ok()
+            }
+            Err(e) => {
+                write(&format!("SMOKE S9-memory config unreadable: {e}"));
+                false
+            }
+        };
+        if !enabled {
+            check!("S9-memory-roundtrip", false, "无法开启 [memory].enabled（隔离配置缺失/不可写）");
+        } else {
+            // 新会话（spawn_start 与 start_inner 一样会拆掉 S6 的会话——
+            // 套件尾声，无后续依赖）。
+            let s9 = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                spawn_start(
+                    app.clone(),
+                    workspace.clone(),
+                    None,
+                    crate::surface_policy::NewSurfaceIntent::Code,
+                ),
+            )
+            .await;
+            let (s9_sid, s9_err) = match s9 {
+                Ok(Ok(r)) => (r.session_id.clone(), String::new()),
+                Ok(Err(e)) => (String::new(), format!("{e:#}")),
+                Err(_) => (String::new(), "session start timed out".to_string()),
+            };
+            if s9_sid.is_empty() {
+                check!("S9-memory-flush", false, format!("session start: {s9_err}"));
+            } else {
+                // flush：引擎侧 did_flush 不随响应返回（Empty），回路本身
+                // 不报错即通过；记忆未启用时引擎会显式报错（不会假阳性）。
+                let flush = ext_call(&state, "x.ai/memory/flush", serde_json::json!({})).await;
+                check!(
+                    "S9-memory-flush",
+                    flush.is_ok(),
+                    format!("flush_err={}", flush.as_ref().err().cloned().unwrap_or_default())
+                );
+            }
+        }
+    }
 
     write(&format!("SMOKE DONE pass={pass} fail={fail}"));
     std::process::exit(if fail > 0 { 1 } else { 0 });
+}
+
+/// 在**独立任务**里启动会话（debug 构建的栈安全网）。
+///
+/// autotest() 是一个巨型 future；start_inner 又嵌着引擎的深异步链。两者的
+/// poll 帧在 debug 构建下叠加超过 tokio worker 默认栈（C1 逃逸探针与 C3
+/// S9 首跑都实测 `tokio-rt-worker has overflowed its stack`）。把会话启动
+/// spawn 成全新任务后，它的 poll 链从干净栈开始——JoinHandle.await 本身
+/// 不嵌套 poll。release 构建帧小本可不炸，但 smoke 跑的就是 debug。
+async fn spawn_start(
+    app: AppHandle,
+    workspace: String,
+    resume: Option<String>,
+    intent: crate::surface_policy::NewSurfaceIntent,
+) -> Result<crate::agent::StartResult, String> {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<crate::agent::AgentState>();
+        // Code 走 canonical 包装器（顺带保活 start_inner——否则它在 autotest
+        // 全走 spawn_start 后变成死代码，clippy -D warnings 会拦）。
+        match intent {
+            crate::surface_policy::NewSurfaceIntent::Code => {
+                crate::agent::start_inner(app.clone(), &state, workspace, None, resume)
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            }
+            other => crate::agent::start_inner_with_intent(
+                app.clone(),
+                &state,
+                workspace,
+                None,
+                resume,
+                other,
+            )
+            .await
+            .map_err(|e| format!("{e:#}")),
+        }
+    })
+    .await
+    .map_err(|e| format!("start task join: {e}"))?
 }
 
 /// 目录下的条目名（排序后可比）。用于「未被改动」「无新增」类断言。

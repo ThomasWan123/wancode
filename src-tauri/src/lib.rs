@@ -23,6 +23,7 @@ pub mod work_parse_worker;
 pub mod cowork_escape_probe;
 pub mod cowork_escape_run;
 mod effort;
+mod memory_ops;
 #[cfg(test)]
 mod work_seams;
 #[cfg(test)]
@@ -252,6 +253,11 @@ pub fn run() {
             engine_ops::sessions_roster,
             engine_ops::memory_flush,
             engine_ops::memory_rewrite,
+            memory_ops::memory_config_get,
+            memory_ops::memory_config_set,
+            memory_ops::memory_read_global,
+            memory_ops::memory_append_global,
+            memory_ops::memory_read_workspace,
             engine_ops::subagent_get,
             engine_ops::agent_recap,
             engine_ops::agent_suggest,

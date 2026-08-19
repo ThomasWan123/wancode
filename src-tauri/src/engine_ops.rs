@@ -281,15 +281,32 @@ pub async fn sessions_roster(state: State<'_, AgentState>) -> Result<serde_json:
 
 #[tauri::command]
 pub async fn memory_flush(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    // session_id 由 ext_call 统一注入（引擎 MemoryFlushRequest 要 snake_case）。
     ext_ok(&state, "x.ai/memory/flush", serde_json::json!({})).await
 }
 
+/// C3：把原始笔记交给引擎做一次 LLM 结构化改写，返回 `{rewritten}`。
+/// 引擎契约是 `{sessionId, rawText, contextSummary}`（camelCase；sessionId
+/// 由 ext_call 注入）——此前这里发的是 `{text}`，两个必填键全缺，调用
+/// 必败；本命令从未被前端调用过，所以坏而未显。
+///
+/// 锁定引擎仍把推理模型硬编码为 `grok-build`，第三方端点不可用；因此 C3
+/// 只修正 wire 契约，不把本命令暴露为产品入口，也不把已知失败计作验收通过。
 #[tauri::command]
 pub async fn memory_rewrite(
     state: State<'_, AgentState>,
-    text: String,
+    raw_text: String,
+    context_summary: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    ext_ok(&state, "x.ai/memory/rewrite", serde_json::json!({ "text": text })).await
+    ext_ok(
+        &state,
+        "x.ai/memory/rewrite",
+        serde_json::json!({
+            "rawText": raw_text,
+            "contextSummary": context_summary.unwrap_or_default(),
+        }),
+    )
+    .await
 }
 
 #[tauri::command]

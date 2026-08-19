@@ -1481,6 +1481,22 @@ button.session-item {
   margin-top: 6px;
 }
 
+/* C3 记忆设置面：MEMORY.md / 改写预览 */
+.memory-preview {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 6px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .key-ok {
   font-size: 11px;
   color: var(--ok);
