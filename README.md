@@ -130,6 +130,8 @@ powershell -File scripts/smoke.ps1
 - **Planned surfaces:** Work and Cowork
 - **Platform:** Windows x64
 - **License:** Apache License 2.0
+- **Quality plan:** [v0.19+ professional test strategy](docs/quality/v0.19-product-test-plan.md)
+- **Current release evidence:** [v0.19.0 quality scorecard](docs/golden-runs/v0.19.0.md)
 
 ## Acknowledgements
 
