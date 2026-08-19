@@ -48,6 +48,9 @@ jobs:
           echo "package.json=$a tauri.conf.json=$b Cargo.toml=$c lock.version=$d lock.root=$e"
           [ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::版本号不一致（manifest 三处）"; exit 1; }
           [ "$a" = "$d" ] && [ "$a" = "$e" ] || { echo "::error::package-lock.json 版本漂移（$d/$e ≠ $a），运行 npm install 同步后提交"; exit 1; }
+      - name: 双源更新 manifest 合同
+        shell: pwsh
+        run: ./scripts/test-update-manifests.ps1
 
   rust:
     runs-on: windows-latest

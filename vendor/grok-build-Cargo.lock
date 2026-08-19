@@ -13512,6 +13512,7 @@ dependencies = [
  "pdfium-render",
  "quick-xml 0.37.5",
  "reqwest 0.12.24",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

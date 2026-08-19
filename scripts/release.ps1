@@ -70,20 +70,16 @@ npx --yes @tauri-apps/cli signer sign -f $key -p '""' $setup
 if ($LASTEXITCODE -ne 0) { throw "签名失败" }
 $sig = Get-Content "$setup.sig" -Raw
 
-Write-Host "[4/4] 生成 latest.json..."
+Write-Host "[4/4] 生成 origin + 镜像 manifests..."
 $pub = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-$latest = @{
-  version   = $Version
-  notes     = "WanCode v$Version"
-  pub_date  = $pub
-  platforms = @{
-    "windows-x86_64" = @{
-      signature = $sig.Trim()
-      url       = "$Mirror`https://github.com/$Repo/releases/download/v$Version/wancode_${Version}_x64-setup.exe"
-    }
-  }
-} | ConvertTo-Json -Depth 6
-[System.IO.File]::WriteAllText("$bundle\latest.json", $latest, (New-Object System.Text.UTF8Encoding($false)))
+. "$PSScriptRoot/update-manifests.ps1"
+$null = Write-WanCodeUpdateManifests `
+  -Bundle $bundle `
+  -Version $Version `
+  -Repo $Repo `
+  -Mirror $Mirror `
+  -Signature $sig `
+  -PubDate $pub
 
 Write-Host ""
 Write-Host "✅ 完成。产物：" -ForegroundColor Green
@@ -91,22 +87,24 @@ Write-Host "   $msi"
 Write-Host "   $setup"
 Write-Host "   $setup.sig"
 Write-Host "   $bundle\latest.json"
+Write-Host "   $bundle\latest-gh-proxy.json"
 Write-Host ""
 Write-Host "下一步（手动，发布是外向操作）：" -ForegroundColor Yellow
 Write-Host "   git tag v$Version; git push origin v$Version"
-Write-Host "   gh release create v$Version `"$msi`" `"$setup`" `"$setup.sig`" `"$bundle\latest.json`" --repo $Repo --title `"WanCode v$Version`" --notes `"...`""
+Write-Host "   gh release create v$Version `"$msi`" `"$setup`" `"$setup.sig`" `"$bundle\latest.json`" `"$bundle\latest-gh-proxy.json`" --repo $Repo --title `"WanCode v$Version`" --notes `"...`""
 Write-Host ""
 Write-Host "发布后硬断言（v0.18.9 事故复盘：gh 的 file#label 语法只改显示标签不改资产文件名，"
 Write-Host "曾把 latest.json 传成 latest-189.json——updater 按文件名取件，全体用户 404）："
 Write-Host "   `$assets = gh release view v$Version --json assets --jq '.assets[].name'"
 Write-Host "   if (`$assets -notcontains 'latest.json') { throw '资产名必须精确为 latest.json' }"
+Write-Host "   if (`$assets -notcontains 'latest-gh-proxy.json') { throw '缺少镜像清单 latest-gh-proxy.json' }"
 
 Write-Host ""
 Write-Host "══════════ 发版强制检查单（v0.12.2 起，全过才发）══════════" -ForegroundColor Yellow
 Write-Host "  [ ] 1. 真零配置首启 smoke：挪走 ~/.grok/config.toml 启动，应弹向导且 60 秒不崩"
 Write-Host "  [ ] 2. 老配置升级 smoke：现有配置启动，会话可用"
 Write-Host "  [ ] 3. Rust 单测全绿：cargo test --locked -p wancode --lib"
-Write-Host "  [ ] 4. 上传后镜像验证：latest.json version 正确 + 安装包首 KB 为 MZ 头"
-Write-Host "  [ ] 5. 资产名断言：release 资产列表必须含精确文件名 latest.json（禁用 file#label 改名上传）"
+Write-Host "  [ ] 4. 上传后双源验证：latest.json / latest-gh-proxy.json 同版本同签名，安装包首 KB 为 MZ 头"
+Write-Host "  [ ] 5. 资产名断言：release 资产列表必须含 latest.json 与 latest-gh-proxy.json（禁用 file#label 改名上传）"
 Write-Host "  （教训：v0.12.0 发布后才发现新用户装机即闪退——历史所有版本都没测过第 1 条）"
 Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Yellow
