@@ -31,7 +31,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { surface, MODE_ORDER, acceptPopup, busy, draftRef, editingQueueId, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
+  const { surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -88,6 +88,9 @@ export function Composer(props: Record<string, any>) {
       setAmbiguity(null);
       // 选定即解除会话阻塞——引擎那边成功切换后 block 已清，本地状态同步。
       setModelBlock?.(null);
+      // C2：切换成功后按新模型的能力位推导强度选择器（引擎不回推菜单，
+      // 当前档由随后的 ModelChanged 广播校准）。
+      onModelSwitched?.(target);
     } catch (err) {
       const e = asModelSwitchError(err);
       setModel(previous);
@@ -410,6 +413,30 @@ export function Composer(props: Record<string, any>) {
                   </option>
                 ))}
               </select>
+              {/* C2：推理强度选择器——只在引擎下发菜单时渲染（unknown ≠
+                  advertised）。切强度走与切模型同一条 setModel 事务。 */}
+              {sessionId && effortOptions?.length > 0 && (
+                <select
+                  className="composer-model composer-effort"
+                  value={currentEffort ?? ""}
+                  title={t.effortHint}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    if (v) onEffortChange?.(v);
+                  }}
+                >
+                  {currentEffort == null && (
+                    <option value="" disabled>
+                      {t.effortDefault}
+                    </option>
+                  )}
+                  {effortOptions.map((o: { id: string; label: string }) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              )}
               {shownNotice && (
                 <div className="model-ambiguity" role="dialog" aria-label={shownNotice.title}>
                   <div className="ma-title">{shownNotice.title}</div>

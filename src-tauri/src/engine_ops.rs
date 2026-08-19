@@ -899,10 +899,16 @@ impl ModelSwitchError {
 
 /// Switch the active model live, without restarting the session or losing
 /// context (ACP `session/setModel`). Mirrors Claude Code's `/model`.
+///
+/// C2：`effort` 非空时在同一请求 meta 里带 `reasoningEffort`——引擎对强度
+/// 覆盖做能力校验（不支持的模型忽略并 warn），并广播 ModelChanged 让本端
+/// 与其他订阅端同步。切强度 = 用当前模型 id 重发 setModel（引擎事务同一条
+/// 路径，不新增侧门）。
 #[tauri::command]
 pub async fn agent_set_model(
     state: State<'_, AgentState>,
     model: String,
+    effort: Option<String>,
 ) -> Result<(), ModelSwitchError> {
     let (acp_tx, session_id, surface_kind) = {
         let guard = state.handle.lock().await;
@@ -927,14 +933,19 @@ pub async fn agent_set_model(
         crate::surface_policy::ensure_chat_model_allowed(&doc, &model)
             .map_err(|error| ModelSwitchError::SurfacePolicyBlocked { error })?;
     }
-    let _: acp::SetSessionModelResponse = acp_send(
-        acp::SetSessionModelRequest::new(
-            session_id,
-            acp::ModelId::new(std::sync::Arc::from(model.as_str())),
-        ),
-        &acp_tx,
-    )
-    .await
-    .map_err(|e| ModelSwitchError::from_acp(&e))?;
+    let mut req = acp::SetSessionModelRequest::new(
+        session_id,
+        acp::ModelId::new(std::sync::Arc::from(model.as_str())),
+    );
+    if let Some(effort) = effort {
+        req = req.meta(
+            serde_json::json!({ "reasoningEffort": effort })
+                .as_object()
+                .cloned(),
+        );
+    }
+    let _: acp::SetSessionModelResponse = acp_send(req, &acp_tx)
+        .await
+        .map_err(|e| ModelSwitchError::from_acp(&e))?;
     Ok(())
 }
