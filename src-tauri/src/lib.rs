@@ -21,6 +21,7 @@ pub mod work_blocks;
 pub mod work_docx;
 pub mod work_parse_worker;
 pub mod cowork_escape_probe;
+pub mod cowork_escape_run;
 #[cfg(test)]
 mod work_seams;
 #[cfg(test)]
