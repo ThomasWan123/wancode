@@ -1,7 +1,7 @@
 ﻿# 迁移前后有效树等价审计——可由仓库/CI 重演的 materializer（#126 B1 复核定案 P0-1）
 #
 # 用法：powershell -File scripts/migration_audit.ps1 -BeforeSha <迁移前 wancode commit>
-#                  [-Mode equivalent|intentional-delta|version-only|dependency-delta]
+#                  [-Mode equivalent|intentional-delta|version-only|dependency-delta|wancode-lock-delta]
 #                  [-Whitelist docs/design/v0.19-engine-file-whitelist.txt]
 #                  [-OutFile migration-audit-summary.json]
 #
@@ -19,7 +19,7 @@
 # 新 = grok-build-wiring.patch + grok-build-emergency.patch（B1 起）。
 param(
   [Parameter(Mandatory)][string]$BeforeSha,
-  [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta")][string]$Mode = "equivalent",
+  [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta", "wancode-lock-delta")][string]$Mode = "equivalent",
   [string]$Whitelist,
   [string]$OutFile = "migration-audit-summary.json"
 )
@@ -303,6 +303,68 @@ if ($Mode -eq "dependency-delta") {
 }
 
 # ── release version-only：只允许 Cargo.lock 的 wancode 版本变化 ─
+if ($Mode -eq "wancode-lock-delta") {
+  function Read-WanCodeLockBlock([string]$path) {
+    $raw = [System.IO.File]::ReadAllText($path)
+    $rx = [regex]'(?ms)^\[\[package\]\]\r?\nname = "wancode"\r?\nversion = "([^"]+)"\r?\n(?<body>.*?)(?=^\[\[package\]\]|\z)'
+    $matches = $rx.Matches($raw)
+    if ($matches.Count -ne 1) { throw "Cargo.lock 中 wancode package 必须恰好一项：$path（实际 $($matches.Count)）" }
+    $block = $matches[0]
+    $deps = @([regex]::Matches($block.Groups['body'].Value, '(?m)^ "([^"]+)",?$') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    return [pscustomobject]@{
+      version = $block.Groups[1].Value
+      dependencies = $deps
+      without_wancode = $raw.Remove($block.Index, $block.Length).Insert($block.Index, "<WANCODE_PACKAGE>`n")
+    }
+  }
+
+  $beforeBlock = Read-WanCodeLockBlock $beforeCargo
+  $afterBlock = Read-WanCodeLockBlock $afterCargo
+  $addedDeps = @($afterBlock.dependencies | Where-Object { $_ -notin $beforeBlock.dependencies } | Sort-Object)
+  $removedDeps = @($beforeBlock.dependencies | Where-Object { $_ -notin $afterBlock.dependencies } | Sort-Object)
+  $declaredDeps = @()
+  $declaredDepsRaw = $afterBuildManifest.declared_added_wancode_dependencies
+  if ($declaredDepsRaw) { $declaredDeps = @($declaredDepsRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique) }
+  $appVersion = (Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+  $onlyCargoLock = $changed.Count -eq 1 -and $changed[0].path -eq "Cargo.lock" -and $changed[0].change -eq "modified"
+
+  Record-Check "W1_engine_commit_unchanged" ($beforeCommit -eq $afterCommit) "before=$beforeCommit after=$afterCommit"
+  Record-Check "W2_only_cargo_lock_changed" $onlyCargoLock $(if ($changed.Count) { (($changed | ForEach-Object { "$($_.change):$($_.path)" }) -join ', ') } else { "无有效树差异" })
+  Record-Check "W3_non_wancode_lock_identical" ($beforeBlock.without_wancode -ceq $afterBlock.without_wancode) "除 wancode package 块外 Cargo.lock 必须逐字节一致"
+  Record-Check "W4_declared_dependencies_only" (($addedDeps -join '|') -ceq ($declaredDeps -join '|') -and $removedDeps.Count -eq 0) "added=[$($addedDeps -join '; ')] declared=[$($declaredDeps -join '; ')] removed=[$($removedDeps -join '; ')]"
+  Record-Check "W5_version_changed_and_matches_app" ($beforeBlock.version -ne $afterBlock.version -and $afterBlock.version -eq $appVersion) "before=$($beforeBlock.version) after=$($afterBlock.version) app=$appVersion"
+  Record-Check "W6_wiring_unchanged" ($beforeWiringSha -eq $afterWiringSha -and $afterBuildManifest.wiring_patch_sha256 -eq $afterWiringSha) "before=$beforeWiringSha after=$afterWiringSha manifest=$($afterBuildManifest.wiring_patch_sha256)"
+  Record-Check "W7_hashes_registered" ($digestAfter -eq $afterBuildManifest.effective_tree_sha256 -and $afterBuildManifest.cargo_lock_sha256 -eq $afterCargoSha -and $afterBuildManifest.emergency_patch_sha256 -eq "none" -and (Get-Item $afterEmergency).Length -eq 0) "tree=$digestAfter manifest_tree=$($afterBuildManifest.effective_tree_sha256) lock=$afterCargoSha manifest_lock=$($afterBuildManifest.cargo_lock_sha256)"
+
+  $summary = [ordered]@{
+    mode = "wancode-lock-delta"
+    before_wancode_sha = $before
+    after_wancode_sha = $after
+    before_version = $beforeBlock.version
+    after_version = $afterBlock.version
+    added_wancode_dependencies = $addedDeps
+    declared_added_wancode_dependencies = $declaredDeps
+    removed_wancode_dependencies = $removedDeps
+    changed_files = @($changed)
+    checks = $checks
+    pass = ($failures.Count -eq 0)
+  }
+  $summary | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 $OutFile
+  Write-Host "[migration-audit] wancode-lock-delta 摘要已写 $OutFile"
+  foreach ($name in $checks.Keys) {
+    $mark = if ($checks[$name].pass) { "PASS" } else { "FAIL" }
+    Write-Host "[migration-audit] $name=$mark — $($checks[$name].detail)"
+  }
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  if ($failures.Count) {
+    Write-Host "MIGRATION AUDIT FAIL：wancode-lock-delta 有 $($failures.Count) 项断言失败" -ForegroundColor Red
+    $failures | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+  }
+  Write-Host "MIGRATION AUDIT OK：wancode-lock-delta 七项全 PASS（版本 + 已申报直接依赖）"
+  exit 0
+}
+
 if ($Mode -eq "version-only") {
   function Read-WanCodeLockVersion([string]$path) {
     $raw = [System.IO.File]::ReadAllText($path)
