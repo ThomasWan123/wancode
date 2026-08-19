@@ -1,5 +1,5 @@
 /* C3（v0.20）：项目记忆设置面。状态自包含——设置页是低频面，不再给
-   App 的 prop 袋加码。开关/flush/rewrite 全部直打 Tauri 命令边界。 */
+   App 的 prop 袋加码。开关/flush/追加全部直打 Tauri 命令边界。 */
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -8,29 +8,22 @@ export function MemoryPanel(props: { sessionId: string; surface: string; workspa
   const [enabled, setEnabled] = useState(false);
   const [globalMem, setGlobalMem] = useState("");
   const [workspaceMem, setWorkspaceMem] = useState<{ dir_name: string; content: string } | null>(null);
-  const [rawNote, setRawNote] = useState("");
-  const [rewritten, setRewritten] = useState("");
-  const [busy, setBusy] = useState<"" | "flush" | "rewrite" | "append">("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<"" | "flush" | "append">("");
   const [msg, setMsg] = useState("");
 
   const refresh = useCallback(async () => {
-    try {
-      setEnabled(await invoke<boolean>("memory_config_get"));
-    } catch {
-      /* 配置不可读时保持关——设置页不因此报错 */
+    const errors: string[] = [];
+    try { setEnabled(await invoke<boolean>("memory_config_get")); }
+    catch (e) { errors.push(String(e)); }
+    try { setGlobalMem(await invoke<string>("memory_read_global")); }
+    catch (e) { errors.push(String(e)); }
+    if (!workspace) setWorkspaceMem(null);
+    else {
+      try { setWorkspaceMem(await invoke<any>("memory_read_workspace", { workspace })); }
+      catch (e) { errors.push(String(e)); }
     }
-    try {
-      setGlobalMem(await invoke<string>("memory_read_global"));
-    } catch {
-      /* 同上 */
-    }
-    if (workspace) {
-      try {
-        setWorkspaceMem(await invoke<any>("memory_read_workspace", { workspace }));
-      } catch {
-        /* best-effort 发现失败 = 无工作区记忆 */
-      }
-    }
+    if (errors.length > 0) setMsg(errors[0]);
   }, [workspace]);
 
   useEffect(() => {
@@ -67,30 +60,13 @@ export function MemoryPanel(props: { sessionId: string; surface: string; workspa
     }
   };
 
-  const rewrite = async () => {
-    if (!rawNote.trim()) return;
-    setBusy("rewrite");
-    setMsg("");
-    try {
-      const r = await invoke<any>("memory_rewrite", { rawText: rawNote.trim() });
-      const text = typeof r?.rewritten === "string" ? r.rewritten : "";
-      setRewritten(text);
-      if (!text) setMsg(t.memRewriteEmpty);
-    } catch (e) {
-      setMsg(String(e));
-    } finally {
-      setBusy("");
-    }
-  };
-
   const append = async () => {
-    if (!rewritten.trim()) return;
+    if (!note.trim()) return;
     setBusy("append");
     setMsg("");
     try {
-      await invoke("memory_append_global", { text: rewritten.trim() });
-      setRewritten("");
-      setRawNote("");
+      await invoke("memory_append_global", { text: note.trim() });
+      setNote("");
       setMsg(t.memAppended);
       await refresh();
     } catch (e) {
@@ -114,25 +90,17 @@ export function MemoryPanel(props: { sessionId: string; surface: string; workspa
       </button>
       {!sessionId && <div className="modal-hint">{t.memNoSession}</div>}
 
-      <div className="modal-label" style={{ marginTop: 16 }}>{t.memRewriteLabel}</div>
+      <div className="modal-label" style={{ marginTop: 16 }}>{t.memAddLabel}</div>
       <textarea
         rows={3}
         style={{ width: "100%" }}
-        placeholder={t.memRewritePlaceholder}
-        value={rawNote}
-        onChange={(e) => setRawNote(e.currentTarget.value)}
+        placeholder={t.memAddPlaceholder}
+        value={note}
+        onChange={(e) => setNote(e.currentTarget.value)}
       />
-      <button disabled={!sessionId || !rawNote.trim() || busy !== ""} onClick={() => void rewrite()}>
-        {busy === "rewrite" ? t.memRewriteBusy : t.memRewriteBtn}
+      <button disabled={!note.trim() || busy !== ""} onClick={() => void append()}>
+        {busy === "append" ? t.memAppendBusy : t.memAppend}
       </button>
-      {rewritten && (
-        <>
-          <pre className="memory-preview">{rewritten}</pre>
-          <button disabled={busy !== ""} onClick={() => void append()}>
-            {busy === "append" ? t.memAppendBusy : t.memAppend}
-          </button>
-        </>
-      )}
 
       {msg && <div className="modal-hint" style={{ marginTop: 8 }}>{msg}</div>}
 

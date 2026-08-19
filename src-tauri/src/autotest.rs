@@ -542,10 +542,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         format!("same_id={same_id} lines {before_len}->{after_len}")
     );
 
-    // ── S9 记忆回路（C3 验收：flush + rewrite 真实引擎往返）────────
+    // ── S9 记忆回路（C3 验收：flush 真实引擎往返）───────────────
     // 隔离 GROK_HOME 的 config 副本里显式开 [memory].enabled——引擎在
-    // **会话启动时**解析该开关，所以先写配置再起新会话。两次调用都是真实
-    // LLM 往返（flush 蒸馏当前会话；rewrite 一次性结构化改写）。
+    // **会话启动时**解析该开关，所以先写配置再起新会话并做真实 flush。
+    // rewrite 暂不纳入产品入口/验收：锁定引擎把模型硬编码为 `grok-build`，
+    // 第三方端点不可用；G26 引擎例外获批前，不能把该失败当 PASS。
     write("SMOKE S9-memory BEGIN");
     {
         let cfg_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
@@ -590,46 +591,6 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                     "S9-memory-flush",
                     flush.is_ok(),
                     format!("flush_err={}", flush.as_ref().err().cloned().unwrap_or_default())
-                );
-                // rewrite：引擎在 memory_dream.rs 把一次性改写的 model 硬编码为
-                // 上游自有 slug「grok-build」——任何第三方端点都会 400
-                // 「modelCode：不存在」。这是引擎硬编码，不是本客户端的线；
-                // G26 例外申请已记录（见 C3 PR）。这里做**变更检测器**：
-                // 已知签名 → PASS(known-blocked)；意外成功 → PASS（引擎已修，
-                // 注释应随之更新）；其他错误 → FAIL（真回归）。
-                let rewrite = ext_call(
-                    &state,
-                    "x.ai/memory/rewrite",
-                    serde_json::json!({
-                        "rawText": "smoke 回路测试：本项目发版必须跑 scripts/release.ps1",
-                        "contextSummary": "wancode autotest S9",
-                    }),
-                )
-                .await;
-                let rewritten_len = rewrite
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| {
-                        v.get("result")
-                            .and_then(|r| r.get("rewritten"))
-                            .or_else(|| v.get("rewritten"))
-                            .and_then(|r| r.as_str())
-                    })
-                    .map(|s| s.trim().len())
-                    .unwrap_or(0);
-                let rewrite_err = rewrite.as_ref().err().cloned().unwrap_or_default();
-                let known_blocked = rewrite_err.contains("modelCode")
-                    || rewrite_err.contains("grok-build");
-                check!(
-                    "S9-memory-rewrite",
-                    rewritten_len > 0 || known_blocked,
-                    if rewritten_len > 0 {
-                        format!("rewritten_len={rewritten_len}（引擎已支持第三方端点——更新本注释）")
-                    } else if known_blocked {
-                        "known-blocked：引擎硬编码上游模型 slug（G26 例外申请在册）".to_string()
-                    } else {
-                        format!("unexpected error: {rewrite_err}")
-                    }
                 );
             }
         }

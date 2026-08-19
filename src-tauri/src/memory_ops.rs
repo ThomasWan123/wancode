@@ -6,11 +6,11 @@
 //!
 //! 文件层全部落在客户端（G26 零引擎改动）：
 //! - 全局记忆 `~/.grok/memory/MEMORY.md`——路径确定，直接读写；
-//! - 工作区记忆 `~/.grok/memory/{slug}-{hash8}/MEMORY.md`——hash8 由引擎用
-//!   blake3 算出，客户端不重复实现哈希，只做**按 slug 前缀的 best-effort
-//!   发现**（唯一前缀命中才认；零/多命中都如实返回 None）。这只是展示
-//!   便利，不是安全边界——猜错的最坏结果是「找不到」，绝不写错目录。
+//! - 工作区记忆 `~/.grok/memory/{slug}-{hash8}/MEMORY.md`——直接复用引擎
+//!   公开的 `MemoryStorage` 身份算法（git origin 优先、路径兜底），
+//!   不做 basename 前缀猜测，避免同名仓库之间泄露记忆。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tauri::State;
@@ -42,7 +42,11 @@ pub(crate) fn write_memory_enabled(doc: &mut toml_edit::DocumentMut, enabled: bo
 #[tauri::command]
 pub fn memory_config_get() -> Result<bool, String> {
     let path = crate::config_core::user_config_path();
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取配置失败: {e}"))?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("读取配置失败: {error}")),
+    };
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
     Ok(read_memory_enabled(&doc))
 }
@@ -52,10 +56,17 @@ pub fn memory_config_get() -> Result<bool, String> {
 #[tauri::command]
 pub fn memory_config_set(enabled: bool) -> Result<(), String> {
     let path = crate::config_core::user_config_path();
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取配置失败: {e}"))?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("读取配置失败: {error}")),
+    };
     let mut doc: toml_edit::DocumentMut =
         text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
     write_memory_enabled(&mut doc, enabled);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
     crate::config_core::write_config_atomic(&path, &doc.to_string())
 }
 
@@ -79,14 +90,29 @@ pub fn memory_append_global(text: String) -> Result<(), String> {
     }
     let root = memory_root();
     std::fs::create_dir_all(&root).map_err(|e| format!("创建记忆目录失败: {e}"))?;
-    let p = root.join("MEMORY.md");
-    let mut body = std::fs::read_to_string(&p).unwrap_or_default();
-    if !body.trim().is_empty() {
-        body.push_str("\n\n---\n\n");
+    append_memory_file(&root.join("MEMORY.md"), trimmed)
+        .map_err(|e| format!("写入全局记忆失败: {e}"))
+}
+
+/// 单次 append 写入一整条记录；绝不把“读失败”当空文件后覆盖旧内容。
+fn append_memory_file(path: &Path, trimmed: &str) -> std::io::Result<()> {
+    let nonempty = match std::fs::metadata(path) {
+        Ok(meta) => meta.len() > 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    let mut entry = String::new();
+    if nonempty {
+        entry.push_str("\n\n---\n\n");
     }
-    body.push_str(trimmed);
-    body.push('\n');
-    std::fs::write(&p, body).map_err(|e| format!("写入全局记忆失败: {e}"))
+    entry.push_str(trimmed);
+    entry.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(entry.as_bytes())?;
+    file.sync_all()
 }
 
 #[derive(serde::Serialize)]
@@ -95,47 +121,11 @@ pub struct WorkspaceMemory {
     pub content: String,
 }
 
-/// 宽松 slugify：小写、非字母数字折成 `-`、折叠重复、40 字符上限。
-/// 与引擎 slugify 的**常见形态**对齐（目录名/仓库名），用于前缀发现；
-/// 不追求逐字一致——多命中时我们宁可不认。
-pub(crate) fn slugify_loose(name: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash && !out.is_empty() {
-            out.push('-');
-            last_dash = true;
-        }
-        if out.len() >= 40 {
-            break;
-        }
-    }
-    out.trim_end_matches('-').to_string()
-}
-
-/// 按 `{slug}-` 前缀在记忆根里找唯一候选目录。零/多命中 → None。
-pub(crate) fn find_workspace_memory_dir(root: &Path, workspace: &Path) -> Option<PathBuf> {
-    let folder = workspace.file_name()?.to_string_lossy();
-    let slug = slugify_loose(&folder);
-    if slug.is_empty() {
-        return None;
-    }
-    let prefix = format!("{slug}-");
-    let mut hits: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with(prefix.as_str()))
-                .unwrap_or(false)
-        })
-        .collect();
-    if hits.len() == 1 { hits.pop() } else { None }
+/// 与引擎完全相同的工作区身份解析；不自行复制 hash/remote 规则。
+pub(crate) fn workspace_memory_dir(root: &Path, workspace: &Path) -> PathBuf {
+    xai_grok_shell::session::memory::MemoryStorage::new(workspace, Some(root))
+        .workspace_dir()
+        .to_path_buf()
 }
 
 /// 读当前工作区的 MEMORY.md（best-effort：目录发现不了就返回 None，
@@ -146,9 +136,10 @@ pub fn memory_read_workspace(
     workspace: String,
 ) -> Result<Option<WorkspaceMemory>, String> {
     let root = memory_root();
-    let Some(dir) = find_workspace_memory_dir(&root, Path::new(&workspace)) else {
+    let dir = workspace_memory_dir(&root, Path::new(&workspace));
+    if !dir.is_dir() {
         return Ok(None);
-    };
+    }
     let content = match std::fs::read_to_string(dir.join("MEMORY.md")) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -178,28 +169,12 @@ mod tests {
     }
 
     #[test]
-    fn slugify_common_forms() {
-        assert_eq!(slugify_loose("wancode"), "wancode");
-        assert_eq!(slugify_loose("My Project"), "my-project");
-        assert_eq!(slugify_loose("WANCode_2.0"), "wancode-2-0");
-        assert_eq!(slugify_loose("---"), "");
-    }
-
-    #[test]
-    fn workspace_dir_discovery_requires_unique_prefix() {
+    fn workspace_dir_uses_full_identity_not_basename_prefix() {
         let root = std::env::temp_dir().join(format!("c3mem-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("wancode-a3f7b2c9")).unwrap();
-        let ws = Path::new("D:\\code\\wancode");
-        assert_eq!(
-            find_workspace_memory_dir(&root, ws).unwrap().file_name().unwrap(),
-            "wancode-a3f7b2c9"
-        );
-        // 多命中 → 不认（诚实优于猜测）
-        std::fs::create_dir_all(root.join("wancode-bbbbbbbb")).unwrap();
-        assert!(find_workspace_memory_dir(&root, ws).is_none());
-        // 零命中 → None
-        assert!(find_workspace_memory_dir(&root, Path::new("D:\\code\\nowhere")).is_none());
-        let _ = std::fs::remove_dir_all(&root);
+        let first = workspace_memory_dir(&root, Path::new("D:\\one\\same-name"));
+        let second = workspace_memory_dir(&root, Path::new("D:\\two\\same-name"));
+        assert_ne!(first, second, "同名但不同路径的非仓库不得共享记忆");
+        assert!(first.starts_with(&root) && second.starts_with(&root));
     }
 
     #[test]
@@ -209,17 +184,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("c3app-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let p = root.join("MEMORY.md");
-        let append = |text: &str| {
-            let mut body = std::fs::read_to_string(&p).unwrap_or_default();
-            if !body.trim().is_empty() {
-                body.push_str("\n\n---\n\n");
-            }
-            body.push_str(text.trim());
-            body.push('\n');
-            std::fs::write(&p, body).unwrap();
-        };
-        append("第一条");
-        append("第二条");
+        append_memory_file(&p, "第一条").unwrap();
+        append_memory_file(&p, "第二条").unwrap();
         let s = std::fs::read_to_string(&p).unwrap();
         assert_eq!(s.matches("---").count(), 1, "条目间恰好一个分隔");
         assert!(s.contains("第一条") && s.contains("第二条"));
