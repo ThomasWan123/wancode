@@ -51,6 +51,10 @@ jobs:
       - name: 双源更新 manifest 合同
         shell: pwsh
         run: ./scripts/test-update-manifests.ps1
+      - name: B1 竞争基准证据合同
+        run: |
+          python scripts/test_validate_b1_evidence.py
+          python scripts/validate_b1_evidence.py docs/evidence/b1/v0.20.0.json
 
   rust:
     runs-on: windows-latest
