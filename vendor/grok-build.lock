@@ -27,7 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=wancode-lock-delta
+migration_audit_mode=security-upgrade-delta
 declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
@@ -48,5 +48,32 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=0f0dc145e134a8ca353e88340c7929dc6ec98b5ddce9228695a2fd846b7d3865
-effective_tree_sha256=56a1981c61e25acaeb85aab060a015c7b0c1f456dcc896b162794bc9b60ffc4d
+cargo_lock_sha256=f63b6b4235c5d15fe81ab18717d3e68b8a5445e2003909d36451f051641678fd
+effective_tree_sha256=8d841a0ccb45d3d359c1a3f17307292f95224b39c6a1b2ff9d702d5321444318
+#
+# 【历史】上面的 declared_added_packages（W3 dependency-delta）与
+# declared_added_wancode_dependencies（#67 wancode-lock-delta）属于此前两轮，
+# 当前模式不读它们；保留是为了留档「那两轮各申报了什么」。
+#
+# 【security-upgrade-delta · v0.20 复核 P1】依赖安全升级
+#   引擎 commit **不动**（2f480062e），有效树里**只有 Cargo.lock 变**，变的方式
+#   是**升级既有包**——这正好撞在 dependency-delta 的 D3「既有 package 一个没少、
+#   没改版」上，故新增第六种模式，见 scripts/migration_audit.ps1 的 S1–S10。
+#
+# declared_security_upgrades：**申报制**，每条三段『包名 旧版->新版 编号』。
+#   编号是 RUSTSEC 号（一次修多条用 + 连接）或 collateral——collateral 指
+#   cargo 解析器为满足安全升级顺带抬上来、本身不修任何公告的包。不许拿一个
+#   RUSTSEC 号给一整批背书，S6 会逐条校验。
+#   本轮真正关掉的公告：0204(crossbeam-epoch)、0258(h2)、0257(webbrowser)、
+#   0194+0195 的 wancode 直接依赖链路(quick-xml 0.37.5->0.41.0)。
+#   plist / pdf_oxide / taffy 是升级过程中被一同抬起的，标 collateral；其中
+#   pdf_oxide 0.3.74 顺带把 quick-xml 0.39.4 挤出了 Windows 解析。
+#   quick-xml 升 0.41 是**破坏性 API 变更**（GeneralRef 事件拆分、
+#   BytesText::unescape 移除），产品侧适配与回归见 src-tauri/src/work_docx.rs ⑥。
+declared_security_upgrades=crossbeam-epoch 0.9.18->0.9.20 RUSTSEC-2026-0204,h2 0.4.15->0.4.17 RUSTSEC-2026-0258,webbrowser 1.0.6->1.2.4 RUSTSEC-2026-0257,quick-xml 0.37.5->0.41.0 RUSTSEC-2026-0194+RUSTSEC-2026-0195,plist 1.8.0->1.10.0 collateral,pdf_oxide 0.3.46->0.3.74 collateral,taffy 0.10.1->0.12.2 collateral
+#
+# declared_upgrade_additions：上述升级带进来的新 package（含既有包名多出的新
+#   版本）。S7 另行强制：不得新增 *-sys **包名**（既有 -sys 包多一个版本不算，
+#   jni-sys 0.4.1 就是这种情况——webbrowser 1.2.4 的 Android 目标链，
+#   不进 Windows 二进制）。
+declared_upgrade_additions=atoi_simd 0.18.1,debug_unsafe 0.1.4,fast-float2 0.2.4,hayro-jpeg2000 0.4.0,jni 0.22.4,jni-macros 0.22.4,jni-sys 0.4.1,jni-sys-macros 0.4.1,office_oxide 0.1.8,phf 0.14.0,phf_generator 0.14.0,phf_macros 0.14.0,phf_shared 0.14.0,simd_cesu8 1.2.0,typed-path 0.12.3,weezl 0.2.1,zip 8.6.0

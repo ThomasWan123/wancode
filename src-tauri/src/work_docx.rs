@@ -31,6 +31,13 @@
 //! 只剩内层。开始新段落前先收口当前段；内层结束后若还在外层里，再开一段
 //! 承接段尾文本。正文按出现顺序落成块，不静默缺字。
 //!
+//! **⑥ 实体引用是独立事件，不能被 `_ => {}` 吃掉。** quick-xml 0.41
+//! （为修 RUSTSEC-2026-0194/0195 从 0.37 升上来）改了事件模型：`&amp;`、
+//! `&#x41;` 这类引用不再由 `Event::Text` 内联展开，而是各发一个
+//! `Event::GeneralRef`，`BytesText::unescape` 随之移除。只把 `unescape`
+//! 换成 `xml10_content` 而不接 `GeneralRef`，「甲&amp;乙」就会静默抽成
+//! 「甲乙」——和 ①/④ 要挡的静默丢正文是同一类事故，只是换了个入口。
+//!
 //! ## 路径穿越为何不适用
 //!
 //! 我们**从不落盘**：只按精确名 `word/document.xml` 取一个条目读进内存。
@@ -296,9 +303,30 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
                 }
             }
             Ok((_, Event::Text(t))) => {
+                // `xml10_content` = 解码 + XML 1.0 换行规范化。实体展开不在这里
+                // 做了，见下面的 `GeneralRef` 分支（文件头 ⑥）。
                 let s = t
-                    .unescape()
+                    .xml10_content()
                     .map_err(|e| DocxError::XmlError(e.to_string()))?;
+                ingest_text(
+                    &s,
+                    in_text,
+                    &mut cur,
+                    run_start,
+                    &mut dropped_outside_run,
+                );
+            }
+            Ok((_, Event::GeneralRef(r))) => {
+                // 事件里装的是引用名（`amp` / `#x41`），不含 `&` 和 `;`。补回定界
+                // 符再交给 `escape::unescape`：数值引用它自己算，五个预定义实体
+                // 它自己认，其余一律 `UnrecognizedEntity` → 整篇拒收。DOCTYPE 已在
+                // 上面拒掉，所以这里不存在自定义实体，fail-closed 是对的口径。
+                let name = r
+                    .xml10_content()
+                    .map_err(|e| DocxError::XmlError(e.to_string()))?;
+                let s = quick_xml::escape::unescape(&format!("&{name};"))
+                    .map_err(|e| DocxError::XmlError(e.to_string()))?
+                    .into_owned();
                 ingest_text(
                     &s,
                     in_text,
@@ -537,6 +565,48 @@ mod tests {
                 assert!(b.iter().all(|x| x.is_well_formed()));
             }
             Err(_) => {}
+        }
+    }
+
+    /// quick-xml 0.41 把 `&amp;` 拆成独立的 `GeneralRef` 事件。不接这个事件，
+    /// 本例会静默抽成「甲乙」并且 runs 仍然自洽——测不出来。断言落在 raw 上。
+    #[test]
+    fn predefined_entity_inside_run_is_expanded_not_dropped() {
+        let xml = p(r#"<w:p><w:r><w:t>甲&amp;乙</w:t></w:r></w:p>"#);
+        let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].raw, "甲&乙");
+        assert_eq!(b[0].runs, vec![[0, 3]], "展开出的字符必须算进 run 区间");
+        assert!(b[0].is_well_formed());
+    }
+
+    /// 数值字符引用同样走 `GeneralRef`；十进制与十六进制都要认。
+    #[test]
+    fn numeric_character_references_are_expanded() {
+        let xml = p(r#"<w:p><w:r><w:t>&#x41;&#66;</w:t></w:r></w:p>"#);
+        let b = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(b[0].raw, "AB");
+        assert_eq!(b[0].runs, vec![[0, 2]]);
+    }
+
+    /// 未知实体 → 整篇拒收。DOCTYPE 已被拒，合法 DOCX 里不存在自定义实体；
+    /// 静默丢掉一个认不出的引用等于静默改正文。
+    #[test]
+    fn unknown_entity_is_rejected_not_silently_dropped() {
+        let xml = p(r#"<w:p><w:r><w:t>甲&nbsp;乙</w:t></w:r></w:p>"#);
+        match parse_document_xml(&xml, DocxLimits::default()) {
+            Err(DocxError::XmlError(_)) => {}
+            other => panic!("未知实体应拒收，实得 {other:?}"),
+        }
+    }
+
+    /// run 之外的实体和 run 之外的裸文本同一口径：记账并整篇拒收。
+    #[test]
+    fn entity_outside_run_is_counted_as_dropped() {
+        let xml = p(r#"<w:p><w:t>&amp;</w:t><w:r><w:t>正常</w:t></w:r></w:p>"#);
+        match parse_document_xml(&xml, DocxLimits::default()) {
+            Err(DocxError::TextOutsideRun { dropped_chars }) => assert_eq!(dropped_chars, 1),
+            other => panic!("应拒收 TextOutsideRun，实得 {other:?}"),
         }
     }
 }

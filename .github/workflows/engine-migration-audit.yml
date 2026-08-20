@@ -6,7 +6,9 @@
 #   1) 负向门测试——verify 的每种错误状态必须非零退出且错误原因命中（fail-closed 实证）；
 #   2) 同一 materializer 构造 before/after 两棵临时树；默认逐字节等价，lock 显式登记
 #      intentional-delta 时改走白名单与供应链哈希六项审计；正式版本号更新走
-#      version-only，严格限定为 Cargo.lock 中 wancode 包版本这一处变化。
+#      version-only，严格限定为 Cargo.lock 中 wancode 包版本这一处变化；
+#      安全升级既有依赖走 security-upgrade-delta（S1–S10）——它撞在
+#      dependency-delta 的 D3「既有 package 没改版」上，只能另开一种模式。
 #      三种模式均输出可留档 JSON artifact。
 name: engine-migration-audit
 
@@ -59,6 +61,8 @@ jobs:
             powershell -File scripts/migration_audit.ps1 -Mode intentional-delta -BeforeSha $before -Whitelist docs/design/v0.19-engine-file-whitelist.txt -OutFile migration-audit-summary.json
           } elseif ($mode -eq "dependency-delta") {
             powershell -File scripts/migration_audit.ps1 -Mode dependency-delta -BeforeSha $before -OutFile migration-audit-summary.json
+          } elseif ($mode -eq "security-upgrade-delta") {
+            powershell -File scripts/migration_audit.ps1 -Mode security-upgrade-delta -BeforeSha $before -OutFile migration-audit-summary.json
           } elseif ($mode -eq "wancode-lock-delta") {
             powershell -File scripts/migration_audit.ps1 -Mode wancode-lock-delta -BeforeSha $before -OutFile migration-audit-summary.json
           } elseif ($mode -eq "version-only") {

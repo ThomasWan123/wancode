@@ -1,7 +1,7 @@
 ﻿# 迁移前后有效树等价审计——可由仓库/CI 重演的 materializer（#126 B1 复核定案 P0-1）
 #
 # 用法：powershell -File scripts/migration_audit.ps1 -BeforeSha <迁移前 wancode commit>
-#                  [-Mode equivalent|intentional-delta|version-only|dependency-delta|wancode-lock-delta]
+#                  [-Mode equivalent|intentional-delta|version-only|dependency-delta|wancode-lock-delta|security-upgrade-delta]
 #                  [-Whitelist docs/design/v0.19-engine-file-whitelist.txt]
 #                  [-OutFile migration-audit-summary.json]
 #
@@ -19,7 +19,7 @@
 # 新 = grok-build-wiring.patch + grok-build-emergency.patch（B1 起）。
 param(
   [Parameter(Mandatory)][string]$BeforeSha,
-  [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta", "wancode-lock-delta")][string]$Mode = "equivalent",
+  [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta", "wancode-lock-delta", "security-upgrade-delta")][string]$Mode = "equivalent",
   [string]$Whitelist,
   [string]$OutFile = "migration-audit-summary.json"
 )
@@ -299,6 +299,182 @@ if ($Mode -eq "dependency-delta") {
     exit 1
   }
   Write-Host "MIGRATION AUDIT OK：dependency-delta 八项全 PASS（新增 $($added.Count) 个 package，无 *-sys，无既有 package 变动）"
+  exit 0
+}
+
+# ── security-upgrade-delta：只允许 Cargo.lock 因**安全升级**而变化 ──
+#
+# 为什么需要第六种模式：升级既有依赖这件事前五种都表达不了——
+#   equivalent        要求有效树逐字节相等；
+#   version-only /
+#   wancode-lock-delta 只许 wancode 自己那一块变；
+#   dependency-delta  D3 明确要求「既有 package 一个没少、没改版」，
+#                     而安全升级的定义就是既有 package 换版本，正好撞在 D3 上；
+#   intentional-delta A1/A4 要求 commit 变、lock 不变，与此处恰好相反。
+# 硬套只能靠放宽断言蒙混。本模式逐项断言「commit 没动、树里只有 lock 变了、
+# 每一处版本变化都是**升级**（绝无降级或删除）、升级与顺带新增的包**逐条申报**、
+# 每条升级绑一个 RUSTSEC 编号或显式标 collateral、且没有引入新的原生链」。
+#
+# 与 scripts/dependency_advisory_gate.ps1 的分工：那道门管「升级之后还剩哪些
+# 命中、是否都已申报」，本模式管「这次 lock 变化本身是不是一次干净的升级」。
+# 两者都绿才说明「依赖安全签核通过」，缺一不可。
+if ($Mode -eq "security-upgrade-delta") {
+  function Read-LockVersionMap([string]$path) {
+    $raw = [System.IO.File]::ReadAllText($path)
+    $map = @{}
+    $rx = "(?m)^\[\[package\]\]\s*$\s*^name = ""([^""]+)""\s*$\s*^version = ""([^""]+)""\s*$"
+    foreach ($m in [regex]::Matches($raw, $rx)) {
+      $n = $m.Groups[1].Value
+      if (-not $map.ContainsKey($n)) { $map[$n] = [System.Collections.Generic.List[string]]::new() }
+      $map[$n].Add($m.Groups[2].Value)
+    }
+    if ($map.Count -eq 0) { throw "Cargo.lock 未解析出任何 package：$path" }
+    return $map
+  }
+  # 语义化版本比较。不能用字符串比：'0.9.9' > '0.9.10' 会把降级判成升级。
+  function Compare-SemVer([string]$a, [string]$b) {
+    $pa = @(($a -split '[-+]')[0] -split '\.')
+    $pb = @(($b -split '[-+]')[0] -split '\.')
+    $n = [Math]::Max($pa.Count, $pb.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+      $va = 0; $vb = 0
+      if ($i -lt $pa.Count) { [void][int]::TryParse($pa[$i], [ref]$va) }
+      if ($i -lt $pb.Count) { [void][int]::TryParse($pb[$i], [ref]$vb) }
+      if ($va -ne $vb) { if ($va -gt $vb) { return 1 } else { return -1 } }
+    }
+    return 0
+  }
+
+  $beforeMapPkg = Read-LockVersionMap $beforeCargo
+  $afterMapPkg = Read-LockVersionMap $afterCargo
+
+  $upgrades = [System.Collections.Generic.List[string]]::new()   # "name from->to"
+  $additions = [System.Collections.Generic.List[string]]::new()  # "name version"
+  $regressions = [System.Collections.Generic.List[string]]::new()
+
+  foreach ($name in ($afterMapPkg.Keys | Sort-Object)) {
+    # wancode 自己的版本走 D8/W5 那套口径，不混进依赖升级账本。
+    if ($name -eq "wancode") { continue }
+    $bv = @()
+    if ($beforeMapPkg.ContainsKey($name)) { $bv = @($beforeMapPkg[$name]) }
+    $av = @($afterMapPkg[$name])
+    $gone = @($bv | Where-Object { $av -notcontains $_ } | Sort-Object)
+    $new = @($av | Where-Object { $bv -notcontains $_ } | Sort-Object)
+    if ($gone.Count -eq 0 -and $new.Count -eq 0) { continue }
+    if ($gone.Count -eq 0) {
+      # 纯新增版本（老版本仍在树里）——按「新增」记账。
+      foreach ($v in $new) { $additions.Add("$name $v") }
+      continue
+    }
+    # 有版本消失：必须每一个都能配一个**更高**的新版本，且数量对齐。
+    if ($gone.Count -ne $new.Count) {
+      $regressions.Add("$name 消失 [$($gone -join ',')] 但新增 [$($new -join ',')]（数量对不上）")
+      continue
+    }
+    for ($i = 0; $i -lt $gone.Count; $i++) {
+      $from = $gone[$i]; $to = $new[$i]
+      if ((Compare-SemVer $to $from) -le 0) {
+        $regressions.Add("$name $from->$to 不是升级")
+      } else {
+        $upgrades.Add("$name $from->$to")
+      }
+    }
+  }
+  foreach ($name in ($beforeMapPkg.Keys | Sort-Object)) {
+    if ($name -eq "wancode") { continue }
+    if (-not $afterMapPkg.ContainsKey($name)) { $regressions.Add("$name 整个包名从 lock 里消失") }
+  }
+
+  # 申报清单（vendor/grok-build.lock 两行）：
+  #   declared_security_upgrades = "name from->to RUSTSEC-nnnn-nnnn" 逗号分隔
+  #   declared_upgrade_additions = "name version" 逗号分隔
+  function Split-Declared([string]$raw) {
+    if (-not $raw) { return @() }
+    return @($raw -split ',' | ForEach-Object { ($_ -replace '\s+', ' ').Trim() } | Where-Object { $_ })
+  }
+  $declUpgradeRaw = Split-Declared $afterBuildManifest.declared_security_upgrades
+  $declAdditions = @(Split-Declared $afterBuildManifest.declared_upgrade_additions | Sort-Object)
+
+  # 每条升级申报三段：包名 + 旧版->新版 + 编号（RUSTSEC 或 collateral）
+  $declUpgradePairs = [System.Collections.Generic.List[string]]::new()
+  $badCitations = [System.Collections.Generic.List[string]]::new()
+  $citedAdvisories = [System.Collections.Generic.List[string]]::new()
+  foreach ($d in $declUpgradeRaw) {
+    $parts = $d -split ' '
+    if ($parts.Count -ne 3) { $badCitations.Add("「$d」应为『包名 旧版->新版 编号』三段"); continue }
+    if ($parts[1] -notmatch '^[^>]+->[^>]+$') { $badCitations.Add("「$d」第二段应为 旧版->新版"); continue }
+    # 一次升级可以同时修多条公告（quick-xml 0.41 就同时关掉 0194 和 0195），
+    # 用 + 连接，别拆成两行——那会让 S4 的观察集合与申报集合对不上。
+    if ($parts[2] -match '^RUSTSEC-\d{4}-\d{4}(\+RUSTSEC-\d{4}-\d{4})*$') {
+      foreach ($id in ($parts[2] -split '\+')) { $citedAdvisories.Add($id) }
+    } elseif ($parts[2] -ne "collateral") {
+      # collateral = cargo 解析器为满足安全升级顺带抬上来的包，本身不修公告。
+      # 允许它存在，但必须显式写出来，不许拿一个 RUSTSEC 号给一整批背书。
+      $badCitations.Add("「$d」编号既不是 RUSTSEC-nnnn-nnnn（可用 + 连接多条）也不是 collateral：$($parts[2])")
+      continue
+    }
+    $declUpgradePairs.Add("$($parts[0]) $($parts[1])")
+  }
+  $declUpgrades = @($declUpgradePairs | Sort-Object)
+  $obsUpgrades = @($upgrades | Sort-Object)
+  $obsAdditions = @($additions | Sort-Object)
+
+  # 新增的**包名**才算引入原生链；既有 -sys 包多一个版本不算。
+  $sysAddedNames = @($additions | ForEach-Object { ($_ -split ' ')[0] } |
+    Where-Object { -not $beforeMapPkg.ContainsKey($_) -and $_ -match '(?i)-sys$' } | Sort-Object -Unique)
+
+  $onlyCargoLock = $changed.Count -eq 1 -and $changed[0].path -eq "Cargo.lock" -and $changed[0].change -eq "modified"
+
+  $rxWan = [regex]'(?ms)\[\[package\]\]\r?\nname = "wancode"\r?\nversion = "([^"]+)"'
+  $wanMatches = $rxWan.Matches([System.IO.File]::ReadAllText($afterCargo))
+  if ($wanMatches.Count -ne 1) { throw "Cargo.lock 中 wancode package 必须恰好一项（实际 $($wanMatches.Count)）" }
+  $afterWanCodeVersion = $wanMatches[0].Groups[1].Value
+  $appVersion = (Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+
+  Record-Check "S1_engine_commit_unchanged" ($beforeCommit -eq $afterCommit) "before=$beforeCommit after=$afterCommit"
+  Record-Check "S2_only_cargo_lock_changed" $onlyCargoLock $(if ($changed.Count) { (($changed | ForEach-Object { "$($_.change):$($_.path)" }) -join ', ') } else { "无有效树差异" })
+  Record-Check "S3_no_downgrade_or_removal" ($regressions.Count -eq 0) $(if ($regressions.Count) { "降级/删除: $($regressions -join '; ')" } else { "$($upgrades.Count) 处版本变化全部是升级，无包被删" })
+  Record-Check "S4_upgrades_match_declared" (($obsUpgrades -join '|') -ceq ($declUpgrades -join '|')) "observed=[$($obsUpgrades -join '; ')] declared=[$($declUpgrades -join '; ')]"
+  Record-Check "S5_additions_match_declared" (($obsAdditions -join '|') -ceq ($declAdditions -join '|')) "observed=[$($obsAdditions -join '; ')] declared=[$($declAdditions -join '; ')]"
+  Record-Check "S6_every_upgrade_cites_advisory_or_collateral" ($badCitations.Count -eq 0 -and $citedAdvisories.Count -gt 0) $(if ($badCitations.Count) { $badCitations -join '; ' } else { "引用公告 $(@($citedAdvisories | Sort-Object -Unique) -join ',')；其余标 collateral" })
+  Record-Check "S7_no_native_sys_name_added" ($sysAddedNames.Count -eq 0) $(if ($sysAddedNames.Count) { "新增原生链包名: $($sysAddedNames -join '; ')" } else { "无新增 *-sys 包名（W1 教训）" })
+  Record-Check "S8_wiring_unchanged" ($beforeWiringSha -eq $afterWiringSha -and $afterBuildManifest.wiring_patch_sha256 -eq $afterWiringSha) "before=$beforeWiringSha after=$afterWiringSha manifest=$($afterBuildManifest.wiring_patch_sha256)"
+  Record-Check "S9_hashes_registered" ($digestAfter -eq $afterBuildManifest.effective_tree_sha256 -and $afterBuildManifest.cargo_lock_sha256 -eq $afterCargoSha -and $afterBuildManifest.emergency_patch_sha256 -eq "none" -and (Get-Item $afterEmergency).Length -eq 0) "tree=$digestAfter manifest_tree=$($afterBuildManifest.effective_tree_sha256) lock=$afterCargoSha manifest_lock=$($afterBuildManifest.cargo_lock_sha256)"
+  Record-Check "S10_wancode_version_matches_app" ($afterWanCodeVersion -eq $appVersion) "lock=$afterWanCodeVersion app=$appVersion"
+
+  $summary = [ordered]@{
+    mode                         = "security-upgrade-delta"
+    before_wancode_sha           = $before
+    after_wancode_sha            = $after
+    before_engine_commit         = $beforeCommit
+    after_engine_commit          = $afterCommit
+    upgrades                     = @($obsUpgrades)
+    declared_security_upgrades   = @($declUpgradeRaw)
+    additions                    = @($obsAdditions)
+    declared_upgrade_additions   = @($declAdditions)
+    regressions                  = @($regressions)
+    cited_advisories             = @($citedAdvisories | Sort-Object -Unique)
+    cargo_lock_sha256_before     = $beforeCargoSha
+    cargo_lock_sha256_after      = $afterCargoSha
+    before_effective_tree_sha256 = $digestBefore
+    after_effective_tree_sha256  = $digestAfter
+    changed_files                = @($changed)
+    checks                       = $checks
+    pass                         = ($failures.Count -eq 0)
+  }
+  $summary | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 $OutFile
+  Write-Host "[migration-audit] security-upgrade-delta 摘要已写 $OutFile"
+  foreach ($name in $checks.Keys) {
+    $mark = if ($checks[$name].pass) { "PASS" } else { "FAIL" }
+    Write-Host "[migration-audit] $name=$mark — $($checks[$name].detail)"
+  }
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  if ($failures.Count) {
+    Write-Host "MIGRATION AUDIT FAIL：security-upgrade-delta 有 $($failures.Count) 项断言失败" -ForegroundColor Red
+    $failures | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+  }
+  Write-Host "MIGRATION AUDIT OK：security-upgrade-delta 十项全 PASS（$($obsUpgrades.Count) 处升级，$($obsAdditions.Count) 处新增，无降级无删除）"
   exit 0
 }
 

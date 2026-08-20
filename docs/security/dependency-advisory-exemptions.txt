@@ -1,0 +1,58 @@
+# WanCode 依赖公告豁免登记（申报制）
+#
+# 用途：`scripts/dependency_advisory_gate.ps1` 把 `cargo audit` 在
+# `vendor/grok-build-Cargo.lock` 上的**实际命中集合**与本文件**逐条比对**。
+#
+# 这不是 `cargo audit --ignore` 的等价物。`--ignore` 按公告号整条静音——
+# 同一个公告日后命中到别的包、别的版本、别的链路上，它一样不响。本文件
+# 绑到 (公告号, 包名, 版本) 三元组，且是**双向**断言：
+#   * 命中了但没登记 → 红（不许静默新增暴露面）；
+#   * 登记了但已不再命中 → 也红（豁免必须随修复一起删掉，不许留僵尸条目）。
+#
+# 口径：只登记 `vulnerabilities`。`unmaintained` / `unsound` / `yanked`
+# 属于 `warnings`，门不拦它们，也就不在这里登记——避免把"警告很多"和
+# "有已知漏洞"混成一句话。
+#
+# 每行五列，空白分隔：
+#   <RUSTSEC-ID>  <包名>  <锁定版本>  <理由码>  <复核日期 YYYY-MM-DD>
+#
+# 理由码（固定集合，门会校验）：
+#   not-linked-windows  在 lock 里，但不进 Windows 发行二进制（WanCode 只发 Windows）。
+#   lock-orphan         整个 workspace 全 target 全 kind 都无人依赖，只是 lock 里的孤儿条目。
+#   engine-pinned-g26   进了发行二进制，但版本由引擎 workspace 清单钉死，G26 禁止改引擎。
+#   no-upstream-fix     进了发行二进制，且上游至今没有任何修复版本。
+#
+# 复核日期 = 最后一次人工核对该条仍然成立的日期。改依赖后必须重核。
+
+# ── quick-xml：0.41.0 已修的那条链路不在这里 ──────────────────────
+# wancode 自己的直接依赖已升到 0.41.0（见 src-tauri/Cargo.toml），
+# 下面两条是另外两条链路，wancode 改不动。
+#
+# 0.38.3：`grok-build/Cargo.toml` 根清单钉 `quick-xml = "0.38"`，
+#   xai-grok-tools 由此继承，进 Windows 发行二进制。升它要连带让引擎适配
+#   0.41 的事件模型（`GeneralRef` 拆分、`BytesText::unescape` 移除——正是
+#   wancode 侧升级时踩到的那个坑），属于改引擎，G26 禁止。
+RUSTSEC-2026-0194  quick-xml  0.38.3  engine-pinned-g26  2026-08-20
+RUSTSEC-2026-0195  quick-xml  0.38.3  engine-pinned-g26  2026-08-20
+#
+# 0.39.4：唯一父链是 wayland-scanner ← wayland-client ← wayland-protocols
+#   ← wayland-protocols-wlr ← wl-clipboard-rs ← arboard ← xai-grok-shared。
+#   Wayland 是 Linux 显示协议，`cargo tree -p wancode -i quick-xml@0.39.4
+#   --target x86_64-pc-windows-msvc` 无输出。不进 Windows 二进制。
+RUSTSEC-2026-0194  quick-xml  0.39.4  not-linked-windows  2026-08-20
+RUSTSEC-2026-0195  quick-xml  0.39.4  not-linked-windows  2026-08-20
+
+# ── quinn-proto：lock 里的孤儿 ─────────────────────────────────
+# `cargo tree --workspace -i quinn-proto@0.11.14 --target all -e normal,build,dev`
+# 全 workspace 全 target 全 kind 都找不到任何父节点——没有任何 crate 依赖它，
+# 它只是被某条未启用的可选 feature 路径留在 lock 里，不参与任何编译。
+RUSTSEC-2026-0185  quinn-proto  0.11.14  lock-orphan  2026-08-20
+
+# ── rsa：上游无修复版 ─────────────────────────────────────────
+# 链路 rsa ← jsonwebtoken ← gcloud-auth ← gcloud-storage ← xai-file-utils
+# ← xai-grok-mcp ← … ← wancode，**确实进 Windows 发行二进制**。
+# Marvin 攻击是 RSA 解密的时序侧信道；RustSec 的 patched 列表为空
+# （`"patched": []`），即 2023-11 至今没有任何修复版本可升。
+# 本条是四条里唯一"可达且无解"的，最该被评审盯着——换掉整条 gcloud 依赖
+# 才是真解，不在本次范围内。
+RUSTSEC-2023-0071  rsa  0.9.10  no-upstream-fix  2026-08-20
