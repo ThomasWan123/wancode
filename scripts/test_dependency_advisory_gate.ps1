@@ -6,6 +6,11 @@
 # 门的逻辑是集合比对，真跑 cargo 只会把测试变慢并绑到当天的公告库上。
 $ErrorActionPreference = "Stop"
 $gate = Join-Path $PSScriptRoot "dependency_advisory_gate.ps1"
+# 用**当前宿主**的 PowerShell 重新拉起被测脚本。别写死 `powershell`：
+# 那是 Windows PowerShell 的名字，Linux runner 上根本不存在，本测试会以
+# "找不到命令" 的方式全线失败——看起来像门坏了，其实是测试自己不可移植。
+$psExe = (Get-Process -Id $PID).Path
+if (-not $psExe) { $psExe = "pwsh" }
 
 $fx = Join-Path ([System.IO.Path]::GetTempPath()) ("dep-advisory-negative-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $fx | Out-Null
@@ -78,7 +83,7 @@ foreach ($c in $cases) {
   $declPath = Join-Path $fx "decl-$i.txt"
   W $declPath $c.decl
   $out = Join-Path $fx "summary-$i.json"
-  $log = & powershell -NoProfile -File $gate -Exemptions $declPath -AuditJson $c.audit -OutFile $out
+  $log = & $psExe -NoProfile -File $gate -Exemptions $declPath -AuditJson $c.audit -OutFile $out
   $code = $LASTEXITCODE
   $text = ($log | Out-String)
   $okCode = if ($c.expectPass) { $code -eq 0 } else { $code -ne 0 }
