@@ -56,6 +56,33 @@ jobs:
           python scripts/test_validate_b1_evidence.py
           python scripts/validate_b1_evidence.py docs/evidence/b1/v0.20.0.json
 
+  # 依赖公告门（v0.20 复核 P1）：此前 CI 完全没有 cargo audit，
+  # 「依赖安全」全靠人想起来手跑一次——那不是门，是习惯。
+  # 门本身是集合比对，见 scripts/dependency_advisory_gate.ps1 的口径说明：
+  # 命中未申报要红，申报已不再命中（僵尸豁免）也要红。
+  dependency-advisory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # 负向门测试先跑：先证明这道门在错误状态下真的会红，再让它给绿灯。
+      # 顺序反过来的话，一道恒绿的门也能"通过"。
+      - name: 负向门测试（未申报/僵尸豁免/格式错/输出不可解析必须红）
+        shell: pwsh
+        run: pwsh -File scripts/test_dependency_advisory_gate.ps1
+      - name: 依赖公告门（vendor/grok-build-Cargo.lock）
+        shell: pwsh
+        run: pwsh -File scripts/dependency_advisory_gate.ps1 -OutFile dependency-advisory-summary.json
+      - name: 上传公告门摘要 artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-advisory-summary
+          path: dependency-advisory-summary.json
+          if-no-files-found: error
+
   rust:
     runs-on: windows-latest
     env:
