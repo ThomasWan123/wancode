@@ -149,8 +149,11 @@ Record-Check "A3_no_undeclared_vulnerability" ($undeclared.Count -eq 0) `
   $(if ($undeclared.Count) { "未申报命中：$($undeclared -join '; ')" } else { "$($observed.Count) 条命中全部已申报" })
 Record-Check "A4_no_stale_exemption" ($stale.Count -eq 0) `
   $(if ($stale.Count) { "僵尸豁免（已不再命中，应删）：$($stale -join '; ')" } else { "无僵尸条目" })
-Record-Check "A5_lock_is_the_vendored_engine_lock" ($audit.lockfile.'dependency-count' -gt 0) `
-  "审计对象=$Lock dependency_count=$($audit.lockfile.'dependency-count')"
+$canonicalLock = [System.IO.Path]::GetFullPath((Join-Path $root "vendor/grok-build-Cargo.lock"))
+$actualLock = [System.IO.Path]::GetFullPath($lockPath)
+$lockPathMatches = $actualLock -ceq $canonicalLock
+Record-Check "A5_lock_is_the_vendored_engine_lock" ($lockPathMatches -and $audit.lockfile.'dependency-count' -gt 0) `
+  "审计对象=$actualLock canonical=$canonicalLock dependency_count=$($audit.lockfile.'dependency-count')"
 
 $summary = [ordered]@{
   lock                  = $Lock

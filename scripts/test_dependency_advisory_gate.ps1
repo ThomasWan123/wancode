@@ -98,6 +98,9 @@ $cases += @{ name = "audit count/list 不一致必须红在 A1"; decl = "# no ex
 $auditFoundMismatch = Join-Path $fx "audit-found-mismatch.json"
 W $auditFoundMismatch '{"database":{},"lockfile":{"dependency-count":42},"vulnerabilities":{"found":false,"count":1,"list":[{"advisory":{"id":"RUSTSEC-2026-0194"},"versions":{"patched":[]},"package":{"name":"quick-xml","version":"0.38.3"}}]},"warnings":{}}'
 $cases += @{ name = "audit found/count 不一致必须红在 A1"; decl = $GOOD_DECL; audit = $auditFoundMismatch; expectPass = $false; needle = "schema 不一致" }
+$wrongLock = Join-Path $fx "wrong-Cargo.lock"
+W $wrongLock "# fixture only"
+$cases += @{ name = "审计别的 lock 不得冒充 vendored engine lock"; decl = $GOOD_DECL; audit = $auditOk; lock = $wrongLock; expectPass = $false; needle = "A5_lock_is_the_vendored_engine_lock=FAIL" }
 
 $failed = 0
 $i = 0
@@ -106,7 +109,9 @@ foreach ($c in $cases) {
   $declPath = Join-Path $fx "decl-$i.txt"
   W $declPath $c.decl
   $out = Join-Path $fx "summary-$i.json"
-  $log = & $psExe -NoProfile -File $gate -Exemptions $declPath -AuditJson $c.audit -OutFile $out
+  $args = @("-NoProfile", "-File", $gate, "-Exemptions", $declPath, "-AuditJson", $c.audit, "-OutFile", $out)
+  if ($c.lock) { $args += @("-Lock", $c.lock) }
+  $log = & $psExe @args
   $code = $LASTEXITCODE
   $text = ($log | Out-String)
   $okCode = if ($c.expectPass) { $code -eq 0 } else { $code -ne 0 }
@@ -125,4 +130,4 @@ if ($failed) {
   Write-Host "负向门测试 FAIL：$failed/$($cases.Count) 个场景不符合预期" -ForegroundColor Red
   exit 1
 }
-Write-Host "负向门测试 OK：$($cases.Count)/$($cases.Count) 个场景（含 1 个正向对照）符合预期"
+Write-Host "负向门测试 OK：$($cases.Count)/$($cases.Count) 个场景（含 2 个正向对照）符合预期"
