@@ -28,9 +28,10 @@ function Audit-Json([string[]]$rows) {
 {"advisory":{"id":"$($p[0])"},"versions":{"patched":[]},"package":{"name":"$($p[1])","version":"$($p[2])"}}
 "@
   }
+  $found = if ($rows.Count -gt 0) { "true" } else { "false" }
   return @"
 {"database":{"advisory-count":1,"last-commit":null},"lockfile":{"dependency-count":42},
- "vulnerabilities":{"found":true,"count":$($rows.Count),"list":[$($items -join ',')]},
+ "vulnerabilities":{"found":$found,"count":$($rows.Count),"list":[$($items -join ',')]},
  "warnings":{}}
 "@
 }
@@ -44,9 +45,12 @@ RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix    2026-08-20
 
 $auditOk = Join-Path $fx "audit-ok.json"
 W $auditOk (Audit-Json $HITS)
+$auditClean = Join-Path $fx "audit-clean.json"
+W $auditClean (Audit-Json @())
 
 $cases = @(
   @{ name = "正向对照：命中与申报一一对应"; decl = $GOOD_DECL; audit = $auditOk; expectPass = $true; needle = "A3_no_undeclared_vulnerability=PASS" },
+  @{ name = "正向对照：零漏洞且零豁免可通过"; decl = "# no exemptions"; audit = $auditClean; expectPass = $true; needle = "0 条命中全部已申报" },
   @{ name = "未申报命中必须红"; decl = "RUSTSEC-2026-0194  quick-xml  0.38.3  engine-pinned-g26  2026-08-20"; audit = $auditOk; expectPass = $false; needle = "未申报命中" },
   @{ name = "版本对不上也算未申报（不许按公告号整条静音）"; decl = @"
 RUSTSEC-2026-0194  quick-xml  0.37.5  engine-pinned-g26  2026-08-20
@@ -65,6 +69,14 @@ RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix       2026-08-20
 RUSTSEC-2026-0194  quick-xml  0.38.3  engine-pinned-g26  2026/08/20
 RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix    2026-08-20
 "@; audit = $auditOk; expectPass = $false; needle = "复核日期格式错" },
+  @{ name = "复核日期在未来必须红"; decl = @"
+RUSTSEC-2026-0194  quick-xml  0.38.3  engine-pinned-g26  2999-01-01
+RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix    2026-08-20
+"@; audit = $auditOk; expectPass = $false; needle = "复核日期在未来" },
+  @{ name = "重复豁免必须红"; decl = @"
+$GOOD_DECL
+RUSTSEC-2026-0194  quick-xml  0.38.3  engine-pinned-g26  2026-08-20
+"@; audit = $auditOk; expectPass = $false; needle = "重复申报" },
   @{ name = "公告号格式错必须红"; decl = @"
 RUSTSEC-26-0194    quick-xml  0.38.3  engine-pinned-g26  2026-08-20
 RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix    2026-08-20
@@ -75,6 +87,17 @@ RUSTSEC-2023-0071  rsa        0.9.10  no-upstream-fix    2026-08-20
 $auditBad = Join-Path $fx "audit-bad.json"
 W $auditBad "not json at all"
 $cases += @{ name = "audit 输出不可解析必须红在 A1"; decl = $GOOD_DECL; audit = $auditBad; expectPass = $false; needle = "无法解析" }
+
+# JSON 语法合法也不够：关键 schema 缺字段或自相矛盾都必须 fail-closed。
+$auditMissingList = Join-Path $fx "audit-missing-list.json"
+W $auditMissingList '{"database":{},"lockfile":{"dependency-count":42},"vulnerabilities":{"found":true,"count":1},"warnings":{}}'
+$cases += @{ name = "audit 缺 list 字段必须红在 A1"; decl = "# no exemptions"; audit = $auditMissingList; expectPass = $false; needle = "schema 不一致" }
+$auditCountMismatch = Join-Path $fx "audit-count-mismatch.json"
+W $auditCountMismatch '{"database":{},"lockfile":{"dependency-count":42},"vulnerabilities":{"found":true,"count":2,"list":[]},"warnings":{}}'
+$cases += @{ name = "audit count/list 不一致必须红在 A1"; decl = "# no exemptions"; audit = $auditCountMismatch; expectPass = $false; needle = "schema 不一致" }
+$auditFoundMismatch = Join-Path $fx "audit-found-mismatch.json"
+W $auditFoundMismatch '{"database":{},"lockfile":{"dependency-count":42},"vulnerabilities":{"found":false,"count":1,"list":[{"advisory":{"id":"RUSTSEC-2026-0194"},"versions":{"patched":[]},"package":{"name":"quick-xml","version":"0.38.3"}}]},"warnings":{}}'
+$cases += @{ name = "audit found/count 不一致必须红在 A1"; decl = $GOOD_DECL; audit = $auditFoundMismatch; expectPass = $false; needle = "schema 不一致" }
 
 $failed = 0
 $i = 0

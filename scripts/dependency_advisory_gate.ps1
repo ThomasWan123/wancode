@@ -63,8 +63,30 @@ $audit = $null
 $parseErr = ""
 try { $audit = $auditRaw | ConvertFrom-Json } catch { $parseErr = $_.Exception.Message }
 
-Record-Check "A1_audit_output_parsed" ($null -ne $audit -and $null -ne $audit.vulnerabilities) `
-  $(if ($null -eq $audit) { "cargo audit --json 无法解析：$parseErr" } else { "exit=$auditExit dependencies=$($audit.lockfile.'dependency-count')" })
+# 不只验证「JSON 能解析」：还要把 cargo-audit 的关键 schema 绑死。否则输出若
+# 被截断/版本漂移成 { vulnerabilities: { found: true, count: 1 } }，`list`
+# 缺失会在 PowerShell 里被当成空数组；等豁免清零后，这种坏输出会误判为零漏洞。
+$schemaOk = $false
+$schemaDetail = ""
+if ($null -ne $audit -and $null -ne $audit.vulnerabilities) {
+  $vp = $audit.vulnerabilities.PSObject.Properties
+  $hasFound = $null -ne $vp["found"]
+  $hasCount = $null -ne $vp["count"]
+  $hasList = $null -ne $vp["list"]
+  if ($hasFound -and $hasCount -and $hasList) {
+    $listCount = @($audit.vulnerabilities.list).Count
+    $reportedCount = -1
+    $countParsed = [int]::TryParse("$($audit.vulnerabilities.count)", [ref]$reportedCount)
+    $reportedFound = $audit.vulnerabilities.found -eq $true
+    $schemaOk = $countParsed -and $reportedCount -eq $listCount -and $reportedFound -eq ($listCount -gt 0)
+    $schemaDetail = "found=$reportedFound count=$reportedCount list_count=$listCount"
+  } else {
+    $schemaDetail = "缺字段：found=$hasFound count=$hasCount list=$hasList"
+  }
+}
+
+Record-Check "A1_audit_output_parsed" ($null -ne $audit -and $schemaOk) `
+  $(if ($null -eq $audit) { "cargo audit --json 无法解析：$parseErr" } elseif (-not $schemaOk) { "cargo audit --json schema 不一致：$schemaDetail" } else { "exit=$auditExit dependencies=$($audit.lockfile.'dependency-count') $schemaDetail" })
 
 if ($failures.Count) {
   # 拿不到命中集合就没法做任何比对——继续跑只会产出"看起来全绿"的假摘要。
@@ -93,6 +115,7 @@ foreach ($v in @($audit.vulnerabilities.list)) {
 $declared = [System.Collections.Generic.List[string]]::new()
 $declaredRows = [System.Collections.Generic.List[object]]::new()
 $malformed = [System.Collections.Generic.List[string]]::new()
+$declaredKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $lineNo = 0
 foreach ($line in [System.IO.File]::ReadAllLines($exPath)) {
   $lineNo++
@@ -106,7 +129,14 @@ foreach ($line in [System.IO.File]::ReadAllLines($exPath)) {
   if (-not [datetime]::TryParseExact($f[4], 'yyyy-MM-dd', [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
     $malformed.Add("第 $lineNo 行复核日期格式错（要 YYYY-MM-DD）：$($f[4])"); continue
   }
-  $declared.Add("$($f[0]) $($f[1]) $($f[2])")
+  if ($parsedDate.Date -gt [datetime]::UtcNow.Date) {
+    $malformed.Add("第 $lineNo 行复核日期在未来：$($f[4])"); continue
+  }
+  $declaredKey = "$($f[0]) $($f[1]) $($f[2])"
+  if (-not $declaredKeys.Add($declaredKey)) {
+    $malformed.Add("第 $lineNo 行重复申报：$declaredKey"); continue
+  }
+  $declared.Add($declaredKey)
   $declaredRows.Add([ordered]@{ advisory = $f[0]; package = $f[1]; version = $f[2]; reason = $f[3]; reviewed = $f[4] })
 }
 
