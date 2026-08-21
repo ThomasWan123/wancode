@@ -27,7 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=security-upgrade-delta
+migration_audit_mode=version-only
 declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
@@ -48,8 +48,8 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=f63b6b4235c5d15fe81ab18717d3e68b8a5445e2003909d36451f051641678fd
-effective_tree_sha256=8d841a0ccb45d3d359c1a3f17307292f95224b39c6a1b2ff9d702d5321444318
+cargo_lock_sha256=55accbe415df98b9a5b5a0b69c7a2fa944800a29832af4000cea719240795a9c
+effective_tree_sha256=e8b4c866f1b8188ccd0959d7350080560ba99f90186ebd941b86a9ca02ec5ffb
 #
 # 【历史】上面的 declared_added_packages（W3 dependency-delta）与
 # declared_added_wancode_dependencies（#67 wancode-lock-delta）属于此前两轮，

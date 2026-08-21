@@ -47,7 +47,7 @@ struct Candidate {
     update: Update,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceFailure {
     source: &'static str,
@@ -69,6 +69,50 @@ fn highest_version_indexes(versions: &[Version]) -> Vec<usize> {
         .enumerate()
         .filter_map(|(index, version)| (version == highest).then_some(index))
         .collect()
+}
+
+enum DownloadAttempt {
+    Verified(Vec<u8>),
+    Empty,
+    VerifyError(String),
+    Timeout,
+}
+
+/// Apply one download result to the same ledger used by the command. Keeping
+/// this decision outside the transport future makes every hostile outcome
+/// deterministic to test without weakening plugin-owned minisign verification.
+fn accept_download_attempt(
+    source: UpdateSource,
+    attempt: DownloadAttempt,
+    failures: &mut Vec<SourceFailure>,
+) -> Option<Vec<u8>> {
+    match attempt {
+        DownloadAttempt::Verified(bytes) if !bytes.is_empty() => Some(bytes),
+        DownloadAttempt::Verified(_) | DownloadAttempt::Empty => {
+            failures.push(SourceFailure {
+                source: source.name,
+                stage: "download-empty",
+                detail: "下载结果为 0 字节".to_string(),
+            });
+            None
+        }
+        DownloadAttempt::VerifyError(detail) => {
+            failures.push(SourceFailure {
+                source: source.name,
+                stage: "download-verify",
+                detail,
+            });
+            None
+        }
+        DownloadAttempt::Timeout => {
+            failures.push(SourceFailure {
+                source: source.name,
+                stage: "download-timeout",
+                detail: format!("超过 {} 秒", DOWNLOAD_TIMEOUT.as_secs()),
+            });
+            None
+        }
+    }
 }
 
 /// download 与 install 两条命令之间暂存的安装器。
@@ -216,26 +260,15 @@ pub async fn updater_download(
             },
             || {},
         );
-        match tokio::time::timeout(DOWNLOAD_TIMEOUT, download).await {
-            Ok(Ok(bytes)) if !bytes.is_empty() => {
-                verified = Some(bytes);
-                break;
-            }
-            Ok(Ok(_)) => failures.push(SourceFailure {
-                source: candidate.source.name,
-                stage: "download-empty",
-                detail: "下载结果为 0 字节".to_string(),
-            }),
-            Ok(Err(error)) => failures.push(SourceFailure {
-                source: candidate.source.name,
-                stage: "download-verify",
-                detail: error.to_string(),
-            }),
-            Err(_) => failures.push(SourceFailure {
-                source: candidate.source.name,
-                stage: "download-timeout",
-                detail: format!("超过 {} 秒", DOWNLOAD_TIMEOUT.as_secs()),
-            }),
+        let attempt = match tokio::time::timeout(DOWNLOAD_TIMEOUT, download).await {
+            Ok(Ok(bytes)) if bytes.is_empty() => DownloadAttempt::Empty,
+            Ok(Ok(bytes)) => DownloadAttempt::Verified(bytes),
+            Ok(Err(error)) => DownloadAttempt::VerifyError(error.to_string()),
+            Err(_) => DownloadAttempt::Timeout,
+        };
+        if let Some(bytes) = accept_download_attempt(candidate.source, attempt, &mut failures) {
+            verified = Some(bytes);
+            break;
         }
     }
     let bytes = verified.ok_or_else(|| {
@@ -269,6 +302,15 @@ pub async fn updater_download(
 mod mirror_tests {
     use super::*;
 
+    const ORIGIN: UpdateSource = UpdateSource {
+        name: "origin",
+        endpoint: "https://origin.invalid/latest.json",
+    };
+    const MIRROR: UpdateSource = UpdateSource {
+        name: "mirror",
+        endpoint: "https://mirror.invalid/latest.json",
+    };
+
     #[test]
     fn highest_version_group_preserves_source_priority() {
         let versions = [
@@ -292,6 +334,141 @@ mod mirror_tests {
     #[test]
     fn empty_candidate_set_is_explicit() {
         assert!(highest_version_indexes(&[]).is_empty());
+    }
+
+    #[test]
+    fn positive_origin_control_accepts_verified_bytes_once() {
+        let mut failures = Vec::new();
+        let accepted = accept_download_attempt(
+            ORIGIN,
+            DownloadAttempt::Verified(b"MZ-origin".to_vec()),
+            &mut failures,
+        );
+        assert_eq!(accepted.as_deref(), Some(b"MZ-origin".as_slice()));
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn positive_mirror_control_activates_after_origin_failure() {
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(
+            ORIGIN,
+            DownloadAttempt::VerifyError("origin offline".into()),
+            &mut failures,
+        )
+        .is_none());
+        let accepted = accept_download_attempt(
+            MIRROR,
+            DownloadAttempt::Verified(b"MZ-mirror".to_vec()),
+            &mut failures,
+        );
+        assert_eq!(accepted.as_deref(), Some(b"MZ-mirror".as_slice()));
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].source, "origin");
+    }
+
+    #[test]
+    fn zero_byte_is_ledgered_and_never_accepted() {
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(MIRROR, DownloadAttempt::Empty, &mut failures).is_none());
+        assert_eq!(failures[0].stage, "download-empty");
+    }
+
+    #[test]
+    fn defensive_empty_verified_variant_is_still_rejected() {
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(
+            MIRROR,
+            DownloadAttempt::Verified(Vec::new()),
+            &mut failures,
+        )
+        .is_none());
+        assert_eq!(failures[0].stage, "download-empty");
+    }
+
+    #[test]
+    fn truncated_or_corrupt_bytes_are_plugin_verification_failures() {
+        for detail in ["truncated minisign payload", "signature mismatch"] {
+            let mut failures = Vec::new();
+            assert!(accept_download_attempt(
+                MIRROR,
+                DownloadAttempt::VerifyError(detail.into()),
+                &mut failures,
+            )
+            .is_none());
+            assert_eq!(failures[0].stage, "download-verify");
+            assert_eq!(failures[0].detail, detail);
+        }
+    }
+
+    #[test]
+    fn timeout_is_bounded_and_ledgered() {
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(MIRROR, DownloadAttempt::Timeout, &mut failures).is_none());
+        assert_eq!(failures[0].stage, "download-timeout");
+        assert!(failures[0]
+            .detail
+            .contains(&DOWNLOAD_TIMEOUT.as_secs().to_string()));
+    }
+
+    #[test]
+    fn stale_manifest_is_excluded_from_the_highest_group() {
+        let versions = [
+            Version::parse("0.19.9").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+        ];
+        assert_eq!(highest_version_indexes(&versions), vec![1]);
+    }
+
+    #[test]
+    fn all_sources_failed_produces_complete_structured_ledger() {
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(ORIGIN, DownloadAttempt::Timeout, &mut failures).is_none());
+        assert!(accept_download_attempt(MIRROR, DownloadAttempt::Empty, &mut failures).is_none());
+        let message = failure_message("all failed", &failures);
+        assert!(message.contains("origin"));
+        assert!(message.contains("mirror"));
+        assert!(message.contains("download-timeout"));
+        assert!(message.contains("download-empty"));
+    }
+
+    #[test]
+    fn forged_higher_version_cannot_fall_back_to_valid_lower_bytes() {
+        let versions = [
+            Version::parse("99.0.0").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+        ];
+        let selected = highest_version_indexes(&versions);
+        assert_eq!(selected, vec![0]);
+
+        let mut failures = Vec::new();
+        assert!(accept_download_attempt(
+            MIRROR,
+            DownloadAttempt::VerifyError("signature mismatch".into()),
+            &mut failures,
+        )
+        .is_none());
+        assert_eq!(failures.len(), 1, "lower version must never be attempted");
+    }
+
+    #[test]
+    fn same_version_retry_stops_after_first_verified_source() {
+        let versions = [
+            Version::parse("0.20.0").unwrap(),
+            Version::parse("0.20.0").unwrap(),
+        ];
+        assert_eq!(highest_version_indexes(&versions), vec![0, 1]);
+        let mut failures = Vec::new();
+        let accepted = accept_download_attempt(
+            ORIGIN,
+            DownloadAttempt::Verified(b"MZ".to_vec()),
+            &mut failures,
+        );
+        assert!(accepted.is_some());
+        assert!(
+            failures.is_empty(),
+            "mirror must not be touched after success"
+        );
     }
 }
 

@@ -7,14 +7,17 @@
 #   时要解密密钥、读 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 环境变量；但
 #   Windows/PowerShell 在 spawn 子进程时会丢弃**空字符串**环境变量
 #   （子进程看到 undefined），于是 tauri 回退到交互式密码提示 → 后台
-#   构建无 stdin → 卡死/跳过签名。用 `signer sign -f <key> -p ""`
+#   构建无 stdin → 卡死/跳过签名。用 `signer sign -f <key> --password=`
 #   （空密码走 CLI 参数，不受此坑影响）在 build 后补签，稳定可靠。
 param(
   [Parameter(Mandatory = $true)][string]$Version,
   [string]$Repo = "ThomasWan123/wancode",
   # 国内直连 GitHub 资产 CDN（release-assets.githubusercontent.com）概率性失败，
   # 更新器下载走镜像前缀转发（原样转发，签名不变仍有效）。置 "" 可关。
-  [string]$Mirror = "https://gh-proxy.com/"
+  [string]$Mirror = "https://gh-proxy.com/",
+  # 仅供本机 WiX/Windows Installer 服务不可用时验证 NSIS + updater 签名链。
+  # 正式发布仍须省略此开关，由精确 SHA 的干净 Windows CI 同时产出 MSI/NSIS。
+  [switch]$NsisOnly
 )
 $ErrorActionPreference = "Stop"
 
@@ -47,7 +50,12 @@ Write-Host "[1/4] dev 构建输出占用检查完成（安装版不受影响）.
 
 Write-Host "[2/4] 构建 release（不在 build 时签名——见文件头注释）..."
 Set-Location $root
-npm run tauri build
+if ($NsisOnly) {
+  Write-Host "  NSIS-only 本机验证模式：跳过 WiX；不得据此声称 MSI 已验证。" -ForegroundColor Yellow
+  npm run tauri build -- --bundles nsis
+} else {
+  npm run tauri build
+}
 if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
 
 # tauri build 内部调 cargo，无法直接传 --locked——改为构建后断言：
@@ -63,10 +71,10 @@ $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
 
 Write-Host "[3/4] 补签 setup.exe（signer sign，空密码走 CLI 参数）..."
-# -p 传空密码：PowerShell spawn 原生进程时会把空字符串参数整个丢掉，
-# $setup 就顶上变成了密码、FILE 缺参报错。'""' 让 Windows 参数解析
-# 得到一个真正的空字符串。（bash 里不需要这个把戏。）
-npx --yes @tauri-apps/cli signer sign -f $key -p '""' $setup
+# 当前 Tauri CLI/Clap 接受 `--password=` 作为明确的空密码。不要传
+# `-p '""'`：新版 CLI 会把两个引号字符当成真实密码并报 Wrong password。
+# 只用 package-lock 已安装的 CLI；发布时禁止 npx 临时下载另一版本。
+npx --no-install @tauri-apps/cli signer sign -f $key --password= $setup
 if ($LASTEXITCODE -ne 0) { throw "签名失败" }
 $sig = Get-Content "$setup.sig" -Raw
 
@@ -83,15 +91,19 @@ $null = Write-WanCodeUpdateManifests `
 
 Write-Host ""
 Write-Host "✅ 完成。产物：" -ForegroundColor Green
-Write-Host "   $msi"
+if (-not $NsisOnly -and (Test-Path $msi)) { Write-Host "   $msi" }
 Write-Host "   $setup"
 Write-Host "   $setup.sig"
 Write-Host "   $bundle\latest.json"
 Write-Host "   $bundle\latest-gh-proxy.json"
 Write-Host ""
 Write-Host "下一步（手动，发布是外向操作）：" -ForegroundColor Yellow
-Write-Host "   git tag v$Version; git push origin v$Version"
-Write-Host "   gh release create v$Version `"$msi`" `"$setup`" `"$setup.sig`" `"$bundle\latest.json`" `"$bundle\latest-gh-proxy.json`" --repo $Repo --title `"WanCode v$Version`" --notes `"...`""
+if ($NsisOnly) {
+  Write-Host "   NSIS-only 结果不得发布；先取得精确 SHA 的 CI MSI/NSIS，再从合并后 main 重建并签名。" -ForegroundColor Yellow
+} else {
+  Write-Host "   git tag v$Version; git push origin v$Version"
+  Write-Host "   gh release create v$Version `"$msi`" `"$setup`" `"$setup.sig`" `"$bundle\latest.json`" `"$bundle\latest-gh-proxy.json`" --repo $Repo --title `"WanCode v$Version`" --notes `"...`""
+}
 Write-Host ""
 Write-Host "发布后硬断言（v0.18.9 事故复盘：gh 的 file#label 语法只改显示标签不改资产文件名，"
 Write-Host "曾把 latest.json 传成 latest-189.json——updater 按文件名取件，全体用户 404）："

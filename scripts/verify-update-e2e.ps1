@@ -1,7 +1,7 @@
 # verify-update-e2e.ps1
 #
-# Fully automated, isolated end-to-end verification of the wancode auto-update
-# chain 0.18.5 -> 0.18.6 (task #123).
+# Fully automated, isolated end-to-end verification of a wancode auto-update
+# chain (defaults to 0.18.5 -> 0.18.6; WUE_OLD/WUE_NEW select a release pair).
 #
 # What it does (all unattended):
 #   1. Safety preflight: refuses to run if any wancode.exe is running outside the
@@ -9,18 +9,18 @@
 #      silent/passive mode), snapshots the real install's registry keys, exe hash
 #      and shortcut targets.
 #   2. Fetches latest.json from the updater endpoint, asserts version/URL.
-#   3. Downloads the 0.18.6 installer named by latest.json and verifies its
+#   3. Downloads the new installer named by latest.json and verifies its
 #      minisign signature (real Ed25519 + BLAKE2b-512 prehash, pure-python
 #      implementation, pubkey taken from src-tauri/tauri.conf.json).
-#   4. Downloads the 0.18.5 installer (+ .sig, also verified) and installs it
+#   4. Downloads the old installer (+ .sig, also verified) and installs it
 #      into an isolated directory using /S /NS /D=<dir>.
 #   5. Replays the updater step exactly like tauri-plugin-updater 2.10.1 does on
-#      Windows: launches the 0.18.6 installer with /P /R /UPDATE (plus /D=<dir>
+#      Windows: launches the new installer with /P /R /UPDATE (plus /D=<dir>
 #      to force the isolated target), waits for exit 0, asserts the isolated exe
-#      is now 0.18.6, asserts /R relaunched the app, then kills ONLY processes
+#      is now the new version, asserts /R relaunched the app, then kills ONLY processes
 #      running from the isolated directory.
 #   6. Restores the registry snapshot and audits that the real installation
-#      (%LOCALAPPDATA%\wancode, HKCU uninstall key = 0.18.6, shortcuts) is
+#      (%LOCALAPPDATA%\wancode, HKCU uninstall key, shortcuts) is
 #      byte-for-byte untouched.
 #
 # The real installation is never written to. Registry keys are polluted by the
@@ -36,7 +36,12 @@
 param(
     [string]$WorkDir = (Join-Path $env:TEMP 'wancode-e2e'),
     [int]$InstallTimeoutSec = 300,
-    [switch]$KeepIsolatedInstall
+    [switch]$KeepIsolatedInstall,
+    # 预发布候选可直接使用本地清单/安装器；默认空值仍走真实公开端点。
+    # 三项必须成套提供，避免把本地候选与线上旧资产误拼成一条证据链。
+    [string]$CandidateManifest = '',
+    [string]$CandidateInstaller = '',
+    [string]$OldInstaller = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +60,14 @@ $ManuKey      = 'HKCU\Software\wanwe\wancode'   # NSIS MANUPRODUCTKEY (Software\
 $IsoDir       = Join-Path $WorkDir 'app'        # isolated install target; MUST contain no spaces (/D=)
 $RepoRoot     = Split-Path -Parent $PSScriptRoot
 $TauriConf    = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+
+$localCandidateArgs = @($CandidateManifest, $CandidateInstaller, $OldInstaller) | Where-Object { $_ }
+if ($localCandidateArgs.Count -notin @(0, 3)) {
+    throw 'CandidateManifest、CandidateInstaller、OldInstaller 必须同时提供或同时省略'
+}
+foreach ($localPath in $localCandidateArgs) {
+    if (-not (Test-Path -LiteralPath $localPath -PathType Leaf)) { throw "本地候选文件不存在：$localPath" }
+}
 
 if ($IsoDir -match ' ') { throw "IsoDir '$IsoDir' contains a space; NSIS /D= cannot be quoted. Pick a space-free WorkDir." }
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
@@ -160,10 +173,16 @@ function Restore-Registry {
     if (-not $script:RegPolluted -or $script:RegRestored) { return }
     cmd /c "reg delete `"$UninstKey`" /f 2>nul" | Out-Null
     cmd /c "reg delete `"$ManuKey`" /f 2>nul"   | Out-Null
-    cmd /c "reg import `"$script:SnapUninst`" 2>nul" | Out-Null
-    $r1 = $LASTEXITCODE
-    cmd /c "reg import `"$script:SnapManu`" 2>nul"   | Out-Null
-    $r2 = $LASTEXITCODE
+    $r1 = 0
+    $r2 = 0
+    if ($script:PreUninstExists) {
+        cmd /c "reg import `"$script:SnapUninst`" 2>nul" | Out-Null
+        $r1 = $LASTEXITCODE
+    }
+    if ($script:PreManuExists) {
+        cmd /c "reg import `"$script:SnapManu`" 2>nul" | Out-Null
+        $r2 = $LASTEXITCODE
+    }
     $script:RegRestored = $true
     Step 'Registry restore (reg import of pre-run snapshot)' (($r1 -eq 0) -and ($r2 -eq 0)) ("import exit codes: $r1,$r2")
 }
@@ -377,18 +396,26 @@ Step 'Preflight: no wancode.exe running outside isolated dir' $true ''
 # registry + shortcut snapshot
 $script:SnapUninst = Join-Path $WorkDir 'snapshot-uninstall.reg'
 $script:SnapManu   = Join-Path $WorkDir 'snapshot-manu.reg'
-cmd /c "reg export `"$UninstKey`" `"$script:SnapUninst`" /y" | Out-Null
-$e1 = $LASTEXITCODE
-cmd /c "reg export `"$ManuKey`" `"$script:SnapManu`" /y" | Out-Null
-$e2 = $LASTEXITCODE
 $script:PreUninstText = Get-RegText $UninstKey
 $script:PreManuText   = Get-RegText $ManuKey
+$script:PreUninstExists = ($script:PreUninstText -ne '<absent>')
+$script:PreManuExists   = ($script:PreManuText -ne '<absent>')
+$e1 = 0
+$e2 = 0
+if ($script:PreUninstExists) {
+    cmd /c "reg export `"$UninstKey`" `"$script:SnapUninst`" /y" | Out-Null
+    $e1 = $LASTEXITCODE
+}
+if ($script:PreManuExists) {
+    cmd /c "reg export `"$ManuKey`" `"$script:SnapManu`" /y" | Out-Null
+    $e2 = $LASTEXITCODE
+}
 Step 'Preflight: registry snapshot (Uninstall\wancode + Software\wanwe\wancode)' (($e1 -eq 0) -and ($e2 -eq 0)) ("export exit codes: $e1,$e2")
 $script:PreRealDisplayVersion = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\wancode' -EA SilentlyContinue).DisplayVersion
 if (($e1 -ne 0) -or ($e2 -ne 0)) {
-    # Fail closed (Codex review): the installer WILL rewrite these keys; if the
-    # snapshot doesn't exist there is nothing to restore from afterwards.
-    # Running on would trade a skipped test for corrupted real-install state.
+    # Existing keys must be exportable before installers run. An absent key is
+    # a valid baseline: restoration deletes installer-created keys and leaves
+    # it absent, which Final-Audit verifies via the captured '<absent>' text.
     throw "registry snapshot failed (export codes $e1,$e2) - aborting BEFORE any installer runs"
 }
 
@@ -414,7 +441,12 @@ if (Test-Path $IsoDir) {
 # ====================================================== STEP 2: latest.json
 $latestPath = Join-Path $WorkDir 'latest.json'
 try {
-    $src = Download-File -Url $Endpoint -OutFile $latestPath
+    if ($CandidateManifest) {
+        Copy-Item -LiteralPath $CandidateManifest -Destination $latestPath -Force
+        $src = 'local candidate: ' + (Resolve-Path $CandidateManifest).Path
+    } else {
+        $src = Download-File -Url $Endpoint -OutFile $latestPath
+    }
     Step 'Fetch latest.json from updater endpoint' $true ("via " + $src)
 } catch {
     Step 'Fetch latest.json from updater endpoint' $false $_.Exception.Message
@@ -425,10 +457,15 @@ $plat = $latest.platforms.'windows-x86_64'
 Step ("latest.json version is " + $NewVersion) ($latest.version -eq $NewVersion) ("version=" + $latest.version)
 Step 'latest.json has windows-x86_64 url + signature' (($plat.url -like 'https://*') -and ($plat.signature.Length -gt 100)) ("url=" + $plat.url)
 
-# ============================================ STEP 3: download + verify 0.18.6
+# ============================================ STEP 3: download + verify new
 $newExe = Join-Path $WorkDir ('wancode_' + $NewVersion + '_x64-setup.exe')
 try {
-    $src = Download-File -Url $plat.url -OutFile $newExe -ExpectPE $true -ReuseCached
+    if ($CandidateInstaller) {
+        Copy-Item -LiteralPath $CandidateInstaller -Destination $newExe -Force
+        $src = 'local candidate: ' + (Resolve-Path $CandidateInstaller).Path
+    } else {
+        $src = Download-File -Url $plat.url -OutFile $newExe -ExpectPE $true -ReuseCached
+    }
     Step ("Download " + $NewVersion + " installer (updater URL)") $true ("via $src size=" + (Get-Item $newExe).Length)
 } catch {
     Step ("Download " + $NewVersion + " installer (updater URL)") $false $_.Exception.Message
@@ -441,11 +478,16 @@ if (-not (Verify-Minisign -Name ($NewVersion + ' installer') -PubB64 $PubKey -Si
     Finish 1
 }
 
-# ============================================ STEP 4: download + verify 0.18.5
+# ============================================ STEP 4: download + verify old
 $oldUrl = "https://github.com/$RepoSlug/releases/download/v$OldVersion/wancode_${OldVersion}_x64-setup.exe"
 $oldExe = Join-Path $WorkDir ('wancode_' + $OldVersion + '_x64-setup.exe')
 try {
-    $src = Download-File -Url $oldUrl -OutFile $oldExe -ExpectPE $true -ReuseCached
+    if ($OldInstaller) {
+        Copy-Item -LiteralPath $OldInstaller -Destination $oldExe -Force
+        $src = 'local candidate: ' + (Resolve-Path $OldInstaller).Path
+    } else {
+        $src = Download-File -Url $oldUrl -OutFile $oldExe -ExpectPE $true -ReuseCached
+    }
     Step ("Download " + $OldVersion + " installer") $true ("via $src size=" + (Get-Item $oldExe).Length)
 } catch {
     Step ("Download " + $OldVersion + " installer") $false $_.Exception.Message
@@ -454,7 +496,11 @@ try {
 $oldSigFile = $oldExe + '.sig'
 $oldSigOk = $false
 try {
-    Download-File -Url ($oldUrl + '.sig') -OutFile $oldSigFile | Out-Null
+    if ($OldInstaller) {
+        Copy-Item -LiteralPath ($OldInstaller + '.sig') -Destination $oldSigFile -Force
+    } else {
+        Download-File -Url ($oldUrl + '.sig') -OutFile $oldSigFile | Out-Null
+    }
     $oldSigOk = Verify-Minisign -Name ($OldVersion + ' installer') -PubB64 $PubKey -SigFile $oldSigFile -File $oldExe
 } catch {
     Step ($OldVersion + ' installer minisign signature') $false ('.sig download failed: ' + $_.Exception.Message)
@@ -464,7 +510,7 @@ if (-not $oldSigOk) {
     Finish 1
 }
 
-# ================================== STEP 5: install 0.18.5 into isolated dir
+# ================================== STEP 5: install old into isolated dir
 # From here on the registry is polluted by design; snapshot restore is armed.
 $script:RegPolluted = $true
 
@@ -486,7 +532,7 @@ Step '/D respected: install landed in isolated dir, not %LOCALAPPDATA%\wancode' 
 Info ("expected registry pollution observed: Uninstall\wancode DisplayVersion=" + $dvNow + " (will be restored)")
 
 $realHashMid = (Get-FileHash -Algorithm SHA256 $RealExe).Hash
-Step 'Real install exe untouched after 0.18.5 isolated install' ($realHashMid -eq $script:RealExeHash) ''
+Step ("Real install exe untouched after " + $OldVersion + " isolated install") ($realHashMid -eq $script:RealExeHash) ''
 
 # ==================== STEP 6: replay plugin update step (/P /R /UPDATE + /D)
 # tauri-plugin-updater 2.10.1 on Windows launches the NSIS installer via
