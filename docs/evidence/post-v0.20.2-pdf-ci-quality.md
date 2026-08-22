@@ -2,9 +2,9 @@
 
 Date: 2026-08-22 (Asia/Shanghai)
 
-Status: implemented after the published v0.20.2 tag and **not released**. This
-document describes the current review branch only; it does not change the
-historical claims for v0.20.2.
+Status: merged to `main` in PR #72 and released as **v0.20.3**. This document
+remains the implementation evidence for the PDF/CI gate work; publication
+details are recorded in `v0.20.3-professional-qa.md`.
 
 ## Acceptance targets
 
