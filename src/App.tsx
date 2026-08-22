@@ -570,7 +570,7 @@ function App() {
     }
   }
 
-  // 把一份 DOCX 导入当前 Work 会话的工作区。原件只读复制、
+  // 把一份 PDF / DOCX 导入当前 Work 会话的工作区。原件只读复制、
   // 记完整 sha256(后端 work_import)。成功后 append 到本会话文档列表。
   async function importWorkDoc() {
     if (!workWorkspaceId) {
@@ -580,7 +580,7 @@ function App() {
     const path = await openDialog({
       directory: false,
       title: lang === "zh" ? "选择要导入的文档" : "Pick a document to import",
-      filters: [{ name: "Word documents", extensions: ["docx"] }],
+      filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
     });
     if (typeof path !== "string" || !path) return;
     try {
@@ -2397,7 +2397,7 @@ function App() {
         {surface === "work" && sessionId && (
           <button
             className="icon-btn"
-            title={lang === "zh" ? "导入 Word 文档 (DOCX)" : "Import Word document (DOCX)"}
+            title={lang === "zh" ? "导入文档 (PDF / DOCX)" : "Import document (PDF / DOCX)"}
             onClick={importWorkDoc}
           >
             {lang === "zh" ? "导入" : "Import"}
@@ -2428,8 +2428,8 @@ function App() {
           {workDocs.length === 0 ? (
             <div className="work-docs-empty">
               {lang === "zh"
-                ? "尚无文档。点“导入”添加 DOCX（原件只读复制到本会话工作区）。"
-                : "No documents yet. Click Import to add a DOCX (copied read-only into this session's workspace)."}
+                ? "尚无文档。点“导入”添加 PDF 或 DOCX（原件只读复制到本会话工作区）。"
+                : "No documents yet. Click Import to add a PDF or DOCX (copied read-only into this session's workspace)."}
             </div>
           ) : (
             <ul className="work-docs-list">

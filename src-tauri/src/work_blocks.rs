@@ -1,4 +1,4 @@
-//! 解析器输出契约 + 锚点铸造（v0.20 W3-b，DOCX only）。
+//! 解析器输出契约 + 锚点铸造（v0.20 W3-b，PDF / DOCX）。
 //!
 //! # 为什么先定契约再写解析器
 //!
@@ -22,8 +22,7 @@
 //! 一对，任何一侧漂移都在单测里炸掉。越界/劈开代理对/块不存在一律
 //! fail-closed，绝不"就近取整"。
 //!
-//! **本切片不含任何文件解析**（无 zip / 无 XML）。PDF 亦不在范围内：
-//! Work PDF 未完成。
+//! **本模块不直接解析文件**；PDF / DOCX 解析器只负责填充此契约。
 
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +31,7 @@ use crate::work_anchor::{
 };
 use crate::work_staging::ImportId;
 
-/// 解析器产出的一个块（DOCX 段落）。
+/// 解析器产出的一个块（DOCX 段落或 PDF 页内文本块）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkBlock {

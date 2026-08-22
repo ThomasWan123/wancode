@@ -4,14 +4,15 @@
 //! 不得带倒主应用；失败即整体拒收，暂存区无半成品。」
 //!
 //! 外壳与解析器分层：外壳只管进程隔离、超时、上限与协议，解析逻辑一律在
-//! `run_request` 的 dispatch 之后。DOCX 已接入（`work_docx`），**PDF 尚未**。
+//! `run_request` 的 dispatch 之后。DOCX 与 PDF 均通过同一隔离边界接入。
 //!
 //! ## 为什么外壳能保证「暂存区无半成品」
 //!
 //! 不是靠 worker 自觉清理——崩溃的进程没有自觉。是靠**它根本没有写入路径**：
-//! worker 从 stdin 收字节、往 stdout 吐字节，全程不碰暂存区，也不接收暂存区
-//! 路径。父进程拿到一份**完整且合法**的响应后，才由自己写盘。worker 死在
-//! 任何一步，暂存区都不曾被触碰过——零残留是结构性的，不是清理出来的。
+//! worker 从 stdin 接收已校验暂存副本的路径，只读该文件并往 stdout 吐字节；
+//! 它没有任何写入目标，也不更新清单。父进程拿到一份**完整且合法**的响应后
+//! 才继续处理。worker 死在任何一步，都不会产生解析侧写入——零残留是结构性
+//! 的，不是清理出来的。
 //!
 //! ## 进程树治理
 //!
@@ -33,8 +34,8 @@ pub const WORKER_ENV: &str = "WANCODE_PARSE_WORKER";
 
 /// 解析请求（父 → 子，stdin 上一行 JSON）。
 ///
-/// 注意这里传的是**原件路径**，不是暂存区路径：worker 只读原件，
-/// 对暂存区一无所知。
+/// 注意这里传的是父进程已完成 SHA-256 复核的**暂存副本路径**。worker 只读
+/// 该文件，且没有清单或暂存写入能力。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParseRequest {
     pub kind: DocKind,
@@ -64,7 +65,12 @@ pub enum ParseResponse {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ParsedDoc {
-    Docx { blocks: Vec<crate::work_blocks::WorkBlock> },
+    Docx {
+        blocks: Vec<crate::work_blocks::WorkBlock>,
+    },
+    Pdf {
+        blocks: Vec<crate::work_blocks::WorkBlock>,
+    },
     /// 仅自测使用，产品路径不产生。
     Echo { text: String },
 }
@@ -176,7 +182,7 @@ pub fn run_as_worker_if_requested() {
     }
 }
 
-/// 实际解析。DOCX 已接入；PDF 未接入，返回有序拒收。
+/// 实际解析。DOCX 与 PDF 都只在隔离 worker 内运行。
 fn run_request(req: &ParseRequest) -> ParseResponse {
     // 自测钩子：让隔离本身可被证伪（见 tests）。仅在 worker 进程内生效，
     // 不影响产品路径。
@@ -235,9 +241,31 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
                 },
             }
         }
-        DocKind::Pdf => ParseResponse::Err {
-            reason: "PDF 解析器尚未接入".to_string(),
-        },
+        DocKind::Pdf => {
+            let limits = crate::work_pdf::PdfLimits::default();
+            #[cfg(debug_assertions)]
+            let limits = {
+                // Each resource-limit probe runs in a fresh debug worker. This
+                // matches PDFium's production lifetime and avoids sharing native
+                // global state inside the test harness.
+                let mut test_limits = limits;
+                match std::env::var("WANCODE_PARSE_WORKER_SELFTEST").as_deref() {
+                    Ok("pdf-page-cap") => test_limits.max_pages = 0,
+                    Ok("pdf-page-text-cap") => test_limits.max_page_utf16 = 1,
+                    Ok("pdf-total-text-cap") => test_limits.max_total_utf16 = 1,
+                    _ => {}
+                }
+                test_limits
+            };
+            match crate::work_pdf::parse_pdf(std::path::Path::new(&req.source_path), limits) {
+                Ok(blocks) => ParseResponse::Ok {
+                    doc: ParsedDoc::Pdf { blocks },
+                },
+                Err(e) => ParseResponse::Err {
+                    reason: e.to_string(),
+                },
+            }
+        }
     }
 }
 
@@ -247,10 +275,7 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
 ///
 /// 无论 worker 怎么死，本函数都返回；调用方**永远**只能拿到「完整成功」或
 /// 「整体拒收」，没有中间态。
-pub fn parse_in_worker(
-    req: &ParseRequest,
-    limits: ParseLimits,
-) -> Result<ParsedDoc, ParseFailure> {
+pub fn parse_in_worker(req: &ParseRequest, limits: ParseLimits) -> Result<ParsedDoc, ParseFailure> {
     let meta = std::fs::metadata(&req.source_path)
         .map_err(|e| ParseFailure::SourceUnreadable(e.to_string()))?;
     if meta.len() > limits.max_input_bytes {
@@ -371,7 +396,9 @@ pub fn parse_in_worker(
     #[cfg(windows)]
     close_job(job);
 
-    let stdout = out_handle.join().unwrap_or(Err("stdout 读取线程 panic".into()));
+    let stdout = out_handle
+        .join()
+        .unwrap_or(Err("stdout 读取线程 panic".into()));
     let stderr = err_handle
         .join()
         .unwrap_or(Err("stderr 读取线程 panic".into()))
