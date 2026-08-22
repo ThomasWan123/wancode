@@ -2,7 +2,7 @@
 //!
 //! 把一份不受信文档导入某 Work 工作区的暂存区:
 //!   1. 读原件、算完整 sha256(与 import_id 联合定位,设计 §1.2);
-//!   2. 按扩展名判类型(仅 pdf/docx,其余拒绝);
+//!   2. 按扩展名判类型（当前仅 DOCX，其余拒绝）;
 //!   3. 铸造 import_id,建 `work/<ws>/<import_id>/`,原件复制进去;
 //!   4. 暂存副本置**只读**(设计底线:原件全程只读);
 //!   5. 原子更新工作区清单(复用 W2-a 的 write_atomic);
@@ -25,7 +25,7 @@ use crate::work_staging::{
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
 pub enum WorkImportError {
-    /// 不支持的文档类型(仅 pdf/docx)。
+    /// 不支持的文档类型（当前仅 DOCX 可进入理解链）。
     UnsupportedKind(String),
     /// 源文件不存在或不可读。
     SourceUnreadable(String),
@@ -39,7 +39,7 @@ pub enum WorkImportError {
 impl std::fmt::Display for WorkImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}(仅 pdf/docx)"),
+            WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}"),
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
             WorkImportError::WorkspaceMismatch { requested, found } => write!(
@@ -57,7 +57,7 @@ impl From<WorkStagingError> for WorkImportError {
     }
 }
 
-/// 由扩展名判文档类型。仅 pdf/docx;大小写不敏感。
+/// 由扩展名判文档类型。当前仅 DOCX；大小写不敏感。
 fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     let ext = source
         .extension()
@@ -65,9 +65,10 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "pdf" => Ok("pdf"),
         "docx" => Ok("docx"),
-        other => Err(WorkImportError::UnsupportedKind(other.to_string())),
+        other => Err(WorkImportError::UnsupportedKind(format!(
+            "{other}（当前可理解格式仅 DOCX）"
+        ))),
     }
 }
 
@@ -218,6 +219,41 @@ pub fn work_import(
     import_document(&app_data, &ws, Path::new(&source_path)).map_err(|e| e.to_string())
 }
 
+/// Reload the durable document roster for a Work workspace.  The frontend uses
+/// this after restart instead of treating its process-local React state as the
+/// source of truth.
+#[tauri::command]
+pub fn work_list_imports(
+    app: tauri::AppHandle,
+    workspace_id: String,
+) -> Result<Vec<ImportRecord>, String> {
+    use tauri::Manager;
+    let ws = WorkspaceId::parse(workspace_id).map_err(|e| e.to_string())?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+    list_imports(&app_data, &ws).map_err(|e| e.to_string())
+}
+
+pub fn list_imports(
+    app_data: &Path,
+    ws: &WorkspaceId,
+) -> Result<Vec<ImportRecord>, WorkImportError> {
+    let manifest_path = manifest_path_under(app_data.to_path_buf(), ws);
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let manifest = WorkManifest::read(&manifest_path)?;
+    if &manifest.workspace_id != ws {
+        return Err(WorkImportError::WorkspaceMismatch {
+            requested: ws.as_str().to_string(),
+            found: manifest.workspace_id.as_str().to_string(),
+        });
+    }
+    Ok(manifest.imports)
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -256,22 +292,22 @@ mod tests {
     }
 
     #[test]
-    fn imports_pdf_records_hash_and_sets_readonly() {
+    fn imports_docx_records_hash_and_sets_readonly() {
         let app = tmp_dir("app");
         let src_dir = tmp_dir("src");
-        let content = b"%PDF-1.7 fake body";
-        let src = write_source(&src_dir, "report.pdf", content);
+        let content = b"fake docx body";
+        let src = write_source(&src_dir, "report.docx", content);
         let ws = WorkspaceId::mint();
 
         let rec = import_document(&app, &ws, &src).unwrap();
-        assert_eq!(rec.kind, "pdf");
-        assert_eq!(rec.display_name, "report.pdf");
+        assert_eq!(rec.kind, "docx");
+        assert_eq!(rec.display_name, "report.docx");
         // sha256 正确
         assert_eq!(rec.source_sha256, hex_lower(&Sha256::digest(content)));
         // 暂存副本存在且只读
         let staged = workspace_dir_under(app.clone(), &ws)
             .join(rec.import_id.as_str())
-            .join("original.pdf");
+            .join("original.docx");
         assert!(staged.exists());
         assert!(std::fs::metadata(&staged).unwrap().permissions().readonly());
         // 清单含该记录
@@ -305,11 +341,12 @@ mod tests {
         let app = tmp_dir("app");
         let src_dir = tmp_dir("src");
         let ws = WorkspaceId::mint();
-        let a = import_document(&app, &ws, &write_source(&src_dir, "a.pdf", b"AAAA")).unwrap();
+        let a = import_document(&app, &ws, &write_source(&src_dir, "a.docx", b"AAAA")).unwrap();
         let b = import_document(&app, &ws, &write_source(&src_dir, "b.docx", b"BBBB")).unwrap();
         assert_ne!(a.import_id, b.import_id);
         let m = WorkManifest::read(&manifest_path_under(app.clone(), &ws)).unwrap();
         assert_eq!(m.imports.len(), 2, "同一工作区两次导入都在清单里");
+        assert_eq!(list_imports(&app, &ws).unwrap(), m.imports, "重启恢复必须读回同一清单");
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }
@@ -320,11 +357,11 @@ mod tests {
         let app = tmp_dir("app");
         let src_dir = tmp_dir("src");
         // 源文件名本身合法(OS 不允许 / 在名字里),用带点的名字模拟:
-        let src = write_source(&src_dir, "..evil.pdf", b"x");
+        let src = write_source(&src_dir, "..evil.docx", b"x");
         let ws = WorkspaceId::mint();
         let rec = import_document(&app, &ws, &src).unwrap();
-        // 暂存相对路径只含 import_id + original.pdf,不含源文件名
-        assert!(rec.staging_rel_path.ends_with("/original.pdf"));
+        // 暂存相对路径只含 import_id + original.docx,不含源文件名
+        assert!(rec.staging_rel_path.ends_with("/original.docx"));
         assert!(rec.staging_rel_path.starts_with(rec.import_id.as_str()));
         assert!(!rec.staging_rel_path.contains("evil"));
         let _ = std::fs::remove_dir_all(&app);
@@ -344,7 +381,7 @@ mod tests {
             .unwrap();
 
         let barrier = Arc::new(Barrier::new(2));
-        let handles: Vec<_> = ["c1.pdf", "c2.docx"]
+        let handles: Vec<_> = ["c1.docx", "c2.docx"]
             .into_iter()
             .map(|name| {
                 let (app, src_dir, ws, barrier) =
@@ -380,7 +417,7 @@ mod tests {
         std::fs::write(&mp, b"{ this is not json").unwrap();
 
         let before = std::fs::read(&mp).unwrap();
-        let src = write_source(&src_dir, "x.pdf", b"data");
+        let src = write_source(&src_dir, "x.docx", b"data");
         let err = import_document(&app, &ws, &src).unwrap_err();
         assert!(matches!(err, WorkImportError::Staging(_)), "应报暂存层错误,实得 {err:?}");
 
@@ -414,7 +451,7 @@ mod tests {
         WorkManifest::new(ws_b.clone()).write_atomic(&mp_a).unwrap();
         let before = std::fs::read(&mp_a).unwrap();
 
-        let src = write_source(&src_dir, "x.pdf", b"data");
+        let src = write_source(&src_dir, "x.docx", b"data");
         let err = import_document(&app, &ws_a, &src).unwrap_err();
         assert!(
             matches!(err, WorkImportError::WorkspaceMismatch { .. }),
@@ -436,7 +473,7 @@ mod tests {
     fn missing_source_is_reported() {
         let app = tmp_dir("app");
         let ws = WorkspaceId::mint();
-        let missing = app.join("nope.pdf");
+        let missing = app.join("nope.docx");
         assert!(matches!(
             import_document(&app, &ws, &missing),
             Err(WorkImportError::SourceUnreadable(_))

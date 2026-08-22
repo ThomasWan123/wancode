@@ -63,8 +63,8 @@ fn workspace_id_from_binding_drives_import_without_touching_the_source() {
     // 原件放在**工作区之外**，模拟用户从任意位置选文件。
     let src_dir = tmp.path().join("user-docs");
     std::fs::create_dir_all(&src_dir).unwrap();
-    let src = src_dir.join("报告.pdf");
-    let content = b"%PDF-1.7 w2.5 seam fixture";
+    let src = src_dir.join("报告.docx");
+    let content = b"w2.5 DOCX staging seam fixture";
     std::fs::write(&src, content).unwrap();
     let src_ro_before = std::fs::metadata(&src).unwrap().permissions().readonly();
 
@@ -87,7 +87,7 @@ fn workspace_id_from_binding_drives_import_without_touching_the_source() {
     // 暂存副本：字节相同、只读。
     let staged = workspace_dir_under(app_data.clone(), &ws_from_binding)
         .join(rec.import_id.as_str())
-        .join("original.pdf");
+        .join("original.docx");
     assert_eq!(std::fs::read(&staged).unwrap(), content, "暂存副本字节必须与原件一致");
     assert!(
         std::fs::metadata(&staged).unwrap().permissions().readonly(),
@@ -142,7 +142,7 @@ fn failed_import_leaves_no_identity_or_staging_residue() {
     // 先成功导入一份，建立"已知良好"的清单基线。
     let src_dir = tmp.path().join("user-docs");
     std::fs::create_dir_all(&src_dir).unwrap();
-    let good = src_dir.join("good.pdf");
+    let good = src_dir.join("good.docx");
     std::fs::write(&good, b"good").unwrap();
     import_document(&app_data, &ws, &good).expect("首次导入应成功");
     let manifest_path = manifest_path_under(app_data.clone(), &ws);
@@ -159,7 +159,7 @@ fn failed_import_leaves_no_identity_or_staging_residue() {
 
     // 缺失源：必须拒绝。
     assert!(matches!(
-        import_document(&app_data, &ws, &src_dir.join("missing.pdf")),
+        import_document(&app_data, &ws, &src_dir.join("missing.docx")),
         Err(WorkImportError::SourceUnreadable(_))
     ));
 

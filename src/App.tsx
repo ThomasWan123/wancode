@@ -37,6 +37,16 @@ import {
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
 } from "./icons";
 import "./App.css";
+import { createLatestStartCoordinator } from "./startCoordinator";
+import {
+  forgetWorkSession,
+  forgetWorkWorkspace,
+  loadWorkSession,
+  loadWorkWorkspace,
+  rememberWorkSession,
+  rememberWorkWorkspace,
+} from "./workSessionPersistence";
+import { workPromptForDisplay } from "./workPromptDisplay";
 
 type SessionEntry = {
   session_id: string;
@@ -260,8 +270,8 @@ function App() {
   const [surface, setSurface] = useState<SurfaceKind>(() =>
     resolveActiveSurface(localStorage.getItem("wancode-surface")),
   );
-  // W2-fe-b:当前 Work 会话的工作区身份(后端 StartResult 回传)与已导入文档。
-  // workDocs 是本会话内累积(每次导入 append);跨会话持久列表待后续切片。
+  // 当前 Work 会话的工作区身份与持久文档清单。清单以后端 manifest 为真源，
+  // 每次启动/恢复 Work 会话都重读，React 状态只作当前视图缓存。
   const [workWorkspaceId, setWorkWorkspaceId] = useState<string>("");
   const [workDocs, setWorkDocs] = useState<
     { import_id: string; display_name: string; kind: string; source_sha256: string }[]
@@ -501,6 +511,10 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const didAutoStart = useRef(false);
   const sessionIdRef = useRef("");
+  // 所有启动入口（自动启动、层切换、侧栏恢复、发送前惰性启动）共用一条
+  // 串行队列。同 key 复用同一个 Promise；较旧的排队请求在执行前作废。
+  // 这同时覆盖 React StrictMode 双 effect 与 workspace/surface 连续变化。
+  const startCoordinatorRef = useRef(createLatestStartCoordinator(""));
 
   // Launch straight into a session (last-used folder, else home) so you can
   // type immediately — no forced folder pick, like Claude Code / Codex in cwd.
@@ -556,7 +570,7 @@ function App() {
     }
   }
 
-  // W2-fe-b:把一份文档(pdf/docx)导入当前 Work 会话的工作区。原件只读复制、
+  // 把一份 DOCX 导入当前 Work 会话的工作区。原件只读复制、
   // 记完整 sha256(后端 work_import)。成功后 append 到本会话文档列表。
   async function importWorkDoc() {
     if (!workWorkspaceId) {
@@ -566,7 +580,7 @@ function App() {
     const path = await openDialog({
       directory: false,
       title: lang === "zh" ? "选择要导入的文档" : "Pick a document to import",
-      filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
+      filters: [{ name: "Word documents", extensions: ["docx"] }],
     });
     if (typeof path !== "string" || !path) return;
     try {
@@ -1194,10 +1208,27 @@ function App() {
       // 不能把 Code 列表留在 Chat 界面上展示。
       refreshRosterForSurfaceRef.current({ onChatResolveFailure: "clear" });
     }
-    // W2-fe-b:切到 Work 且无活会话 → 起一个新 Work 会话(后端铸造 workspace_id
-    // 并把 cwd 设为该工作区暂存目录;不碰用户代码工作区)。
+    // Work 的文档清单绑定在持久 session/workspace 身份上。应用重启或从其他
+    // surface 切回来时必须先恢复上次 Work 会话；若该会话已被外部删除，才
+    // 清掉陈旧指针并显式创建一个新 Work 会话。否则每次重启都会铸造新的
+    // workspace_id，磁盘文档仍在但界面永远读不到。
     if (surface === "work" && !sessionIdRef.current) {
-      startSession();
+      const resume = loadWorkSession(localStorage);
+      const savedWorkspace = loadWorkWorkspace(localStorage);
+      void (async () => {
+        let started = await startSession(resume, undefined, false, savedWorkspace);
+        if (!started && resume && surfaceRef.current === "work" && !sessionIdRef.current) {
+          // 空的引擎会话可能尚未落盘，但文档工作区已经持久化：创建新的引擎
+          // 会话并继承同一 workspace_id，不能因此丢掉用户已导入的文档。
+          forgetWorkSession(localStorage);
+          started = await startSession(undefined, undefined, false, savedWorkspace);
+        }
+        if (!started && savedWorkspace && surfaceRef.current === "work" && !sessionIdRef.current) {
+          // 工作区指针本身损坏/被外部删除时才退回全新身份。
+          forgetWorkWorkspace(localStorage);
+          await startSession();
+        }
+      })();
     }
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1250,23 +1281,24 @@ function App() {
           // 恢复会话重播：插话在 chat_history 里是包了
           // "The user sent a message while you were working:\n<user_query>…</user_query>"
           // 的合成消息。解包还原成 ⚡ 样式，而不是把包装文本原样糊出来。
+          const displayedUserText = workPromptForDisplay(u.content.text);
           const ijm = /^The user sent a message while you were working:\s*\n<user_query>\n?([\s\S]*?)\n?<\/user_query>\s*$/.exec(
-            u.content.text,
+            displayedUserText,
           );
           if (ijm) {
             appendStream("user", `⚡ ${ijm[1]}`);
-          } else if (u.content.text === lastSentRef.current) {
+          } else if (displayedUserText === lastSentRef.current) {
             lastSentRef.current = "";
           } else if (replayCapRef.current !== null) {
             // 分叉回放：只放行模型上下文里真实存在的那几轮（见 forkFrom）
             if (replayCapRef.current > 0) {
               replayCapRef.current -= 1;
-              appendStream("user", u.content.text);
+              appendStream("user", displayedUserText);
             } else {
               replaySuppressRef.current = true;
             }
           } else {
-            appendStream("user", u.content.text);
+            appendStream("user", displayedUserText);
           }
         } else if (u.sessionUpdate === "agent_thought_chunk" && u.content?.type === "text") {
           appendStream("thought", u.content.text);
@@ -1487,7 +1519,34 @@ function App() {
     });
   }
 
-  async function startSession(resume?: string, ws?: string, keepReplayCap = false): Promise<string> {
+  function startSession(
+    resume?: string,
+    ws?: string,
+    keepReplayCap = false,
+    workWorkspaceId?: string,
+  ): Promise<string> {
+    const requestedSurface = surfaceRef.current;
+    // Work 的真实 cwd 由后端 workspace_id 决定，调用入口携带的普通代码目录
+    // 不参与身份；忽略它可让首次挂载的两个等价入口命中同一个 key。
+    const key = JSON.stringify([
+      requestedSurface,
+      resume ?? "",
+      requestedSurface === "work" ? (workWorkspaceId ?? "<new-work>") : (ws ?? workspaceStateRef.current),
+      keepReplayCap,
+    ]);
+    return startCoordinatorRef.current.schedule(key, (isCurrent) =>
+      startSessionOnce(resume, ws, keepReplayCap, workWorkspaceId, requestedSurface, isCurrent),
+    );
+  }
+
+  async function startSessionOnce(
+    resume: string | undefined,
+    ws: string | undefined,
+    keepReplayCap: boolean,
+    workWorkspaceId: string | undefined,
+    requestedSurface: SurfaceKind,
+    isCurrentRequest: () => boolean,
+  ): Promise<string> {
     const wsPath = ws ?? workspace;
     // 普通会话切换必须清掉分叉回放上限，否则它会泄漏到下一个会话把内容吃掉
     if (!keepReplayCap) {
@@ -1522,9 +1581,13 @@ function App() {
           workspace: wsPath,
           model,
           resume: resume ?? null,
-          surface,
+          surface: requestedSurface,
+          workWorkspaceId: requestedSurface === "work" ? (workWorkspaceId ?? null) : null,
         },
       );
+      // 后端调用无法安全中断；若期间来了更新的启动意图，本次结果不得回写
+      // 前端。新请求会在串行队列中接管后端 handle。
+      if (!isCurrentRequest()) return "";
       // codex W2-fe-a R2:后端**已启动**会话并回传持久 surface。若是 Work 而
       // 前端 UI 未接线,**fail closed 不激活**——绝不把 Work 会话套进 Code UI、
       // 也不用 code 覆盖持久身份(那会制造跨层身份矛盾)。抛错走既有错误处理
@@ -1548,8 +1611,22 @@ function App() {
       localStorage.setItem("wancode-surface", decision.surface);
       // W2-fe-b:Work 会话捕获其工作区身份;换会话重置本会话文档累积。
       if (decision.surface === "work") {
-        setWorkWorkspaceId(r.workspace_id ?? "");
+        const workId = r.workspace_id ?? "";
+        rememberWorkSession(localStorage, r.session_id);
+        rememberWorkWorkspace(localStorage, workId);
+        setWorkWorkspaceId(workId);
         setWorkDocs([]);
+        if (workId) {
+          invoke<
+            { import_id: string; display_name: string; kind: string; source_sha256: string }[]
+          >("work_list_imports", { workspaceId: workId })
+            .then((docs) => {
+              if (sessionIdRef.current === r.session_id) setWorkDocs(docs);
+            })
+            .catch((e) => {
+              if (sessionIdRef.current === r.session_id) setError(String(e));
+            });
+        }
       } else {
         setWorkWorkspaceId("");
       }
@@ -2320,7 +2397,7 @@ function App() {
         {surface === "work" && sessionId && (
           <button
             className="icon-btn"
-            title={lang === "zh" ? "导入文档 (pdf/docx)" : "Import document (pdf/docx)"}
+            title={lang === "zh" ? "导入 Word 文档 (DOCX)" : "Import Word document (DOCX)"}
             onClick={importWorkDoc}
           >
             {lang === "zh" ? "导入" : "Import"}
@@ -2351,8 +2428,8 @@ function App() {
           {workDocs.length === 0 ? (
             <div className="work-docs-empty">
               {lang === "zh"
-                ? "尚无文档。点“导入”添加 pdf/docx（原件只读复制到本会话工作区）。"
-                : "No documents yet. Click Import to add a pdf/docx (copied read-only into this session's workspace)."}
+                ? "尚无文档。点“导入”添加 DOCX（原件只读复制到本会话工作区）。"
+                : "No documents yet. Click Import to add a DOCX (copied read-only into this session's workspace)."}
             </div>
           ) : (
             <ul className="work-docs-list">

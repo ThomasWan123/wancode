@@ -1,6 +1,6 @@
 [package]
 name = "wancode"
-version = "0.20.1"
+version = "0.20.2"
 description = "WanCode - multi-model desktop AI coding agent"
 authors = ["WanCode"]
 edition = "2021"
@@ -15,7 +15,11 @@ workspace = "../../grok-build"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "wancode_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# WanCode currently ships Windows desktop builds only.  The executable links
+# this library as an rlib; emitting mobile-oriented staticlib/cdylib variants
+# on Windows makes Cargo's normal library and libtest harness race for the same
+# .dll/.lib outputs and can make otherwise-correct full test runs flaky.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

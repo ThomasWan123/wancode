@@ -15,6 +15,9 @@ use wancode_lib::work_parse_worker::{
     parse_in_worker, run_as_worker_if_requested, DocKind, ParseFailure, ParseLimits,
     ParseRequest, ParsedDoc,
 };
+use wancode_lib::work_context::build_work_prompt;
+use wancode_lib::work_import::import_document;
+use wancode_lib::work_staging::{workspace_dir_under, WorkspaceId};
 
 fn req() -> ParseRequest {
     // 外壳不解析内容，但会 stat 原件，所以必须给一个真实存在的文件。
@@ -186,10 +189,11 @@ fn main() {
     //    样本不入库，未设环境变量即跳过——CI 上这条永远 NOT-RUN。
     match std::env::var("WANCODE_DOCX_SAMPLE") {
         Ok(sample) => {
+            let sample_path = std::path::PathBuf::from(&sample);
             let r = parse_in_worker(
                 &ParseRequest {
                     kind: DocKind::Docx,
-                    source_path: sample,
+                    source_path: sample.clone(),
                 },
                 ParseLimits::default(),
             );
@@ -204,6 +208,40 @@ fn main() {
                     other => format!("{other:?}"),
                 },
             );
+
+            // ⑪ 产品链正/负对照：真实导入清单 → 身份复核 → worker 解析 →
+            // JSONL 上下文；随后篡改暂存副本必须在送模前被 SHA 门拒绝。
+            let tmp = tempfile::tempdir().expect("work context tempdir");
+            let ws = WorkspaceId::mint();
+            let imported = import_document(tmp.path(), &ws, &sample_path);
+            let prompt = imported
+                .as_ref()
+                .map_err(|e| e.to_string())
+                .and_then(|_| build_work_prompt(tmp.path(), &ws, "给出运营摘要"));
+            check(
+                "real_docx_import_to_model_context",
+                matches!(&prompt, Ok(text)
+                    if text.contains("UNTRUSTED DATA")
+                        && text.contains("\"block_path\"")
+                        && text.ends_with("给出运营摘要")),
+                prompt.as_ref().map(|p| format!("context_utf16={}", p.encode_utf16().count())).unwrap_or_else(|e| e.clone()),
+            );
+            if let Ok(record) = imported {
+                let staged = workspace_dir_under(tmp.path().to_path_buf(), &ws)
+                    .join(record.staging_rel_path);
+                if let Ok(meta) = std::fs::metadata(&staged) {
+                    let mut permissions = meta.permissions();
+                    permissions.set_readonly(false);
+                    let _ = std::fs::set_permissions(&staged, permissions);
+                    let _ = std::fs::write(&staged, b"tampered");
+                }
+                let tampered = build_work_prompt(tmp.path(), &ws, "给出运营摘要");
+                check(
+                    "tampered_staged_doc_is_rejected_before_model",
+                    matches!(&tampered, Err(message) if message.contains("SHA-256")),
+                    format!("{tampered:?}"),
+                );
+            }
         }
         Err(_) => println!("SKIP real_docx_end_to_end_through_worker — 未设 WANCODE_DOCX_SAMPLE"),
     }
