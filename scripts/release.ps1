@@ -46,9 +46,13 @@ $env:PROTOC = "$env:USERPROFILE\.protoc\bin\protoc.exe"
 $env:RUSTFLAGS = "-C link-arg=/STACK:16777216"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link"
 
-Write-Host "[1/4] dev 构建输出占用检查完成（安装版不受影响）..."
+Write-Host "[1/5] dev 构建输出占用检查完成（安装版不受影响）..."
 
-Write-Host "[2/4] 构建 release（不在 build 时签名——见文件头注释）..."
+Write-Host "[2/5] 取回并校验 PDFium 运行时（URL/归档/DLL 哈希均由 vendor/pdfium.lock 钉死）..."
+& "$PSScriptRoot/fetch_pdfium.ps1"
+if ($LASTEXITCODE -ne 0) { throw "PDFium 供应链取回/校验失败" }
+
+Write-Host "[3/5] 构建 release（不在 build 时签名——见文件头注释）..."
 Set-Location $root
 if ($NsisOnly) {
   Write-Host "  NSIS-only 本机验证模式：跳过 WiX；不得据此声称 MSI 已验证。" -ForegroundColor Yellow
@@ -70,7 +74,7 @@ $setup = "$bundle\nsis\wancode_${Version}_x64-setup.exe"
 $msi = "$bundle\msi\wancode_${Version}_x64_en-US.msi"
 if (-not (Test-Path $setup)) { throw "找不到 $setup（版本号对不上？）" }
 
-Write-Host "[3/4] 补签 setup.exe（signer sign，空密码走 CLI 参数）..."
+Write-Host "[4/5] 补签 setup.exe（signer sign，空密码走 CLI 参数）..."
 # 当前 Tauri CLI/Clap 接受 `--password=` 作为明确的空密码。不要传
 # `-p '""'`：新版 CLI 会把两个引号字符当成真实密码并报 Wrong password。
 # 只用 package-lock 已安装的 CLI；发布时禁止 npx 临时下载另一版本。
@@ -78,7 +82,7 @@ npx --no-install @tauri-apps/cli signer sign -f $key --password= $setup
 if ($LASTEXITCODE -ne 0) { throw "签名失败" }
 $sig = Get-Content "$setup.sig" -Raw
 
-Write-Host "[4/4] 生成 origin + 镜像 manifests..."
+Write-Host "[5/5] 生成 origin + 镜像 manifests..."
 $pub = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 . "$PSScriptRoot/update-manifests.ps1"
 $null = Write-WanCodeUpdateManifests `

@@ -10,13 +10,15 @@
 //!     OutputTooLarge），不是「反正 is_err()」。笼统的 is_err() 会让超时被
 //!     误判成崩溃、死锁被误判成超时，恰好放过这类外壳最容易出的错。
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use wancode_lib::work_parse_worker::{
-    parse_in_worker, run_as_worker_if_requested, DocKind, ParseFailure, ParseLimits,
-    ParseRequest, ParsedDoc,
-};
+
 use wancode_lib::work_context::build_work_prompt;
 use wancode_lib::work_import::import_document;
+use wancode_lib::work_parse_worker::{
+    parse_in_worker, run_as_worker_if_requested, DocKind, ParseFailure, ParseLimits, ParseRequest,
+    ParsedDoc,
+};
 use wancode_lib::work_staging::{workspace_dir_under, WorkspaceId};
 
 fn req() -> ParseRequest {
@@ -25,6 +27,83 @@ fn req() -> ParseRequest {
         kind: DocKind::Pdf,
         source_path: std::env::current_exe().unwrap().display().to_string(),
     }
+}
+
+fn materialize_real_docx_fixture(dir: &Path) -> PathBuf {
+    let encoded = include_str!("fixtures/project-orion.docx.b64").trim();
+    let bytes = decode_base64(encoded).expect("committed DOCX fixture must be valid base64");
+    assert_eq!(
+        bytes.len(),
+        39_603,
+        "committed DOCX fixture changed unexpectedly"
+    );
+    let path = dir.join("Project-Orion-professional.docx");
+    std::fs::write(&path, bytes).expect("write DOCX fixture");
+    path
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut accumulator = 0u32;
+    let mut bits = 0u8;
+    for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err(format!("invalid base64 byte {byte}")),
+        };
+        accumulator = (accumulator << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((accumulator >> bits) as u8);
+            accumulator &= (1u32 << bits) - 1;
+        }
+    }
+    Ok(output)
+}
+
+/// Build a standards-compliant one-page PDF without relying on a second PDF
+/// library. PDFium must parse the resulting cross-reference table and extract
+/// the text through the same production path used for user documents.
+fn materialize_text_pdf_fixture(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, pdf).expect("write PDF fixture");
+    path
 }
 
 fn with_mode<T>(mode: Option<&str>, f: impl FnOnce() -> T) -> T {
@@ -66,6 +145,17 @@ fn main() {
     // 必须最先：本进程可能是被父进程重入起来的 worker。
     run_as_worker_if_requested();
 
+    // Fixtures are materialized only in the parent. The worker sees ordinary
+    // files and therefore exercises the exact production parser boundary.
+    let fixtures = tempfile::tempdir().expect("fixture tempdir");
+    let docx_sample = materialize_real_docx_fixture(fixtures.path());
+    let pdf_sample = materialize_text_pdf_fixture(
+        fixtures.path(),
+        "project-orion-text.pdf",
+        "Project Orion budget 128400 owner Lin Mei deadline 2026-09-30 risk AMBER",
+    );
+    let blank_pdf = materialize_text_pdf_fixture(fixtures.path(), "image-only.pdf", "");
+
     let mut pass = 0usize;
     let mut fail = 0usize;
     let mut check = |name: &str, ok: bool, detail: String| {
@@ -79,17 +169,19 @@ fn main() {
     };
 
     // ① 正对照：worker 正常跑通。没有这条，全部失败也会"全绿"。
-    let r = with_mode(Some("echo"), || parse_in_worker(&req(), ParseLimits::default()));
+    let r = with_mode(Some("echo"), || {
+        parse_in_worker(&req(), ParseLimits::default())
+    });
     check(
         "positive_control_echo",
         matches!(&r, Ok(ParsedDoc::Echo { text }) if text.starts_with("echo:")),
         format!("{r:?}"),
     );
 
-    // ② PDF 解析器尚未接入 → **有序拒收**，不是崩溃，证明 dispatch 走到了。
+    // ② 畸形 PDF → **有序拒收**，不是崩溃，证明 dispatch 走到了。
     let r = with_mode(None, || parse_in_worker(&req(), ParseLimits::default()));
     check(
-        "unwired_kind_is_orderly_rejection",
+        "malformed_pdf_is_orderly_rejection",
         matches!(&r, Err(ParseFailure::Rejected(_))),
         format!("{r:?}"),
     );
@@ -146,7 +238,9 @@ fn main() {
     check(
         "output_flood_is_capped_not_deadlocked",
         matches!(&r, Err(ParseFailure::OutputTooLarge { .. })) && took < Duration::from_secs(60),
-        format!("{r:?} 用时={took:?}（必须远早于 60s 墙钟，否则说明是被超时兜住的，不是被上限挡住的）"),
+        format!(
+            "{r:?} 用时={took:?}（必须远早于 60s 墙钟，否则说明是被超时兜住的，不是被上限挡住的）"
+        ),
     );
 
     // ⑦ 输入超限：**根本不起 worker**（省掉一次进程创建，也不让超大文件
@@ -185,75 +279,203 @@ fn main() {
         matches!(&r, Err(ParseFailure::ContainmentUnavailable(_))),
         format!("{r:?}"),
     );
-    // ⑩ 端到端：真实 DOCX 走完整 worker 路径（隔离 + 解析 + 协议往返）。
-    //    样本不入库，未设环境变量即跳过——CI 上这条永远 NOT-RUN。
-    match std::env::var("WANCODE_DOCX_SAMPLE") {
-        Ok(sample) => {
-            let sample_path = std::path::PathBuf::from(&sample);
-            let r = parse_in_worker(
-                &ParseRequest {
-                    kind: DocKind::Docx,
-                    source_path: sample.clone(),
-                },
-                ParseLimits::default(),
-            );
-            check(
-                "real_docx_end_to_end_through_worker",
-                matches!(&r, Ok(ParsedDoc::Docx { blocks })
+    // ⑩ 端到端：提交的真实 DOCX 固定样本走完整 worker 路径。该样本不再
+    //    依赖环境变量，因此本地和 CI 都不允许 SKIP。
+    {
+        let sample_path = docx_sample.clone();
+        let r = parse_in_worker(
+            &ParseRequest {
+                kind: DocKind::Docx,
+                source_path: sample_path.to_string_lossy().into_owned(),
+            },
+            ParseLimits::default(),
+        );
+        check(
+            "real_docx_end_to_end_through_worker",
+            matches!(&r, Ok(ParsedDoc::Docx { blocks })
                     if !blocks.is_empty() && blocks.iter().all(|b| b.is_well_formed())),
-                match &r {
-                    Ok(ParsedDoc::Docx { blocks }) => {
-                        format!("块={}，全部 well-formed", blocks.len())
-                    }
-                    other => format!("{other:?}"),
-                },
-            );
+            match &r {
+                Ok(ParsedDoc::Docx { blocks }) => {
+                    format!("块={}，全部 well-formed", blocks.len())
+                }
+                other => format!("{other:?}"),
+            },
+        );
 
-            // ⑪ 产品链正/负对照：真实导入清单 → 身份复核 → worker 解析 →
-            // JSONL 上下文；随后篡改暂存副本必须在送模前被 SHA 门拒绝。
-            let tmp = tempfile::tempdir().expect("work context tempdir");
-            let ws = WorkspaceId::mint();
-            let imported = import_document(tmp.path(), &ws, &sample_path);
-            let prompt = imported
-                .as_ref()
-                .map_err(|e| e.to_string())
-                .and_then(|_| build_work_prompt(tmp.path(), &ws, "给出运营摘要"));
-            check(
-                "real_docx_import_to_model_context",
-                matches!(&prompt, Ok(text)
+        // ⑪ 产品链正/负对照：真实导入清单 → 身份复核 → worker 解析 →
+        // JSONL 上下文；随后篡改暂存副本必须在送模前被 SHA 门拒绝。
+        let tmp = tempfile::tempdir().expect("work context tempdir");
+        let ws = WorkspaceId::mint();
+        let imported = import_document(tmp.path(), &ws, &sample_path);
+        let prompt = imported
+            .as_ref()
+            .map_err(|e| e.to_string())
+            .and_then(|_| build_work_prompt(tmp.path(), &ws, "给出运营摘要"));
+        check(
+            "real_docx_import_to_model_context",
+            matches!(&prompt, Ok(text)
                     if text.contains("UNTRUSTED DATA")
                         && text.contains("\"block_path\"")
                         && text.ends_with("给出运营摘要")),
-                prompt.as_ref().map(|p| format!("context_utf16={}", p.encode_utf16().count())).unwrap_or_else(|e| e.clone()),
-            );
-            if let Ok(record) = imported {
-                let staged = workspace_dir_under(tmp.path().to_path_buf(), &ws)
-                    .join(record.staging_rel_path);
-                if let Ok(meta) = std::fs::metadata(&staged) {
-                    let mut permissions = meta.permissions();
-                    permissions.set_readonly(false);
-                    let _ = std::fs::set_permissions(&staged, permissions);
-                    let _ = std::fs::write(&staged, b"tampered");
-                }
-                let tampered = build_work_prompt(tmp.path(), &ws, "给出运营摘要");
-                check(
-                    "tampered_staged_doc_is_rejected_before_model",
-                    matches!(&tampered, Err(message) if message.contains("SHA-256")),
-                    format!("{tampered:?}"),
-                );
+            prompt
+                .as_ref()
+                .map(|p| format!("context_utf16={}", p.encode_utf16().count()))
+                .unwrap_or_else(|e| e.clone()),
+        );
+        if let Ok(record) = imported {
+            let staged =
+                workspace_dir_under(tmp.path().to_path_buf(), &ws).join(record.staging_rel_path);
+            if let Ok(meta) = std::fs::metadata(&staged) {
+                let mut permissions = meta.permissions();
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(&staged, permissions);
+                let _ = std::fs::write(&staged, b"tampered");
             }
+            let tampered = build_work_prompt(tmp.path(), &ws, "给出运营摘要");
+            check(
+                "tampered_staged_doc_is_rejected_before_model",
+                matches!(&tampered, Err(message) if message.contains("SHA-256")),
+                format!("{tampered:?}"),
+            );
         }
-        Err(_) => println!("SKIP real_docx_end_to_end_through_worker — 未设 WANCODE_DOCX_SAMPLE"),
+    }
+
+    // ⑫ PDF 产品链：有效 PDF → worker/PDFium → 导入清单 → SHA 复核 →
+    // 模型上下文。页路径必须稳定且正文必须真的进入上下文。
+    let r = parse_in_worker(
+        &ParseRequest {
+            kind: DocKind::Pdf,
+            source_path: pdf_sample.to_string_lossy().into_owned(),
+        },
+        ParseLimits::default(),
+    );
+    check(
+        "pdf_end_to_end_through_worker",
+        matches!(&r, Ok(ParsedDoc::Pdf { blocks })
+            if blocks.len() == 1
+                && blocks[0].path == "page[1]/chunk[0]"
+                && blocks[0].raw.contains("128400")
+                && blocks[0].is_well_formed()),
+        format!("{r:?}"),
+    );
+    // Each parser limit gets a positive document and a deliberately tiny cap.
+    // The worker must reject for the named limit rather than crash or time out.
+    for (mode, name, needle) in [
+        ("pdf-page-cap", "pdf_page_count_cap", "超过上限 0"),
+        ("pdf-page-text-cap", "pdf_per_page_text_cap", "第 1 页文本"),
+        ("pdf-total-text-cap", "pdf_total_text_cap", "PDF 文本累计"),
+    ] {
+        let r = with_mode(Some(mode), || {
+            parse_in_worker(
+                &ParseRequest {
+                    kind: DocKind::Pdf,
+                    source_path: pdf_sample.to_string_lossy().into_owned(),
+                },
+                ParseLimits::default(),
+            )
+        });
+        check(
+            name,
+            matches!(&r, Err(ParseFailure::Rejected(reason)) if reason.contains(needle)),
+            format!("{r:?}"),
+        );
+    }
+    let tmp = tempfile::tempdir().expect("PDF work context tempdir");
+    let ws = WorkspaceId::mint();
+    let imported = import_document(tmp.path(), &ws, &pdf_sample);
+    let prompt = imported
+        .as_ref()
+        .map_err(|e| e.to_string())
+        .and_then(|_| build_work_prompt(tmp.path(), &ws, "What is the budget?"));
+    check(
+        "pdf_import_to_model_context",
+        matches!(&prompt, Ok(text)
+            if text.contains("UNTRUSTED DATA")
+                && text.contains("page[1]/chunk[0]")
+                && text.contains("128400")
+                && text.ends_with("What is the budget?")),
+        format!("{prompt:?}"),
+    );
+    if let Ok(record) = imported {
+        let staged =
+            workspace_dir_under(tmp.path().to_path_buf(), &ws).join(record.staging_rel_path);
+        if let Ok(meta) = std::fs::metadata(&staged) {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&staged, permissions);
+            let _ = std::fs::write(&staged, b"tampered pdf");
+        }
+        let tampered = build_work_prompt(tmp.path(), &ws, "What is the budget?");
+        check(
+            "tampered_pdf_is_rejected_before_model",
+            matches!(&tampered, Err(message) if message.contains("SHA-256")),
+            format!("{tampered:?}"),
+        );
+    }
+
+    let blank = parse_in_worker(
+        &ParseRequest {
+            kind: DocKind::Pdf,
+            source_path: blank_pdf.to_string_lossy().into_owned(),
+        },
+        ParseLimits::default(),
+    );
+    check(
+        "image_only_pdf_fails_with_truthful_ocr_boundary",
+        matches!(&blank, Err(ParseFailure::Rejected(reason))
+            if reason.contains("OCR") && reason.contains("没有可提取文字")),
+        format!("{blank:?}"),
+    );
+
+    let mixed = tempfile::tempdir().expect("mixed document context tempdir");
+    let mixed_ws = WorkspaceId::mint();
+    let mixed_docx = import_document(mixed.path(), &mixed_ws, &docx_sample);
+    let mixed_pdf = import_document(mixed.path(), &mixed_ws, &pdf_sample);
+    let mixed_prompt = mixed_docx
+        .as_ref()
+        .map_err(|e| e.to_string())
+        .and_then(|_| mixed_pdf.as_ref().map_err(|e| e.to_string()))
+        .and_then(|_| build_work_prompt(mixed.path(), &mixed_ws, "Summarize both documents"));
+    check(
+        "mixed_pdf_docx_context_is_complete",
+        matches!(&mixed_prompt, Ok(text)
+            if text.contains("Project-Orion-professional.docx")
+                && text.contains("project-orion-text.pdf")
+                && text.contains("body/p[")
+                && text.contains("page[1]/chunk[0]")),
+        mixed_prompt
+            .as_ref()
+            .map(|text| format!("context_utf16={}", text.encode_utf16().count()))
+            .unwrap_or_else(|error| error.clone()),
+    );
+
+    // Optional local breadth probe against a real-world PDF. CI correctness
+    // does not depend on private files; when supplied, it still uses the exact
+    // same contained production parser and contributes a named PASS/FAIL.
+    if let Ok(real_pdf) = std::env::var("WANCODE_PDF_SAMPLE") {
+        let real = parse_in_worker(
+            &ParseRequest {
+                kind: DocKind::Pdf,
+                source_path: real_pdf,
+            },
+            ParseLimits::default(),
+        );
+        check(
+            "real_world_pdf_sample_through_worker",
+            matches!(&real, Ok(ParsedDoc::Pdf { blocks })
+                if !blocks.is_empty() && blocks.iter().all(|block| block.is_well_formed())),
+            match &real {
+                Ok(ParsedDoc::Pdf { blocks }) => format!("pages_with_text={}", blocks.len()),
+                other => format!("{other:?}"),
+            },
+        );
     }
 
     // ⑩ try_wait 出错必须走同一清理出口（#56 R2-P1）。
     //    hang worker 会一直活着：旧实现直接 return SpawnFailed，不杀 Job、
     //    不 join 读线程，worker 残留。新实现必须 SpawnFailed **且** PID 已死，
     //    且远早于墙钟（证明不是被 Timeout 兜住的）。
-    let pidfile = std::env::temp_dir().join(format!(
-        "wancode-waiterr-{}.pid",
-        std::process::id()
-    ));
+    let pidfile = std::env::temp_dir().join(format!("wancode-waiterr-{}.pid", std::process::id()));
     let _ = std::fs::remove_file(&pidfile);
     let limits = ParseLimits {
         wall_clock: Duration::from_secs(30),
