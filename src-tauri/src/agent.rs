@@ -42,6 +42,8 @@ pub struct AgentHandle {
     pub cwd: PathBuf,
     /// Sidecar 解析出的真实层身份；热切换等活跃策略门只信这里。
     pub(crate) surface_kind: crate::surface::SurfaceKind,
+    /// Work workspace identity, copied from the durable surface binding.
+    pub(crate) work_workspace_id: Option<crate::work_staging::WorkspaceId>,
 }
 
 #[derive(Default)]
@@ -205,6 +207,7 @@ pub async fn agent_start(
     model: Option<String>,
     resume: Option<String>,
     surface: Option<String>,
+    work_workspace_id: Option<String>,
 ) -> Result<StartResult, String> {
     // smoke 模式：前端不许动会话。debug 构建的 webview 若碰到活着的 dev
     // server 会加载完整前端并自动启动会话，把 autotest 的 handle 换成
@@ -220,7 +223,24 @@ pub async fn agent_start(
 
     let intent = crate::surface_policy::NewSurfaceIntent::from_wire(surface.as_deref())
         .map_err(|e| crate::surface_policy::policy_blocked_message(&e))?;
-    let result = start_inner_with_intent(app, &state, workspace, model, resume, intent)
+    let requested_work_workspace = work_workspace_id
+        .map(crate::work_staging::WorkspaceId::parse)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if requested_work_workspace.is_some()
+        && intent.surface_kind() != crate::surface::SurfaceKind::Work
+    {
+        return Err("work_workspace_id 只能用于 Work 层".into());
+    }
+    let result = start_inner_with_intent_and_workspace(
+        app,
+        &state,
+        workspace,
+        model,
+        resume,
+        intent,
+        requested_work_workspace,
+    )
         .await
         .map_err(|e| format!("{e:#}"))?;
     Ok(result)
@@ -253,6 +273,48 @@ pub(crate) async fn start_inner_with_intent(
     model: Option<String>,
     resume: Option<String>,
     new_intent: crate::surface_policy::NewSurfaceIntent,
+) -> Result<StartResult> {
+    start_inner_with_intent_and_workspace(
+        app,
+        state,
+        workspace,
+        model,
+        resume,
+        new_intent,
+        None,
+    )
+    .await
+}
+
+fn select_work_workspace(
+    bound: Option<&crate::work_staging::WorkspaceId>,
+    requested: Option<crate::work_staging::WorkspaceId>,
+) -> Result<crate::work_staging::WorkspaceId> {
+    match bound {
+        Some(bound) => {
+            if let Some(requested) = requested.as_ref() {
+                if requested != bound {
+                    return Err(anyhow!(
+                        "WORKSPACE_IDENTITY_CONFLICT: 恢复会话绑定 {}，请求却为 {}",
+                        bound.as_str(),
+                        requested.as_str()
+                    ));
+                }
+            }
+            Ok(bound.clone())
+        }
+        None => Ok(requested.unwrap_or_else(crate::work_staging::WorkspaceId::mint)),
+    }
+}
+
+async fn start_inner_with_intent_and_workspace(
+    app: AppHandle,
+    state: &State<'_, AgentState>,
+    workspace: String,
+    model: Option<String>,
+    resume: Option<String>,
+    new_intent: crate::surface_policy::NewSurfaceIntent,
+    requested_work_workspace: Option<crate::work_staging::WorkspaceId>,
 ) -> Result<StartResult> {
     // Make WanCode-managed API keys (stored in the OS keyring) visible to the
     // engine's `env_key` resolution for this process.
@@ -306,12 +368,15 @@ pub(crate) async fn start_inner_with_intent(
     // 绑定里的 id(不变量保证 Some);fresh Work 现铸造(下面写入 Work 绑定,
     // 同一 id 复用,不重复铸造)。
     let work_workspace_id: Option<crate::work_staging::WorkspaceId> = if is_work {
-        match resumed_binding.as_ref() {
-            Some(b) => Some(b.workspace_id.clone().ok_or_else(|| {
-                anyhow!("Work 绑定缺 workspace_id（身份不变量被破坏）")
-            })?),
-            None => Some(crate::work_staging::WorkspaceId::mint()),
-        }
+        let bound = resumed_binding
+            .as_ref()
+            .map(|b| {
+                b.workspace_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Work 绑定缺 workspace_id（身份不变量被破坏）"))
+            })
+            .transpose()?;
+        Some(select_work_workspace(bound, requested_work_workspace)?)
     } else {
         None
     };
@@ -720,6 +785,7 @@ pub(crate) async fn start_inner_with_intent(
         cancel,
         cwd: cwd.clone(),
         surface_kind: surface_binding.surface_kind,
+        work_workspace_id: surface_binding.workspace_id.clone(),
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
@@ -1194,10 +1260,29 @@ pub async fn agent_prompt(
     text: String,
     images: Option<Vec<PromptImage>>,
 ) -> Result<(), String> {
-    let (acp_tx, session_id) = {
+    let (acp_tx, session_id, surface_kind, work_workspace_id) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
-        (h.acp_tx.clone(), h.session_id.clone())
+        (
+            h.acp_tx.clone(),
+            h.session_id.clone(),
+            h.surface_kind,
+            h.work_workspace_id.clone(),
+        )
+    };
+    let text = if surface_kind == crate::surface::SurfaceKind::Work {
+        let workspace_id = work_workspace_id.ok_or("Work 会话缺少 workspace_id")?;
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+        tokio::task::spawn_blocking(move || {
+            crate::work_context::build_work_prompt(&app_data, &workspace_id, &text)
+        })
+        .await
+        .map_err(|e| format!("Work 上下文任务失败: {e}"))??
+    } else {
+        text
     };
     let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
     for img in images.unwrap_or_default() {
@@ -1640,6 +1725,37 @@ mod chat_runtime_dir_tests {
             dir.file_name().and_then(|n| n.to_str()),
             Some(CHAT_RUNTIME_DIR_NAME)
         );
+    }
+}
+
+#[cfg(test)]
+mod work_workspace_resume_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_engine_session_can_reuse_the_durable_work_workspace() {
+        let workspace = crate::work_staging::WorkspaceId::parse(
+            "ws-000000000001-000000-00000001",
+        )
+        .unwrap();
+        assert_eq!(
+            select_work_workspace(None, Some(workspace.clone())).unwrap(),
+            workspace
+        );
+    }
+
+    #[test]
+    fn resumed_session_rejects_a_conflicting_workspace_pointer() {
+        let bound = crate::work_staging::WorkspaceId::parse(
+            "ws-000000000001-000000-00000001",
+        )
+        .unwrap();
+        let requested = crate::work_staging::WorkspaceId::parse(
+            "ws-000000000002-000000-00000002",
+        )
+        .unwrap();
+        let error = select_work_workspace(Some(&bound), Some(requested)).unwrap_err();
+        assert!(error.to_string().contains("WORKSPACE_IDENTITY_CONFLICT"));
     }
 }
 

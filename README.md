@@ -22,9 +22,9 @@ Unlike single-provider clients, WanCode treats model choice as a first-class fea
 
 The desktop client is built with Tauri 2, React, and TypeScript. Its Rust agent runtime is based on the open-source [grok-build](https://github.com/ThomasWan123/grok-build) project and is pinned through a reproducible, audited vendor manifest.
 
-## Current release: v0.20.0
+## Current release: v0.20.1
 
-[WanCode v0.20.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.0) adds a usable **Work** surface, capability-aware model controls, auditable provider evidence, and verified multi-source updates while preserving the Chat/Code boundary introduced in v0.19.
+[WanCode v0.20.1](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.1) adds a usable **Work** surface, capability-aware model controls, auditable provider evidence, and verified multi-source updates while preserving the Chat/Code boundary introduced in v0.19.
 
 | Surface | Intended use | Local capabilities |
 |---|---|---|
@@ -40,7 +40,7 @@ Cowork remains gated. v0.20 ships its real-engine escape probe and records the c
 
 - **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints, with a published [provider compatibility matrix](docs/provider-compatibility.md) generated from CI evidence.
 - **Capability-aware controls** — reasoning effort appears only for models that declare support; project-memory refresh and edit controls are wired to the engine.
-- **Document Work surface** — staged DOCX import, fail-closed UTF-16 anchors, and bounded worker-process parsing.
+- **Document Work surface** — staged DOCX import, durable document recovery, verified read-only source identity, fail-closed UTF-16 anchors, bounded worker-process parsing, and citation-ready document context supplied to every Work turn.
 - **Streaming conversations** — Markdown rendering, collapsible reasoning, and tool-call cards.
 - **Approval controls** — ask, allow for the current session, or reject sensitive actions.
 - **Inline diff review** — inspect proposed file changes before they are written.
@@ -113,6 +113,7 @@ Useful development commands:
 ```powershell
 npm run tauri dev
 npm test
+cargo test --manifest-path src-tauri\Cargo.toml -j 1 --lib
 powershell -File scripts/smoke.ps1
 ```
 
@@ -128,7 +129,7 @@ powershell -File scripts/smoke.ps1
 
 ## Project status
 
-- **Latest stable release:** [v0.20.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.0)
+- **Latest stable release:** [v0.20.1](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.1)
 - **Available surfaces:** Chat, Code, and Work
 - **Gated surface:** Cowork
 - **Platform:** Windows x64

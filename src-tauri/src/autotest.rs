@@ -125,8 +125,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 把夹具写进 workspace 会让该断言自相矛盾）。
         let user_docs = app_data.join("w25-user-docs");
         let _ = std::fs::create_dir_all(&user_docs);
-        let src = user_docs.join("w25-fixture.pdf");
-        let _ = std::fs::write(&src, b"%PDF-1.7 w2.5 autotest fixture");
+        let src = user_docs.join("w25-fixture.docx");
+        let _ = std::fs::write(&src, b"w2.5 DOCX staging autotest fixture");
         // 导入前快照：项目目录清单 + 原件字节/权限。
         let proj_before = dir_entry_names(std::path::Path::new(&workspace));
         let src_bytes_before = std::fs::read(&src).unwrap_or_default();
@@ -147,7 +147,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                 let ws_parsed = WorkspaceId::parse(ws_from_binding.clone()).expect("workspace id");
                 let staged = workspace_dir_under(app_data.clone(), &ws_parsed)
                     .join(rec.import_id.as_str())
-                    .join("original.pdf");
+                    .join("original.docx");
                 let staged_bytes = std::fs::read(&staged).unwrap_or_default();
                 let staged_ro = std::fs::metadata(&staged).map(|m| m.permissions().readonly()).unwrap_or(false);
                 // 暂存字节必须与原件**逐字节相同**，记录的 sha256 必须与实算相同。

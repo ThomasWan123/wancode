@@ -21,8 +21,7 @@
 //! 有 5 个集成测试且都在 CI 跑，所以「集成测试不可用」是错的。真实
 //! 约束是 **libtest harness 与 panic 策略**：workspace 根
 //! `[profile.dev] panic = "abort"`（grok-build，改它=动 vendor=破
-//! G26），而 wancode_lib 的 crate-type 含 staticlib/cdylib——带标准
-//! harness 的集成测试需要 unwind，import wancode_lib 时必然冲突。
+//! G26），而带标准 harness 的集成测试需要 unwind。
 //! 仓内唯一 import wancode_lib 的集成测试 `job_breakaway` 正是靠
 //! `harness = false`（自写 main）绕开的，代价是没有 `#[ignore]`、
 //! 没有名称过滤。本探针需要这两者（防误运行护栏的一半），故选
