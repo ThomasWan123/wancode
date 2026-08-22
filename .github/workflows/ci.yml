@@ -157,13 +157,16 @@ jobs:
           $engine = Join-Path (Split-Path $PWD -Parent) "grok-build"
           Set-Location $engine
           cargo test --locked -p xai-grok-shell --test model_identity_e2e
-      - name: lib 单测 + 引擎金丝雀
+      - name: lib 单测 + 引擎金丝雀（固定真实 DOCX + PDF/混沌门禁）
         working-directory: src-tauri
         env:
           COMPLIANCE_SUMMARY_PATH: ${{ github.workspace }}/compliance-summary-4a.json
           COMPLIANCE_SUMMARY_PATH_4B: ${{ github.workspace }}/compliance-summary-4b.json
-        # wancode_lib 同时产出 rlib/cdylib，Cargo 并行链接时会争用同名 DLL；
-        # harness=false 的金丝雀还会混用 abort/unwind 产物。串行构建可避免两类竞态。
+        # work_parse_containment 内嵌今天专业 QA 使用的真实 DOCX 固定样本；
+        # 不再依赖 WANCODE_DOCX_SAMPLE，也不存在“未设变量即 SKIP”路径。
+        # 同一步还强制有效 PDF 正对照、畸形 PDF 负对照、PDF/DOCX 导入到
+        # 模型上下文，以及 abort/hang/flood/tamper/reap 混沌矩阵。
+        # wancode_lib 与 harness=false 金丝雀均串行链接，避免 Windows 产物竞态。
         run: cargo test --locked -j 1 -p wancode --lib --test engine_canary --test model_block_over_acp --test job_breakaway --test provider_compliance --test provider_compliance_4b --test work_surface_engine --test work_parse_containment
       # v0.19 2c：同一引擎连接内，Code 全局重载插件后，Chat 仍须保持
       # registry/hook 为空，且 provider 请求只能携带 web_search/web_fetch。

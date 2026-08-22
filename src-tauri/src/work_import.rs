@@ -2,7 +2,7 @@
 //!
 //! 把一份不受信文档导入某 Work 工作区的暂存区:
 //!   1. 读原件、算完整 sha256(与 import_id 联合定位,设计 §1.2);
-//!   2. 按扩展名判类型（当前仅 DOCX，其余拒绝）;
+//!   2. 按扩展名判类型（PDF / DOCX，其余拒绝）;
 //!   3. 铸造 import_id,建 `work/<ws>/<import_id>/`,原件复制进去;
 //!   4. 暂存副本置**只读**(设计底线:原件全程只读);
 //!   5. 原子更新工作区清单(复用 W2-a 的 write_atomic);
@@ -25,14 +25,17 @@ use crate::work_staging::{
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
 pub enum WorkImportError {
-    /// 不支持的文档类型（当前仅 DOCX 可进入理解链）。
+    /// 不支持的文档类型（当前仅 PDF / DOCX 可进入理解链）。
     UnsupportedKind(String),
     /// 源文件不存在或不可读。
     SourceUnreadable(String),
     /// 暂存/清单层错误。
     Staging(WorkStagingError),
     /// 现有清单归属另一工作区(codex R2-F1)。
-    WorkspaceMismatch { requested: String, found: String },
+    WorkspaceMismatch {
+        requested: String,
+        found: String,
+    },
     Io(String),
 }
 
@@ -42,10 +45,9 @@ impl std::fmt::Display for WorkImportError {
             WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}"),
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
-            WorkImportError::WorkspaceMismatch { requested, found } => write!(
-                f,
-                "工作区身份不符: 请求 {requested},清单声称 {found}"
-            ),
+            WorkImportError::WorkspaceMismatch { requested, found } => {
+                write!(f, "工作区身份不符: 请求 {requested},清单声称 {found}")
+            }
             WorkImportError::Io(s) => write!(f, "IO 失败: {s}"),
         }
     }
@@ -57,7 +59,7 @@ impl From<WorkStagingError> for WorkImportError {
     }
 }
 
-/// 由扩展名判文档类型。当前仅 DOCX；大小写不敏感。
+/// 由扩展名判文档类型。当前支持 PDF / DOCX；大小写不敏感。
 fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     let ext = source
         .extension()
@@ -66,8 +68,9 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
         .unwrap_or_default();
     match ext.as_str() {
         "docx" => Ok("docx"),
+        "pdf" => Ok("pdf"),
         other => Err(WorkImportError::UnsupportedKind(format!(
-            "{other}（当前可理解格式仅 DOCX）"
+            "{other}（当前可理解格式为 PDF / DOCX）"
         ))),
     }
 }
@@ -127,8 +130,8 @@ pub fn import_document(
 
         let mut manifest = if manifest_path.exists() {
             let m = WorkManifest::read(&manifest_path)?; // 损坏/未来版本在此 fail-closed
-            // codex R2-F1:现有清单的 workspace_id 必须**精确等于**请求的 id。
-            // 否则(拷贝/篡改/恢复错位)会把导入错误归属到别的工作区。
+                                                         // codex R2-F1:现有清单的 workspace_id 必须**精确等于**请求的 id。
+                                                         // 否则(拷贝/篡改/恢复错位)会把导入错误归属到别的工作区。
             if &m.workspace_id != workspace_id {
                 return Err(WorkImportError::WorkspaceMismatch {
                     requested: workspace_id.as_str().to_string(),
@@ -321,6 +324,30 @@ mod tests {
     }
 
     #[test]
+    fn imports_pdf_with_fixed_safe_staging_name() {
+        let app = tmp_dir("app-pdf");
+        let src_dir = tmp_dir("src-pdf");
+        let content = b"%PDF-1.4 fixture";
+        let src = write_source(&src_dir, "Quarterly.PDF", content);
+        let ws = WorkspaceId::mint();
+
+        let rec = import_document(&app, &ws, &src).unwrap();
+        assert_eq!(rec.kind, "pdf");
+        assert_eq!(rec.display_name, "Quarterly.PDF");
+        assert_eq!(rec.source_sha256, hex_lower(&Sha256::digest(content)));
+        assert_eq!(
+            rec.staging_rel_path,
+            format!("{}/original.pdf", rec.import_id.as_str())
+        );
+        let staged = workspace_dir_under(app.clone(), &ws).join(&rec.staging_rel_path);
+        assert!(staged.exists());
+        assert!(std::fs::metadata(&staged).unwrap().permissions().readonly());
+
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
     fn rejects_unsupported_kind() {
         let app = tmp_dir("app");
         let src_dir = tmp_dir("src");
@@ -346,7 +373,11 @@ mod tests {
         assert_ne!(a.import_id, b.import_id);
         let m = WorkManifest::read(&manifest_path_under(app.clone(), &ws)).unwrap();
         assert_eq!(m.imports.len(), 2, "同一工作区两次导入都在清单里");
-        assert_eq!(list_imports(&app, &ws).unwrap(), m.imports, "重启恢复必须读回同一清单");
+        assert_eq!(
+            list_imports(&app, &ws).unwrap(),
+            m.imports,
+            "重启恢复必须读回同一清单"
+        );
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }
@@ -398,7 +429,11 @@ mod tests {
         let m = WorkManifest::read(&manifest_path_under((*app).clone(), &ws)).unwrap();
         assert_eq!(m.imports.len(), 2, "并发两次导入都必须落盘,零丢失");
         for r in &recs {
-            assert!(m.imports.contains(r), "返回的记录必须在持久清单里: {:?}", r.import_id);
+            assert!(
+                m.imports.contains(r),
+                "返回的记录必须在持久清单里: {:?}",
+                r.import_id
+            );
         }
         let _ = std::fs::remove_dir_all(&*app);
         let _ = std::fs::remove_dir_all(&*src_dir);
@@ -419,7 +454,10 @@ mod tests {
         let before = std::fs::read(&mp).unwrap();
         let src = write_source(&src_dir, "x.docx", b"data");
         let err = import_document(&app, &ws, &src).unwrap_err();
-        assert!(matches!(err, WorkImportError::Staging(_)), "应报暂存层错误,实得 {err:?}");
+        assert!(
+            matches!(err, WorkImportError::Staging(_)),
+            "应报暂存层错误,实得 {err:?}"
+        );
 
         // 清单未被改动
         assert_eq!(std::fs::read(&mp).unwrap(), before, "失败不得改动清单");
