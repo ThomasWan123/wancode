@@ -48,8 +48,8 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=5edda649cd91a14cbbff7ee4010d331cb31cb50ec94d619bdf4494215b60434d
-effective_tree_sha256=e613b136b0d58793722ec90590d95ada96d9211551a6cc99b175936b944c8b5d
+cargo_lock_sha256=9cf4cd162e0f1863c97c9ead2368958ed6a2b33dbb5a6dab9a200e05e33f92ee
+effective_tree_sha256=06bab09c216c0f8f3d627ca206f2b14b61b8cf3a0d4a5867f62554bfff89d8c1
 #
 # 【历史】上面的 declared_added_packages（W3 dependency-delta）与
 # declared_added_wancode_dependencies（#67 wancode-lock-delta）属于此前两轮，
