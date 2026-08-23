@@ -2678,32 +2678,17 @@ pub async fn agent_prompt(
     let request = acp::PromptRequest::new(session_id, blocks);
     let result: Result<acp::PromptResponse, _> = acp_send(request, &acp_tx).await;
     let (provider_event, terminal_event) = match &result {
-        Ok(_) => {
-            let (input_tokens, output_tokens, cache_read_tokens) = (None, None, None);
-            if let (Some(profile), Some(input), Some(output)) =
-                (&provider_profile, input_tokens, output_tokens)
-            {
-                let usage = crate::provider_profile::ProviderUsageFacts {
-                    input_tokens: input,
-                    output_tokens: output,
-                    cache_read_tokens,
-                };
-                if let Err(error) = profile.validate_usage(usage) {
-                    tracing::warn!("ProviderProfile usage validation failed: {error}");
-                }
-            }
-            (
-                ExecutionEventKind::ProviderCompleted {
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                },
-                ExecutionEventKind::TurnEnded {
-                    outcome: TurnOutcome::Completed,
-                    error_code: None,
-                },
-            )
-        }
+        Ok(_) => (
+            ExecutionEventKind::ProviderCompleted {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+            },
+            ExecutionEventKind::TurnEnded {
+                outcome: TurnOutcome::Completed,
+                error_code: None,
+            },
+        ),
         Err(error) => {
             let error_code = LedgerRedactor::error_code(&error.to_string()).to_string();
             (
@@ -2895,7 +2880,7 @@ pub(crate) async fn ext_call(
                     ).await {
                         let kill_params = serde_json::json!({ "terminalId": terminal_id });
                         if let Ok(raw_kill) = serde_json::value::to_raw_value(&kill_params) {
-                            let _ = acp_send::<acp::ExtRequest, acp::ExtResponse>(
+                            let _: Result<acp::ExtResponse, _> = acp_send(
                                 acp::ExtRequest::new("x.ai/terminal/kill".to_string(), raw_kill.into()),
                                 &acp_tx,
                             ).await;
