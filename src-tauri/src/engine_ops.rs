@@ -968,12 +968,16 @@ pub async fn agent_set_model(
         let mut guard = state.handle.lock().await;
         if let Some(handle) = guard.as_mut() {
             let family = crate::provider_profile::infer_family(&model);
-            handle.provider_profile =
-                crate::provider_profile::ProviderProfile::safe_default(&model, family)
-                    .inspect_err(|error| {
-                        tracing::warn!("ProviderProfile refresh on route change failed for {model}: {error}");
-                    })
-                    .ok();
+            match crate::provider_profile::ProviderProfile::safe_default(&model, family) {
+                Ok(profile) => {
+                    handle.provider_profile = Some(profile);
+                }
+                Err(error) => {
+                    return Err(ModelSwitchError::Other {
+                        message: format!("PROVIDER_PROFILE_BLOCKED: {model}: {error}"),
+                    });
+                }
+            }
             handle.provider_catalog_key = Some(model);
         }
     }

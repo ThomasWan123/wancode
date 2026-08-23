@@ -384,4 +384,119 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
     }
+
+    #[test]
+    fn safe_default_with_invalid_catalog_key_is_fail_closed_error() {
+        let result = ProviderProfile::safe_default("", ProviderFamily::Custom);
+        assert_eq!(result, Err(ProfileError::InvalidCatalogKey));
+
+        let result = ProviderProfile::safe_default("https://evil.com?key=x", ProviderFamily::Glm);
+        assert_eq!(result, Err(ProfileError::InvalidCatalogKey));
+
+        let result = ProviderProfile::safe_default("model\x00id", ProviderFamily::DeepSeek);
+        assert_eq!(result, Err(ProfileError::InvalidCatalogKey));
+    }
+
+    #[test]
+    fn validate_usage_executes_with_real_token_facts_and_catches_violations() {
+        let deepseek =
+            ProviderProfile::safe_default("deepseek:chat", ProviderFamily::DeepSeek).unwrap();
+
+        let valid = ProviderUsageFacts {
+            input_tokens: 1024,
+            output_tokens: 256,
+            cache_read_tokens: Some(512),
+        };
+        assert!(
+            deepseek.validate_usage(valid).is_ok(),
+            "valid usage with real token facts must pass"
+        );
+
+        let overflow = ProviderUsageFacts {
+            input_tokens: 1024,
+            output_tokens: 256,
+            cache_read_tokens: Some(2048),
+        };
+        assert_eq!(
+            deepseek.validate_usage(overflow),
+            Err(ProfileError::InvalidUsage),
+            "cache_read exceeding input must be caught"
+        );
+
+        let custom =
+            ProviderProfile::safe_default("custom:model", ProviderFamily::Custom).unwrap();
+        let unexpected_cache = ProviderUsageFacts {
+            input_tokens: 500,
+            output_tokens: 50,
+            cache_read_tokens: Some(100),
+        };
+        assert_eq!(
+            custom.validate_usage(unexpected_cache),
+            Err(ProfileError::CacheTelemetryUnsupported),
+            "non-cache provider reporting cache tokens must be caught"
+        );
+    }
+
+    #[test]
+    fn max_concurrent_reads_is_profile_specific_and_schedulable() {
+        let custom =
+            ProviderProfile::safe_default("unknown-custom", ProviderFamily::Custom).unwrap();
+        assert_eq!(
+            custom.max_concurrent_reads, 1,
+            "unknown/custom must be serial (1)"
+        );
+
+        let deepseek =
+            ProviderProfile::safe_default("deepseek-chat", ProviderFamily::DeepSeek).unwrap();
+        assert_eq!(
+            deepseek.max_concurrent_reads, 2,
+            "DeepSeek profile allows 2 concurrent reads"
+        );
+
+        let glm = ProviderProfile::safe_default("glm-4-flash", ProviderFamily::Glm).unwrap();
+        assert_eq!(
+            glm.max_concurrent_reads, 2,
+            "GLM profile allows 2 concurrent reads"
+        );
+    }
+
+    #[test]
+    fn tool_presentation_starts_native_requires_evidence_for_non_native() {
+        let profile =
+            ProviderProfile::safe_default("deepseek-chat", ProviderFamily::DeepSeek).unwrap();
+        assert_eq!(
+            profile.tool_presentation,
+            ToolPresentation::Native,
+            "all profiles start as Native regardless of family"
+        );
+
+        let weak_evidence = ToolModeEvidence {
+            provider_catalog_key: "deepseek-chat".into(),
+            benchmark_id: "B-test".into(),
+            requested_mode: ToolPresentation::Code,
+            trials: 30,
+            baseline_correctness: 0.90,
+            candidate_correctness: 0.91,
+            median_latency_improvement: 0.05,
+            write_order_drift_count: 0,
+        };
+        assert_eq!(
+            profile.clone().apply_tool_mode_evidence(&weak_evidence),
+            Err(ProfileError::NoMeasuredBenefit),
+            "tool_presentation upgrade requires >= 10% latency improvement"
+        );
+
+        let strong_evidence = ToolModeEvidence {
+            provider_catalog_key: "deepseek-chat".into(),
+            benchmark_id: "B-test".into(),
+            requested_mode: ToolPresentation::Code,
+            trials: 30,
+            baseline_correctness: 0.90,
+            candidate_correctness: 0.91,
+            median_latency_improvement: 0.20,
+            write_order_drift_count: 0,
+        };
+        let upgraded = profile.apply_tool_mode_evidence(&strong_evidence).unwrap();
+        assert_eq!(upgraded.tool_presentation, ToolPresentation::Code);
+    }
 }

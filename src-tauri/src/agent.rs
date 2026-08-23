@@ -1368,15 +1368,13 @@ async fn start_inner_with_intent_and_workspace(
         }
     }
 
-    let provider_profile = current_model_id
-        .as_deref()
-        .and_then(|key| {
+    let provider_profile = match current_model_id.as_deref() {
+        Some(key) => Some(
             ProviderProfile::safe_default(key, infer_family(key))
-                .inspect_err(|error| {
-                    tracing::warn!("ProviderProfile::safe_default failed for {key}: {error}");
-                })
-                .ok()
-        });
+                .map_err(|error| anyhow!("PROVIDER_PROFILE_BLOCKED: {key}: {error}"))?,
+        ),
+        None => None,
+    };
     *state.handle.lock().await = Some(AgentHandle {
         acp_tx: acp_tx.clone(),
         session_id: session_id.clone(),
@@ -1485,7 +1483,7 @@ mod surface_launchable_tests {
         terminal_id_from_response, terminal_resource_action, retain_owned_terminals,
         validate_pending_permission, PendingPermission, TerminalResourceAction,
     };
-    use crate::capability_broker::{McpInheritance, ResourceKind, ResourceRegistry, ToolRisk};
+    use crate::capability_broker::{CapabilityError, McpInheritance, ResourceKind, ResourceRegistry, ToolRisk};
     use crate::surface::SurfaceKind;
     use std::collections::BTreeSet;
 
@@ -1635,6 +1633,39 @@ mod surface_launchable_tests {
                 "result": {"terminalId": "terminal-new"}
             })),
             Some("terminal-new")
+        );
+    }
+
+    #[test]
+    fn terminal_create_duplicate_id_skips_kill_to_protect_existing_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = issue_session_capability_lease(
+            "session-existing", SurfaceKind::Code, root.path(), None,
+            Some("deepseek:chat"), &[],
+        ).unwrap();
+        let new_lease = issue_session_capability_lease(
+            "session-new", SurfaceKind::Code, root.path(), None,
+            Some("deepseek:chat"), &[],
+        ).unwrap();
+        let registry = ResourceRegistry::default();
+        registry.register(&owner, ResourceKind::Terminal, "dup-terminal-id").unwrap();
+
+        let result = registry.register(&new_lease, ResourceKind::Terminal, "dup-terminal-id");
+        assert!(
+            matches!(result, Err(CapabilityError::ResourceAlreadyExists)),
+            "duplicate register must fail"
+        );
+
+        let auth_result = registry.authorize(&new_lease, ResourceKind::Terminal, "dup-terminal-id");
+        assert!(
+            auth_result.is_err(),
+            "new lease must NOT be authorized for existing terminal"
+        );
+
+        let existing_auth = registry.authorize(&owner, ResourceKind::Terminal, "dup-terminal-id");
+        assert!(
+            existing_auth.is_ok(),
+            "existing owner must remain authorized after failed duplicate register"
         );
     }
 
@@ -1996,6 +2027,50 @@ async fn record_acp_session_update(
     }
 }
 
+/// Validate provider usage from a session notification when token data is
+/// present. Called on the notification pump path so validate_usage fires
+/// on real token facts rather than being a dead call with None tokens.
+async fn validate_notification_usage(state: &AgentState, update: &acp::SessionUpdate) {
+    let json = match serde_json::to_value(update) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let usage_map = json
+        .get("usage")
+        .or_else(|| {
+            json.get("meta")
+                .and_then(|m| m.get("usage").or_else(|| m.get("x.ai/usage")))
+        })
+        .and_then(serde_json::Value::as_object);
+    let Some(usage) = usage_map else { return };
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    let cache_read = usage
+        .get("cache_read_tokens")
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    let (Some(input), Some(output)) = (input, output) else {
+        return;
+    };
+    let guard = state.handle.lock().await;
+    let Some(handle) = guard.as_ref() else { return };
+    let Some(profile) = &handle.provider_profile else { return };
+    let facts = crate::provider_profile::ProviderUsageFacts {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+    };
+    if let Err(error) = profile.validate_usage(facts) {
+        tracing::warn!("ProviderProfile usage validation failed on notification: {error}");
+    }
+}
+
 #[cfg(test)]
 mod execution_ledger_projection_tests {
     use super::*;
@@ -2137,6 +2212,70 @@ mod execution_ledger_projection_tests {
             ExecutionEventKind::ToolFailed { .. }
         ));
     }
+
+    #[test]
+    fn enforce_ledger_integrity_gate_denies_on_duplicate_event_ids() {
+        use crate::execution_ledger::{
+            ExecutionEvent, ExecutionEventKind, EventContext, LEDGER_FILE_NAME,
+            EXECUTION_EVENT_SCHEMA_VERSION,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEDGER_FILE_NAME);
+
+        let ctx = EventContext {
+            session_id: "s1".into(),
+            surface_kind: crate::surface::SurfaceKind::Code,
+            policy_version: 1,
+            provider_catalog_key: Some("test:model".into()),
+            turn_id: None,
+            step_id: None,
+            call_id: None,
+            agent_id: Some("agent-1".into()),
+        };
+        let event_a = ExecutionEvent {
+            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
+            seq: 1,
+            event_id: "dup-gate-test-id".into(),
+            time_unix_ms: 1000,
+            context: ctx.clone(),
+            event: ExecutionEventKind::SurfaceBound,
+        };
+        let event_b = ExecutionEvent {
+            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
+            seq: 2,
+            event_id: "dup-gate-test-id".into(),
+            time_unix_ms: 2000,
+            context: ctx,
+            event: ExecutionEventKind::SurfaceBound,
+        };
+        let mut content = serde_json::to_string(&event_a).unwrap();
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&event_b).unwrap());
+        content.push('\n');
+        std::fs::write(&path, content).unwrap();
+
+        let ledger = ExecutionLedger::open(dir.path()).unwrap();
+
+        let result = super::enforce_ledger_integrity_gate(&ledger);
+        assert!(result.is_err(), "gate must deny when duplicates exist");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("EXECUTION_INTEGRITY_BLOCKED"),
+            "error must carry the BLOCKED code: {err}"
+        );
+        assert!(
+            err.contains("duplicate event IDs"),
+            "error must mention duplicate IDs: {err}"
+        );
+    }
+
+    #[test]
+    fn enforce_ledger_integrity_gate_passes_clean_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ExecutionLedger::open(dir.path()).unwrap();
+        let result = super::enforce_ledger_integrity_gate(&ledger);
+        assert!(result.is_ok(), "clean ledger must pass gate: {result:?}");
+    }
 }
 
 async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
@@ -2154,6 +2293,7 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
             let session_id = boxed.request.session_id.0.to_string();
             {
                 let state: State<'_, AgentState> = app.state();
+                validate_notification_usage(&state, &boxed.request.update).await;
                 if let Err(error) = record_acp_session_update(
                     &state,
                     &session_id,
@@ -2523,6 +2663,23 @@ pub fn agent_execution_diagnostics(
         .map_err(|error| error.to_string())
 }
 
+/// Ledger integrity gate: denies prompt execution when the ledger contains
+/// duplicate event IDs or diagnostics fail to compute. Extracted as a
+/// standalone function so unit tests can verify the deny path directly.
+pub(crate) fn enforce_ledger_integrity_gate(
+    ledger: &crate::execution_ledger::ExecutionLedger,
+) -> Result<(), String> {
+    match ledger.diagnostics() {
+        Ok(diag) if !diag.duplicate_event_ids.is_empty() => Err(format!(
+            "EXECUTION_INTEGRITY_BLOCKED: ledger contains {} duplicate event IDs; \
+             prompt denied (same fault shown in Settings > About)",
+            diag.duplicate_event_ids.len()
+        )),
+        Err(error) => Err(format!("EXECUTION_INTEGRITY_BLOCKED: {error}")),
+        Ok(_) => Ok(()),
+    }
+}
+
 /// Send one user prompt (optionally with pasted images for vision models);
 /// resolves when the turn completes.
 #[tauri::command]
@@ -2614,19 +2771,7 @@ pub async fn agent_prompt(
     let turn_id = state.next_turn_id()?;
     let session_id_string = session_id.0.to_string();
     let execution_ledger = state.execution_ledger(&app)?;
-    match execution_ledger.diagnostics() {
-        Ok(diag) if !diag.duplicate_event_ids.is_empty() => {
-            return Err(format!(
-                "EXECUTION_INTEGRITY_BLOCKED: ledger contains {} duplicate event IDs; \
-                 prompt denied (same fault shown in Settings > About)",
-                diag.duplicate_event_ids.len()
-            ));
-        }
-        Err(error) => {
-            return Err(format!("EXECUTION_INTEGRITY_BLOCKED: {error}"));
-        }
-        Ok(_) => {}
-    }
+    enforce_ledger_integrity_gate(&execution_ledger)?;
     {
         let mut active_turns = state.active_turns.lock().await;
         if active_turns.contains_key(&session_id_string) {
@@ -2678,17 +2823,19 @@ pub async fn agent_prompt(
     let request = acp::PromptRequest::new(session_id, blocks);
     let result: Result<acp::PromptResponse, _> = acp_send(request, &acp_tx).await;
     let (provider_event, terminal_event) = match &result {
-        Ok(_) => (
-            ExecutionEventKind::ProviderCompleted {
-                input_tokens: None,
-                output_tokens: None,
-                cache_read_tokens: None,
-            },
-            ExecutionEventKind::TurnEnded {
-                outcome: TurnOutcome::Completed,
-                error_code: None,
-            },
-        ),
+        Ok(_) => {
+            (
+                ExecutionEventKind::ProviderCompleted {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                },
+                ExecutionEventKind::TurnEnded {
+                    outcome: TurnOutcome::Completed,
+                    error_code: None,
+                },
+            )
+        }
         Err(error) => {
             let error_code = LedgerRedactor::error_code(&error.to_string()).to_string();
             (
@@ -2878,12 +3025,38 @@ pub(crate) async fn ext_call(
                         ResourceKind::Terminal,
                         &terminal_id,
                     ).await {
+                        let is_duplicate = register_error.contains("RESOURCE_OWNERSHIP_BLOCKED")
+                            && state.resource_registry
+                                .authorize(lease, ResourceKind::Terminal, &terminal_id)
+                                .is_err();
+                        if is_duplicate {
+                            return Err(format!(
+                                "TERMINAL_CREATE_BLOCKED: {terminal_id}: \
+                                 duplicate ID conflicts with existing registered terminal; \
+                                 compensating kill skipped to protect existing owner. \
+                                 Original: {register_error}"
+                            ));
+                        }
                         let kill_params = serde_json::json!({ "terminalId": terminal_id });
-                        if let Ok(raw_kill) = serde_json::value::to_raw_value(&kill_params) {
-                            let _: Result<acp::ExtResponse, _> = acp_send(
-                                acp::ExtRequest::new("x.ai/terminal/kill".to_string(), raw_kill.into()),
-                                &acp_tx,
-                            ).await;
+                        let kill_result = match serde_json::value::to_raw_value(&kill_params) {
+                            Ok(raw_kill) => {
+                                let r: Result<acp::ExtResponse, _> = acp_send(
+                                    acp::ExtRequest::new(
+                                        "x.ai/terminal/kill".to_string(),
+                                        raw_kill.into(),
+                                    ),
+                                    &acp_tx,
+                                ).await;
+                                r
+                            }
+                            Err(e) => Err(acp::Error::new(e.to_string())),
+                        };
+                        if let Err(kill_error) = kill_result {
+                            return Err(format!(
+                                "TERMINAL_CREATE_FAILED: register failed ({register_error}) \
+                                 AND compensating kill also failed ({kill_error}); \
+                                 orphan terminal {terminal_id} may remain"
+                            ));
                         }
                         return Err(register_error);
                     }
