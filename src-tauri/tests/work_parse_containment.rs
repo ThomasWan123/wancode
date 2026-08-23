@@ -21,6 +21,18 @@ use wancode_lib::work_parse_worker::{
 };
 use wancode_lib::work_staging::{workspace_dir_under, WorkspaceId};
 
+#[allow(clippy::permissions_set_readonly_false)] // Windows ACL semantics are not Unix world-write.
+fn make_owner_writable(path: &Path, mut permissions: std::fs::Permissions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    let _ = std::fs::set_permissions(path, permissions);
+}
+
 fn req() -> ParseRequest {
     // 外壳不解析内容，但会 stat 原件，所以必须给一个真实存在的文件。
     ParseRequest {
@@ -326,9 +338,7 @@ fn main() {
             let staged =
                 workspace_dir_under(tmp.path().to_path_buf(), &ws).join(record.staging_rel_path);
             if let Ok(meta) = std::fs::metadata(&staged) {
-                let mut permissions = meta.permissions();
-                permissions.set_readonly(false);
-                let _ = std::fs::set_permissions(&staged, permissions);
+                make_owner_writable(&staged, meta.permissions());
                 let _ = std::fs::write(&staged, b"tampered");
             }
             let tampered = build_work_prompt(tmp.path(), &ws, "给出运营摘要");
@@ -400,9 +410,7 @@ fn main() {
         let staged =
             workspace_dir_under(tmp.path().to_path_buf(), &ws).join(record.staging_rel_path);
         if let Ok(meta) = std::fs::metadata(&staged) {
-            let mut permissions = meta.permissions();
-            permissions.set_readonly(false);
-            let _ = std::fs::set_permissions(&staged, permissions);
+            make_owner_writable(&staged, meta.permissions());
             let _ = std::fs::write(&staged, b"tampered pdf");
         }
         let tampered = build_work_prompt(tmp.path(), &ws, "What is the budget?");

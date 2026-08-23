@@ -9,13 +9,21 @@
 //!   the `agent_permission_respond` command)
 //! - `agent://turn-end`    — a prompt turn finished (with stop reason or error)
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
+use crate::capability_broker::{
+    CapabilityLease, LeaseRequest, McpInheritance, ResourceKind, ResourceRegistry, ToolRisk,
+};
 use crate::crash_recovery::write_session_marker;
+use crate::execution_ledger::{
+    hex_sha256, prompt_evidence, ApprovalDecision, EventContext, ExecutionEventKind,
+    ExecutionLedger, FrozenRequestEvidence, LedgerRedactor, SessionEndReason, TurnOutcome,
+};
 use crate::provider_ops::{inject_managed_keys};
 use crate::config_core::{validate_startup_models, StartupModels};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
@@ -34,6 +42,114 @@ type PlanReply = (String, Option<String>);
 /// 提问回包：问题文本 → 选中项列表；None = 用户取消。
 type QuestionReply = Option<HashMap<String, Vec<String>>>;
 
+struct PendingPermission {
+    sender: oneshot::Sender<Option<String>>,
+    session_id: String,
+    lease_id: String,
+    call_id: String,
+    action_fingerprint: String,
+    option_ids: BTreeSet<String>,
+}
+
+fn validate_pending_permission(
+    pending: &PendingPermission,
+    live_session_id: &str,
+    live_lease_id: &str,
+    option_id: Option<&str>,
+) -> Result<(), &'static str> {
+    if pending.session_id != live_session_id || pending.lease_id != live_lease_id {
+        return Err("stale_receipt");
+    }
+    if option_id.is_some_and(|selected| !pending.option_ids.contains(selected)) {
+        return Err("invalid_option");
+    }
+    Ok(())
+}
+
+fn resource_kind_code(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Terminal => "terminal",
+        ResourceKind::Job => "job",
+        ResourceKind::Mcp => "mcp",
+        ResourceKind::Worktree => "worktree",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalResourceAction {
+    None,
+    Create,
+    List,
+    Use,
+    Release,
+}
+
+fn terminal_resource_action(method: &str) -> TerminalResourceAction {
+    match method {
+        "x.ai/terminal/create" | "x.ai/terminal/pty/create" => TerminalResourceAction::Create,
+        "x.ai/terminal/list" => TerminalResourceAction::List,
+        "x.ai/terminal/release" | "x.ai/terminal/kill" => TerminalResourceAction::Release,
+        "x.ai/terminal/output"
+        | "x.ai/terminal/background"
+        | "x.ai/terminal/wait_for_exit"
+        | "x.ai/terminal/pty/load"
+        | "x.ai/terminal/pty/resize"
+        | "x.ai/terminal/pty/input" => TerminalResourceAction::Use,
+        _ => TerminalResourceAction::None,
+    }
+}
+
+fn terminal_id_from_params(params: &serde_json::Value) -> Option<&str> {
+    params
+        .get("terminalId")
+        .or_else(|| params.get("terminal_id"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn terminal_id_from_response(response: &serde_json::Value) -> Option<&str> {
+    let result = response.get("result").unwrap_or(response);
+    result
+        .get("terminalId")
+        .or_else(|| result.get("terminal_id"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn extension_response_succeeded(response: &serde_json::Value) -> bool {
+    response
+        .get("error")
+        .map(serde_json::Value::is_null)
+        .unwrap_or(true)
+}
+
+fn retain_owned_terminals(
+    response: &mut serde_json::Value,
+    registry: &ResourceRegistry,
+    lease: &CapabilityLease,
+) {
+    let terminals = if response.get("result").is_some() {
+        response
+            .get_mut("result")
+            .and_then(|result| result.get_mut("terminals"))
+            .and_then(serde_json::Value::as_array_mut)
+    } else {
+        response
+            .get_mut("terminals")
+            .and_then(serde_json::Value::as_array_mut)
+    };
+    let Some(terminals) = terminals else { return };
+    terminals.retain(|terminal| {
+        terminal
+            .get("terminalId")
+            .or_else(|| terminal.get("terminal_id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|terminal_id| {
+                registry
+                    .authorize(lease, ResourceKind::Terminal, terminal_id)
+                    .is_ok()
+            })
+    });
+}
+
 pub struct AgentHandle {
     pub(crate) acp_tx: AcpAgentTx,
     pub(crate) session_id: acp::SessionId,
@@ -44,12 +160,19 @@ pub struct AgentHandle {
     pub(crate) surface_kind: crate::surface::SurfaceKind,
     /// Work workspace identity, copied from the durable surface binding.
     pub(crate) work_workspace_id: Option<crate::work_staging::WorkspaceId>,
+    /// Catalog identity, never the provider-facing model id. The ledger and
+    /// provider policy must not collapse same-named models across providers.
+    pub(crate) provider_catalog_key: Option<String>,
+    /// Immutable authority snapshot issued before this handle becomes visible.
+    /// Host dispatchers must authorize against this lease; model-provided tool
+    /// metadata is presentation evidence only and cannot expand the lease.
+    pub(crate) capability_lease: Arc<CapabilityLease>,
 }
 
 #[derive(Default)]
 pub struct AgentState {
     pub(crate) handle: Mutex<Option<AgentHandle>>,
-    pending_permissions: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
+    pending_permissions: Mutex<HashMap<u64, PendingPermission>>,
     next_permission_id: AtomicU64,
     /// Pending `x.ai/exit_plan_mode` approvals → (outcome, feedback).
     pending_plans: Mutex<HashMap<u64, oneshot::Sender<PlanReply>>>,
@@ -60,6 +183,242 @@ pub struct AgentState {
     /// 后台工作会话（Review 等）：通知泵对这些会话不发 agent://update，
     /// 权限请求一律自动取消——它们绝不能污染主聊天或卡在前端审批上。
     pub(crate) background_sessions: Mutex<std::collections::HashSet<String>>,
+    /// One model-visible turn per live session. Concurrent sends are rejected;
+    /// this also gives ACP tool/approval notifications an unambiguous owner.
+    active_turns: Mutex<HashMap<String, String>>,
+    /// ACP updates can omit tool kind/title. Remember only the bounded generic
+    /// category keyed by (session, call); never retain raw input or output.
+    ledger_tool_calls: Mutex<HashMap<(String, String), String>>,
+    /// Terminal calls are remembered for the process lifetime so duplicate or
+    /// late ACP updates cannot create a second terminal fact.
+    ledger_terminal_calls: Mutex<std::collections::HashSet<(String, String)>>,
+    /// A corrupt completed ledger line is sticky for this process: execution
+    /// stays blocked instead of silently starting an unrelated audit trail.
+    execution_ledger: OnceLock<Result<Arc<ExecutionLedger>, String>>,
+    /// Host resources are capabilities only when bound to the immutable live
+    /// lease. ACP call IDs alone never confer ownership.
+    resource_registry: ResourceRegistry,
+    next_turn_id: AtomicU64,
+}
+
+impl AgentState {
+    fn execution_ledger(&self, app: &AppHandle) -> Result<Arc<ExecutionLedger>, String> {
+        self.execution_ledger
+            .get_or_init(|| {
+                let root = if let Ok(workspace) = std::env::var("WANCODE_AUTOTEST") {
+                    PathBuf::from(workspace).join("execution-ledger")
+                } else {
+                    app.path()
+                        .app_data_dir()
+                        .map_err(|error| {
+                            format!("解析 execution ledger app_data_dir 失败: {error}")
+                        })?
+                        .join("execution-ledger")
+                };
+                ExecutionLedger::open(root)
+                    .map(Arc::new)
+                    .map_err(|error| format!("EXECUTION_LEDGER_BLOCKED: {error}"))
+            })
+            .clone()
+    }
+
+    fn next_turn_id(&self) -> Result<String, String> {
+        let ordinal = self
+            .next_turn_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| "execution turn id exhausted".to_string())?;
+        Ok(format!("wt-{:08x}-{ordinal:016x}", std::process::id()))
+    }
+
+    async fn live_event_context(
+        &self,
+        session_id: &str,
+        call_id: Option<String>,
+    ) -> Result<EventContext, String> {
+        let (surface_kind, provider_catalog_key, agent_id) = {
+            let guard = self.handle.lock().await;
+            let handle = guard.as_ref().ok_or("会话未启动")?;
+            if handle.session_id.0.as_ref() != session_id {
+                return Err("ACP event session does not own the live handle".to_string());
+            }
+            handle
+                .capability_lease
+                .validate()
+                .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
+            if handle.capability_lease.session_id != session_id
+                || handle.capability_lease.surface_kind != handle.surface_kind
+                || handle.capability_lease.policy_version
+                    != crate::surface::CURRENT_POLICY_VERSION
+            {
+                return Err("CAPABILITY_LEASE_BINDING_MISMATCH".to_string());
+            }
+            let provider_key = handle
+                .provider_catalog_key
+                .as_deref()
+                .unwrap_or("provider-route-unavailable");
+            if handle.capability_lease.provider_route_hash != hex_sha256(provider_key.as_bytes()) {
+                return Err("CAPABILITY_LEASE_PROVIDER_MISMATCH".to_string());
+            }
+            (
+                handle.surface_kind,
+                handle.provider_catalog_key.clone(),
+                handle.capability_lease.agent_id.clone(),
+            )
+        };
+        let turn_id = self.active_turns.lock().await.get(session_id).cloned();
+        Ok(EventContext {
+            session_id: session_id.to_string(),
+            surface_kind,
+            policy_version: crate::surface::CURRENT_POLICY_VERSION,
+            provider_catalog_key,
+            turn_id,
+            step_id: None,
+            call_id,
+            agent_id: Some(agent_id),
+        })
+    }
+
+    async fn append_live_event(
+        &self,
+        session_id: &str,
+        call_id: Option<String>,
+        event: ExecutionEventKind,
+    ) -> Result<(), String> {
+        let context = self.live_event_context(session_id, call_id).await?;
+        let ledger = self
+            .execution_ledger
+            .get()
+            .ok_or("execution ledger was not initialized")?
+            .clone()?;
+        ledger
+            .append(context, event)
+            .map(|_| ())
+            .map_err(|error| format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))
+    }
+
+    async fn live_capability_lease(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<CapabilityLease>, String> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().ok_or("会话未启动")?;
+        if handle.session_id.0.as_ref() != session_id {
+            return Err("ACP resource session does not own the live handle".to_string());
+        }
+        handle
+            .capability_lease
+            .validate()
+            .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
+        Ok(handle.capability_lease.clone())
+    }
+
+    async fn register_live_resource(
+        &self,
+        session_id: &str,
+        lease: &CapabilityLease,
+        kind: ResourceKind,
+        resource_id: &str,
+    ) -> Result<(), String> {
+        let resource_id_hash = self.resource_registry
+            .register(lease, kind, resource_id)
+            .map_err(|error| format!("RESOURCE_OWNERSHIP_BLOCKED: {error}"))?;
+        if let Err(error) = self.append_live_event(
+            session_id,
+            None,
+            ExecutionEventKind::ResourceCreated {
+                resource_kind: resource_kind_code(kind).to_string(),
+                resource_id_hash,
+            },
+        ).await {
+            let _ = self.resource_registry.release(lease, kind, resource_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn authorize_live_resource(
+        &self,
+        lease: &CapabilityLease,
+        kind: ResourceKind,
+        resource_id: &str,
+    ) -> Result<(), String> {
+        self.resource_registry
+            .authorize(lease, kind, resource_id)
+            .map_err(|error| format!("RESOURCE_OWNERSHIP_BLOCKED: {error}"))
+    }
+
+    async fn release_live_resource(
+        &self,
+        session_id: &str,
+        lease: &CapabilityLease,
+        kind: ResourceKind,
+        resource_id: &str,
+    ) -> Result<(), String> {
+        self.resource_registry
+            .release(lease, kind, resource_id)
+            .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))?;
+        self.append_live_event(
+            session_id,
+            None,
+            ExecutionEventKind::ResourceReleased {
+                resource_kind: resource_kind_code(kind).to_string(),
+                resource_id_hash: hex_sha256(resource_id.as_bytes()),
+            },
+        ).await
+    }
+
+    /// Window close cannot await Tokio locks. Best effort is explicit and
+    /// bounded: cancel the live engine synchronously, then fsync a clean
+    /// terminal event only when the handle and initialized ledger are available.
+    pub(crate) fn close_active_session_now(&self) -> Result<(), String> {
+        let mut guard = self
+            .handle
+            .try_lock()
+            .map_err(|_| "active session is busy during window close".to_string())?;
+        let Some(handle) = guard.take() else {
+            return Ok(());
+        };
+        handle.cancel.cancel();
+        let Some(Ok(ledger)) = self.execution_ledger.get() else {
+            return Ok(());
+        };
+        let context = EventContext {
+            session_id: handle.session_id.0.to_string(),
+            surface_kind: handle.surface_kind,
+            policy_version: crate::surface::CURRENT_POLICY_VERSION,
+            provider_catalog_key: handle.provider_catalog_key,
+            turn_id: None,
+            step_id: None,
+            call_id: None,
+            agent_id: Some(handle.capability_lease.agent_id.clone()),
+        };
+        let released = self
+            .resource_registry
+            .release_all(&handle.capability_lease)
+            .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))?;
+        for (kind, resource_id_hash) in released {
+            ledger
+                .append(
+                    context.clone(),
+                    ExecutionEventKind::ResourceReleased {
+                        resource_kind: resource_kind_code(kind).to_string(),
+                        resource_id_hash,
+                    },
+                )
+                .map_err(|error| format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))?;
+        }
+        ledger
+            .append(
+                context,
+                ExecutionEventKind::SessionEnded {
+                    reason: SessionEndReason::CleanExit,
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -185,6 +544,150 @@ fn surface_loads_configured_mcp(kind: crate::surface::SurfaceKind) -> bool {
     kind == crate::surface::SurfaceKind::Code
 }
 
+fn surface_visible_tools(
+    kind: crate::surface::SurfaceKind,
+) -> BTreeMap<String, ToolRisk> {
+    use crate::surface::SurfaceKind::{Chat, Code, Cowork, Work};
+
+    let entries: &[(&str, ToolRisk)] = match kind {
+        Code => &[
+            ("read", ToolRisk::ReadOnly),
+            ("search", ToolRisk::ReadOnly),
+            ("think", ToolRisk::ReadOnly),
+            ("fetch", ToolRisk::Network),
+            ("edit", ToolRisk::WorkspaceWrite),
+            ("delete", ToolRisk::WorkspaceWrite),
+            ("move", ToolRisk::WorkspaceWrite),
+            ("execute", ToolRisk::Process),
+            ("switch_mode", ToolRisk::Privileged),
+            ("other", ToolRisk::Privileged),
+        ],
+        Chat => &[
+            ("search", ToolRisk::ReadOnly),
+            ("think", ToolRisk::ReadOnly),
+            ("fetch", ToolRisk::Network),
+        ],
+        Work => &[
+            ("read", ToolRisk::ReadOnly),
+            ("search", ToolRisk::ReadOnly),
+            ("think", ToolRisk::ReadOnly),
+        ],
+        // Cowork is release-gated in both surface_launchable and the broker.
+        Cowork => &[],
+    };
+    entries
+        .iter()
+        .map(|(name, risk)| ((*name).to_string(), *risk))
+        .collect()
+}
+
+/// Capability required by a host-initiated ACP extension. These commands can
+/// reach the same engine resources as model tools, so a hidden Settings/Git/
+/// Terminal entry point must not bypass the live Surface lease.
+fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
+    let read = || Some(("read", ToolRisk::ReadOnly));
+    let write = || Some(("edit", ToolRisk::WorkspaceWrite));
+    if method.starts_with("x.ai/terminal/") || method.starts_with("x.ai/task/") {
+        return Some(("execute", ToolRisk::Process));
+    }
+    if method.starts_with("x.ai/mcp/")
+        || method.starts_with("x.ai/subagent/")
+        || method.starts_with("x.ai/hooks/")
+        || method == "x.ai/scheduler/delete"
+        || method == "x.ai/session/update_mcp_servers"
+    {
+        return Some(("other", ToolRisk::Privileged));
+    }
+    if matches!(
+        method,
+        "x.ai/fs/read_file"
+            | "x.ai/fs/list"
+            | "x.ai/fs/exists"
+            | "x.ai/search/content"
+            | "x.ai/git/branches"
+            | "x.ai/git/current_commit"
+            | "x.ai/git/diffs"
+            | "x.ai/git/files"
+            | "x.ai/git/git_repo_root"
+            | "x.ai/git/info"
+            | "x.ai/git/serialize_changes"
+            | "x.ai/git/status"
+            | "x.ai/git/worktree/list"
+    ) {
+        return read();
+    }
+    if matches!(
+        method,
+        "x.ai/fs/write_file"
+            | "x.ai/fs/delete_file"
+            | "x.ai/git/checkout"
+            | "x.ai/git/checkout_commit"
+            | "x.ai/git/checkout_session_head"
+            | "x.ai/git/commit"
+            | "x.ai/git/discard"
+            | "x.ai/git/stage"
+            | "x.ai/git/stash"
+            | "x.ai/git/unstage"
+            | "x.ai/git/worktree/apply"
+            | "x.ai/git/worktree/remove"
+            | "x.ai/rewind/execute"
+    ) {
+        return write();
+    }
+    None
+}
+
+fn issue_session_capability_lease(
+    session_id: &str,
+    surface_kind: crate::surface::SurfaceKind,
+    cwd: &std::path::Path,
+    work_workspace_id: Option<&crate::work_staging::WorkspaceId>,
+    provider_catalog_key: Option<&str>,
+    model_options: &[ModelOption],
+) -> Result<CapabilityLease> {
+    let provider_key = provider_catalog_key.unwrap_or("provider-route-unavailable");
+    let model_caps = provider_catalog_key
+        .and_then(|key| model_options.iter().find(|option| option.id == key))
+        .and_then(|option| serde_json::to_vec(&option.caps).ok())
+        .unwrap_or_else(|| b"model-caps-unavailable".to_vec());
+    let workspace_identity = work_workspace_id
+        .map(|id| id.as_str().as_bytes().to_vec())
+        .unwrap_or_else(|| cwd.to_string_lossy().as_bytes().to_vec());
+    let readable_roots = match surface_kind {
+        crate::surface::SurfaceKind::Code | crate::surface::SurfaceKind::Work => {
+            vec![cwd.to_path_buf()]
+        }
+        crate::surface::SurfaceKind::Chat | crate::surface::SurfaceKind::Cowork => Vec::new(),
+    };
+    let writable_roots = if surface_kind == crate::surface::SurfaceKind::Code {
+        vec![cwd.to_path_buf()]
+    } else {
+        Vec::new()
+    };
+
+    CapabilityLease::issue_root(LeaseRequest {
+        session_id: session_id.to_string(),
+        surface_kind,
+        agent_id: "main".to_string(),
+        parent_agent_id: None,
+        workspace_id_hash: hex_sha256(&workspace_identity),
+        provider_route_hash: hex_sha256(provider_key.as_bytes()),
+        model_caps_hash: hex_sha256(&model_caps),
+        visible_tools: surface_visible_tools(surface_kind),
+        readable_roots,
+        writable_roots,
+        denied_roots: Vec::new(),
+        mcp_inheritance: if surface_loads_configured_mcp(surface_kind) {
+            McpInheritance::All
+        } else {
+            McpInheritance::None
+        },
+        mcp_names: BTreeSet::new(),
+        policy_version: crate::surface::CURRENT_POLICY_VERSION,
+    })
+    .map_err(|error| anyhow!("CAPABILITY_LEASE_BLOCKED: {error}"))
+}
+
 /// 该层是否**要求引擎确认已应用**本地扩展隔离（`localExtensionsDisabled`）。
 ///
 /// 请求该策略与**验证它被应用**是两回事（codex W2-fe-b R3）：curated profile
@@ -216,11 +719,6 @@ pub async fn agent_start(
     if std::env::var("WANCODE_AUTOTEST").is_ok() {
         return Err("AUTOTEST 模式：前端会话启动被禁用".into());
     }
-    // Tear down any previous session first.
-    if let Some(old) = state.handle.lock().await.take() {
-        old.cancel.cancel();
-    }
-
     let intent = crate::surface_policy::NewSurfaceIntent::from_wire(surface.as_deref())
         .map_err(|e| crate::surface_policy::policy_blocked_message(&e))?;
     let requested_work_workspace = work_workspace_id
@@ -316,6 +814,7 @@ async fn start_inner_with_intent_and_workspace(
     new_intent: crate::surface_policy::NewSurfaceIntent,
     requested_work_workspace: Option<crate::work_staging::WorkspaceId>,
 ) -> Result<StartResult> {
+    let was_resumed = resume.is_some();
     // Make WanCode-managed API keys (stored in the OS keyring) visible to the
     // engine's `env_key` resolution for this process.
     // ── 启动不变量（v0.12.2）：零模型绝不进入引擎 ─────────────────
@@ -343,6 +842,12 @@ async fn start_inner_with_intent_and_workspace(
             None => None,
         }
     };
+    // Ledger integrity is an execution prerequisite. Open it before spawning
+    // the engine so a corrupt completed record cannot leave an unaudited live
+    // process or session behind.
+    let execution_ledger = state
+        .execution_ledger(&app)
+        .map_err(|error| anyhow!(error))?;
     match validate_startup_models() {
         StartupModels::Ok => {}
         StartupModels::NoModels => {
@@ -413,6 +918,43 @@ async fn start_inner_with_intent_and_workspace(
     // 在那个状态下 stash/丢弃会打错目标）。失败宁可「会话未启动」。
     if let Some(old) = state.handle.lock().await.take() {
         old.cancel.cancel();
+        let pending = std::mem::take(&mut *state.pending_permissions.lock().await);
+        for (_, receipt) in pending {
+            let _ = receipt.sender.send(None);
+        }
+        let context = EventContext {
+            session_id: old.session_id.0.to_string(),
+            surface_kind: old.surface_kind,
+            policy_version: crate::surface::CURRENT_POLICY_VERSION,
+            provider_catalog_key: old.provider_catalog_key,
+            turn_id: None,
+            step_id: None,
+            call_id: None,
+            agent_id: Some(old.capability_lease.agent_id.clone()),
+        };
+        for (kind, resource_id_hash) in state
+            .resource_registry
+            .release_all(&old.capability_lease)
+            .map_err(|error| anyhow!("RESOURCE_RELEASE_FAILED: {error}"))?
+        {
+            execution_ledger
+                .append(
+                    context.clone(),
+                    ExecutionEventKind::ResourceReleased {
+                        resource_kind: resource_kind_code(kind).to_string(),
+                        resource_id_hash,
+                    },
+                )
+                .map_err(|error| anyhow!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))?;
+        }
+        execution_ledger
+            .append(
+                context,
+                ExecutionEventKind::SessionEnded {
+                    reason: SessionEndReason::Cancelled,
+                },
+            )
+            .map_err(|error| anyhow!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))?;
     }
 
     // ── Config (mirrors headless.rs) ────────────────────────────────
@@ -779,6 +1321,48 @@ async fn start_inner_with_intent_and_workspace(
         })
         .unwrap_or_default();
 
+    let capability_lease = Arc::new(
+        issue_session_capability_lease(
+            session_id.0.as_ref(),
+            surface_binding.surface_kind,
+            &cwd,
+            surface_binding.workspace_id.as_ref(),
+            current_model_id.as_deref(),
+            &model_options,
+        )
+        .inspect_err(|_error| {
+            cancel.cancel();
+        })?,
+    );
+
+    // Binding + crash marker + ledger are one publication boundary: only after
+    // the immutable lease and all durable records succeed may a send-capable
+    // handle reach the UI.
+    let ledger_context = EventContext {
+        session_id: session_id.0.to_string(),
+        surface_kind: surface_binding.surface_kind,
+        policy_version: crate::surface::CURRENT_POLICY_VERSION,
+        provider_catalog_key: current_model_id.clone(),
+        turn_id: None,
+        step_id: None,
+        call_id: None,
+        agent_id: Some(capability_lease.agent_id.clone()),
+    };
+    let workspace_fingerprint = Some(hex_sha256(cwd.to_string_lossy().as_bytes()));
+    for event in [
+        ExecutionEventKind::SessionStarted {
+            resumed: was_resumed,
+            workspace_fingerprint,
+        },
+        ExecutionEventKind::SurfaceBound,
+        ExecutionEventKind::PolicyApplied,
+    ] {
+        if let Err(error) = execution_ledger.append(ledger_context.clone(), event) {
+            cancel.cancel();
+            return Err(anyhow!("EXECUTION_LEDGER_APPEND_FAILED: {error}"));
+        }
+    }
+
     *state.handle.lock().await = Some(AgentHandle {
         acp_tx: acp_tx.clone(),
         session_id: session_id.clone(),
@@ -786,6 +1370,8 @@ async fn start_inner_with_intent_and_workspace(
         cwd: cwd.clone(),
         surface_kind: surface_binding.surface_kind,
         work_workspace_id: surface_binding.workspace_id.clone(),
+        provider_catalog_key: current_model_id.clone(),
+        capability_lease,
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
@@ -879,10 +1465,14 @@ fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_j
 #[cfg(test)]
 mod surface_launchable_tests {
     use super::{
-        surface_launchable, surface_loads_configured_mcp,
-        surface_requires_local_extension_isolation,
+        ext_method_capability, issue_session_capability_lease, surface_launchable,
+        surface_loads_configured_mcp, surface_requires_local_extension_isolation,
+        terminal_id_from_response, terminal_resource_action, retain_owned_terminals,
+        validate_pending_permission, PendingPermission, TerminalResourceAction,
     };
+    use crate::capability_broker::{McpInheritance, ResourceKind, ResourceRegistry, ToolRisk};
     use crate::surface::SurfaceKind;
+    use std::collections::BTreeSet;
 
     #[test]
     fn chat_code_work_launchable_cowork_gated() {
@@ -947,6 +1537,181 @@ mod surface_launchable_tests {
         assert!(!surface_loads_configured_mcp(SurfaceKind::Chat));
         assert!(!surface_loads_configured_mcp(SurfaceKind::Cowork));
     }
+
+    #[test]
+    fn extension_resource_commands_cannot_bypass_surface_capabilities() {
+        assert_eq!(
+            ext_method_capability("x.ai/terminal/pty/create"),
+            Some(("execute", ToolRisk::Process))
+        );
+        assert_eq!(
+            ext_method_capability("x.ai/mcp/toggle_tool"),
+            Some(("other", ToolRisk::Privileged))
+        );
+        assert_eq!(
+            ext_method_capability("x.ai/fs/read_file"),
+            Some(("read", ToolRisk::ReadOnly))
+        );
+        assert_eq!(
+            ext_method_capability("x.ai/git/stage"),
+            Some(("edit", ToolRisk::WorkspaceWrite))
+        );
+        assert_eq!(ext_method_capability("x.ai/session/info"), None);
+
+        let root = tempfile::tempdir().unwrap();
+        let code = issue_session_capability_lease(
+            "code-extension",
+            SurfaceKind::Code,
+            root.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        let work = issue_session_capability_lease(
+            "work-extension",
+            SurfaceKind::Work,
+            root.path(),
+            None,
+            Some("glm:work"),
+            &[],
+        )
+        .unwrap();
+        let (tool, risk) = ext_method_capability("x.ai/terminal/create").unwrap();
+        assert!(code.authorize_tool(tool, risk).is_ok());
+        assert!(work.authorize_tool(tool, risk).is_err());
+        let (tool, risk) = ext_method_capability("x.ai/fs/read_file").unwrap();
+        assert!(work.authorize_tool(tool, risk).is_ok());
+    }
+
+    #[test]
+    fn terminal_handles_are_classified_and_filtered_by_lease_owner() {
+        assert_eq!(terminal_resource_action("x.ai/terminal/pty/create"), TerminalResourceAction::Create);
+        assert_eq!(terminal_resource_action("x.ai/terminal/pty/input"), TerminalResourceAction::Use);
+        assert_eq!(terminal_resource_action("x.ai/terminal/kill"), TerminalResourceAction::Release);
+
+        let root = tempfile::tempdir().unwrap();
+        let owner = issue_session_capability_lease(
+            "terminal-owner", SurfaceKind::Code, root.path(), None,
+            Some("deepseek:chat"), &[],
+        ).unwrap();
+        let sibling = issue_session_capability_lease(
+            "terminal-sibling", SurfaceKind::Code, root.path(), None,
+            Some("deepseek:chat"), &[],
+        ).unwrap();
+        let registry = ResourceRegistry::default();
+        registry.register(&owner, ResourceKind::Terminal, "terminal-owned").unwrap();
+        registry.register(&sibling, ResourceKind::Terminal, "terminal-sibling").unwrap();
+
+        let mut response = serde_json::json!({
+            "result": {"terminals": [
+                {"terminalId": "terminal-owned"},
+                {"terminalId": "terminal-sibling"},
+                {"terminalId": "terminal-unregistered"}
+            ]},
+            "error": null
+        });
+        retain_owned_terminals(&mut response, &registry, &owner);
+        assert_eq!(response["result"]["terminals"], serde_json::json!([
+            {"terminalId": "terminal-owned"}
+        ]));
+        assert_eq!(
+            terminal_id_from_response(&serde_json::json!({
+                "result": {"terminalId": "terminal-new"}
+            })),
+            Some("terminal-new")
+        );
+    }
+
+    #[test]
+    fn approval_receipt_is_single_binding_and_option_scoped() {
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let pending = PendingPermission {
+            sender,
+            session_id: "session-a".into(),
+            lease_id: "lease-a".into(),
+            call_id: "call-a".into(),
+            action_fingerprint: "f".repeat(64),
+            option_ids: BTreeSet::from(["allow-once".into(), "deny".into()]),
+        };
+        assert_eq!(
+            validate_pending_permission(
+                &pending,
+                "session-a",
+                "lease-a",
+                Some("allow-once"),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_pending_permission(&pending, "session-b", "lease-a", Some("allow-once")),
+            Err("stale_receipt")
+        );
+        assert_eq!(
+            validate_pending_permission(&pending, "session-a", "lease-b", Some("allow-once")),
+            Err("stale_receipt")
+        );
+        assert_eq!(
+            validate_pending_permission(&pending, "session-a", "lease-a", Some("forged")),
+            Err("invalid_option")
+        );
+    }
+
+    #[test]
+    fn session_lease_matches_surface_roots_and_mcp_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let code = issue_session_capability_lease(
+            "code-session",
+            SurfaceKind::Code,
+            root.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(code.readable_roots, code.writable_roots);
+        assert_eq!(code.mcp_inheritance, McpInheritance::All);
+        assert!(code.visible_tools.contains_key("execute"));
+
+        let work = issue_session_capability_lease(
+            "work-session",
+            SurfaceKind::Work,
+            root.path(),
+            None,
+            Some("glm:work"),
+            &[],
+        )
+        .unwrap();
+        assert!(!work.readable_roots.is_empty());
+        assert!(work.writable_roots.is_empty());
+        assert_eq!(work.mcp_inheritance, McpInheritance::None);
+        assert!(!work.visible_tools.contains_key("execute"));
+
+        let chat = issue_session_capability_lease(
+            "chat-session",
+            SurfaceKind::Chat,
+            root.path(),
+            None,
+            Some("glm:chat"),
+            &[],
+        )
+        .unwrap();
+        assert!(chat.readable_roots.is_empty());
+        assert!(chat.writable_roots.is_empty());
+        assert_eq!(chat.mcp_inheritance, McpInheritance::None);
+
+        assert!(
+            issue_session_capability_lease(
+                "cowork-session",
+                SurfaceKind::Cowork,
+                root.path(),
+                None,
+                Some("glm:cowork"),
+                &[],
+            )
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -999,6 +1764,366 @@ mod post_start_refresh_tests {
     }
 }
 
+fn acp_tool_category(kind: acp::ToolKind) -> String {
+    let wire = serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "other".to_string());
+    format!("acp_{wire}")
+}
+
+fn permission_decision(kind: &acp::PermissionOptionKind) -> ApprovalDecision {
+    match kind {
+        acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways => {
+            ApprovalDecision::Approved
+        }
+        acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways => {
+            ApprovalDecision::Denied
+        }
+        _ => ApprovalDecision::Cancelled,
+    }
+}
+
+fn json_fingerprint(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(value) => serde_json::to_vec(value)
+            .map(|bytes| hex_sha256(&bytes))
+            .unwrap_or_else(|_| hex_sha256(b"serialization_failed")),
+        None => hex_sha256(b"null"),
+    }
+}
+
+fn tool_resource_id(session_id: &str, call_id: &str) -> String {
+    format!("{session_id}\u{1f}{call_id}")
+}
+
+async fn record_tool_started(
+    state: &AgentState,
+    session_id: &str,
+    call_id: &str,
+    tool_name: String,
+    raw_input: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let key = (session_id.to_string(), call_id.to_string());
+    if state.ledger_terminal_calls.lock().await.contains(&key) {
+        return Ok(());
+    }
+    {
+        let mut calls = state.ledger_tool_calls.lock().await;
+        if calls.contains_key(&key) {
+            return Ok(());
+        }
+        calls.insert(key.clone(), tool_name.clone());
+    }
+    let lease = state.live_capability_lease(session_id).await?;
+    let resource_id = tool_resource_id(session_id, call_id);
+    let resource_id_hash = match state
+        .resource_registry
+        .register(&lease, ResourceKind::Job, &resource_id)
+    {
+        Ok(hash) => hash,
+        Err(error) => {
+            state.ledger_tool_calls.lock().await.remove(&key);
+            return Err(format!("RESOURCE_OWNERSHIP_BLOCKED: {error}"));
+        }
+    };
+    if let Err(error) = state
+        .append_live_event(
+            session_id,
+            Some(call_id.to_string()),
+            ExecutionEventKind::ResourceCreated {
+                resource_kind: "job".to_string(),
+                resource_id_hash,
+            },
+        )
+        .await
+    {
+        let _ = state
+            .resource_registry
+            .release(&lease, ResourceKind::Job, &resource_id);
+        state.ledger_tool_calls.lock().await.remove(&key);
+        return Err(error);
+    }
+    if let Err(error) = state
+        .append_live_event(
+            session_id,
+            Some(call_id.to_string()),
+            ExecutionEventKind::ToolCalled {
+                tool_name,
+                arguments_fingerprint: json_fingerprint(raw_input),
+            },
+        )
+        .await
+    {
+        let _ = state
+            .resource_registry
+            .release(&lease, ResourceKind::Job, &resource_id);
+        state.ledger_tool_calls.lock().await.remove(&key);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn record_tool_terminal(
+    state: &AgentState,
+    session_id: &str,
+    call_id: &str,
+    status: acp::ToolCallStatus,
+    kind: Option<acp::ToolKind>,
+    raw_input: Option<&serde_json::Value>,
+    raw_output: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    use acp::ToolCallStatus::{Completed, Failed};
+    if !matches!(status, Completed | Failed) {
+        return Ok(());
+    }
+    let key = (session_id.to_string(), call_id.to_string());
+    if state.ledger_terminal_calls.lock().await.contains(&key) {
+        return Ok(());
+    }
+    let fallback_name = acp_tool_category(kind.unwrap_or_default());
+    record_tool_started(
+        state,
+        session_id,
+        call_id,
+        fallback_name.clone(),
+        raw_input,
+    )
+    .await?;
+    let tool_name = state
+        .ledger_tool_calls
+        .lock()
+        .await
+        .remove(&key)
+        .unwrap_or(fallback_name);
+    let lease = state.live_capability_lease(session_id).await?;
+    let resource_id = tool_resource_id(session_id, call_id);
+    state
+        .resource_registry
+        .authorize(&lease, ResourceKind::Job, &resource_id)
+        .map_err(|error| format!("RESOURCE_OWNERSHIP_BLOCKED: {error}"))?;
+    let event = match status {
+        Completed => ExecutionEventKind::ToolCompleted {
+            tool_name,
+            result_fingerprint: json_fingerprint(raw_output),
+        },
+        Failed => ExecutionEventKind::ToolFailed {
+            tool_name,
+            result_fingerprint: json_fingerprint(raw_output),
+            error_code: "tool_execution_failed".to_string(),
+        },
+        _ => return Ok(()),
+    };
+    state
+        .append_live_event(session_id, Some(call_id.to_string()), event)
+        .await?;
+    // The tool terminal fact is durable now. Mark it before resource cleanup
+    // so a cleanup/audit failure cannot cause ACP retries to append a second
+    // terminal result.
+    state.ledger_terminal_calls.lock().await.insert(key);
+    state
+        .resource_registry
+        .release(&lease, ResourceKind::Job, &resource_id)
+        .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))?;
+    state
+        .append_live_event(
+            session_id,
+            Some(call_id.to_string()),
+            ExecutionEventKind::ResourceReleased {
+                resource_kind: "job".to_string(),
+                resource_id_hash: hex_sha256(resource_id.as_bytes()),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn record_acp_session_update(
+    state: &AgentState,
+    session_id: &str,
+    update: &acp::SessionUpdate,
+) -> Result<(), String> {
+    match update {
+        acp::SessionUpdate::ToolCall(call) => {
+            let call_id = call.tool_call_id.0.as_ref();
+            record_tool_started(
+                state,
+                session_id,
+                call_id,
+                acp_tool_category(call.kind),
+                call.raw_input.as_ref(),
+            )
+            .await?;
+            record_tool_terminal(
+                state,
+                session_id,
+                call_id,
+                call.status,
+                Some(call.kind),
+                call.raw_input.as_ref(),
+                call.raw_output.as_ref(),
+            )
+            .await
+        }
+        acp::SessionUpdate::ToolCallUpdate(update) => {
+            record_tool_terminal(
+                state,
+                session_id,
+                update.tool_call_id.0.as_ref(),
+                update.fields.status.unwrap_or_default(),
+                update.fields.kind,
+                update.fields.raw_input.as_ref(),
+                update.fields.raw_output.as_ref(),
+            )
+            .await
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod execution_ledger_projection_tests {
+    use super::*;
+
+    async fn ledger_state() -> (AgentState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Arc::new(ExecutionLedger::open(dir.path()).unwrap());
+        let capability_lease = Arc::new(
+            issue_session_capability_lease(
+                "s1",
+                crate::surface::SurfaceKind::Code,
+                dir.path(),
+                None,
+                Some("deepseek:chat"),
+                &[],
+            )
+            .unwrap(),
+        );
+        let state = AgentState::default();
+        state.execution_ledger.set(Ok(ledger)).unwrap();
+        let (tx, _rx): (AcpAgentTx, _) = tokio::sync::mpsc::unbounded_channel();
+        *state.handle.lock().await = Some(AgentHandle {
+            acp_tx: tx,
+            session_id: acp::SessionId::new("s1"),
+            cancel: CancellationToken::new(),
+            cwd: dir.path().to_path_buf(),
+            surface_kind: crate::surface::SurfaceKind::Code,
+            work_workspace_id: None,
+            provider_catalog_key: Some("deepseek:chat".into()),
+            capability_lease,
+        });
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert("s1".into(), "t1".into());
+        (state, dir)
+    }
+
+    #[test]
+    fn permission_option_kind_maps_allow_reject_and_future_fail_closed() {
+        assert_eq!(
+            permission_decision(&acp::PermissionOptionKind::AllowOnce),
+            ApprovalDecision::Approved
+        );
+        assert_eq!(
+            permission_decision(&acp::PermissionOptionKind::RejectAlways),
+            ApprovalDecision::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_projection_has_one_start_and_one_terminal_without_raw_payloads() {
+        let (state, dir) = ledger_state().await;
+        let raw_input = serde_json::json!({"command": "secret-command"});
+        let start = acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new("c1", "human title with secret")
+                .kind(acp::ToolKind::Execute)
+                .raw_input(Some(raw_input)),
+        );
+        record_acp_session_update(&state, "s1", &start)
+            .await
+            .unwrap();
+        let terminal = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            "c1",
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(Some(serde_json::json!({"stdout": "private-output"}))),
+        ));
+        record_acp_session_update(&state, "s1", &terminal)
+            .await
+            .unwrap();
+        record_acp_session_update(&state, "s1", &terminal)
+            .await
+            .unwrap();
+
+        let records = state
+            .execution_ledger
+            .get()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read_all()
+            .unwrap();
+        assert_eq!(records.len(), 4);
+        assert!(matches!(
+            &records[0].event,
+            ExecutionEventKind::ResourceCreated { .. }
+        ));
+        assert!(matches!(
+            &records[1].event,
+            ExecutionEventKind::ToolCalled { .. }
+        ));
+        assert!(matches!(
+            &records[2].event,
+            ExecutionEventKind::ToolCompleted { .. }
+        ));
+        assert!(matches!(
+            &records[3].event,
+            ExecutionEventKind::ResourceReleased { .. }
+        ));
+        let persisted = std::fs::read_to_string(dir.path().join(crate::execution_ledger::LEDGER_FILE_NAME))
+            .unwrap();
+        assert!(!persisted.contains("secret-command"));
+        assert!(!persisted.contains("human title"));
+        assert!(!persisted.contains("private-output"));
+    }
+
+    #[tokio::test]
+    async fn terminal_update_before_base_is_synthesized_once_and_late_base_is_ignored() {
+        let (state, _dir) = ledger_state().await;
+        let terminal = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            "c-late",
+            acp::ToolCallUpdateFields::new()
+                .kind(Some(acp::ToolKind::Read))
+                .status(Some(acp::ToolCallStatus::Failed)),
+        ));
+        record_acp_session_update(&state, "s1", &terminal)
+            .await
+            .unwrap();
+        let late_base = acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new("c-late", "late title").kind(acp::ToolKind::Read),
+        );
+        record_acp_session_update(&state, "s1", &late_base)
+            .await
+            .unwrap();
+
+        let records = state
+            .execution_ledger
+            .get()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read_all()
+            .unwrap();
+        assert_eq!(records.len(), 4);
+        assert!(matches!(
+            &records[2].event,
+            ExecutionEventKind::ToolFailed { .. }
+        ));
+    }
+}
+
 async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
     match msg {
         AcpClientMessage::SessionNotification(boxed) => {
@@ -1007,6 +2132,27 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
                 let state: State<'_, AgentState> = app.state();
                 let bg = state.background_sessions.lock().await;
                 if bg.contains(boxed.request.session_id.0.as_ref()) {
+                    let _ = boxed.response_tx.send(Ok(()));
+                    return;
+                }
+            }
+            let session_id = boxed.request.session_id.0.to_string();
+            {
+                let state: State<'_, AgentState> = app.state();
+                if let Err(error) = record_acp_session_update(
+                    &state,
+                    &session_id,
+                    &boxed.request.update,
+                )
+                .await
+                {
+                    tracing::error!("{error}");
+                    let guard = state.handle.lock().await;
+                    if let Some(handle) = guard.as_ref() {
+                        if handle.session_id.0.as_ref() == session_id {
+                            handle.cancel.cancel();
+                        }
+                    }
                     let _ = boxed.response_tx.send(Ok(()));
                     return;
                 }
@@ -1031,21 +2177,6 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessage::RequestPermission(req) => {
-            // 无头 smoke：自动选第一个选项（引擎约定首项为放行），否则
-            // S3/S4 的命令权限会等前端 600 秒。仅 AUTOTEST 模式生效。
-            if std::env::var("WANCODE_AUTOTEST").is_ok() {
-                let first = req.request.options.first().map(|o| o.option_id.clone());
-                let outcome = match first {
-                    Some(id) => acp::RequestPermissionOutcome::Selected(
-                        acp::SelectedPermissionOutcome::new(id),
-                    ),
-                    None => acp::RequestPermissionOutcome::Cancelled,
-                };
-                let _ = req
-                    .response_tx
-                    .send(Ok(acp::RequestPermissionResponse::new(outcome)));
-                return;
-            }
             let state: State<'_, AgentState> = app.state();
             // 后台会话理论上是只读（plan）模式；万一有工具越权申请，
             // 直接取消而不是等前端 600 秒——前端根本看不见这个会话。
@@ -1061,8 +2192,93 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
                 return;
             }
             let id = state.next_permission_id.fetch_add(1, Ordering::Relaxed);
+            let approval_id = format!("ap-{id:016x}");
+            let session_id = req.request.session_id.0.to_string();
+            let call_id = req.request.tool_call.tool_call_id.0.to_string();
+            let action_fingerprint = serde_json::to_vec(&req.request.tool_call)
+                .map(|bytes| hex_sha256(&bytes))
+                .unwrap_or_else(|_| hex_sha256(b"serialization_failed"));
+            let lease_id = match state.live_capability_lease(&session_id).await {
+                Ok(lease) => lease.lease_id.clone(),
+                Err(error) => {
+                    tracing::error!("stale permission request rejected: {error}");
+                    let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
+                        acp::RequestPermissionOutcome::Cancelled,
+                    )));
+                    return;
+                }
+            };
+            if let Err(error) = state
+                .append_live_event(
+                    &session_id,
+                    Some(call_id.clone()),
+                    ExecutionEventKind::ApprovalRequested {
+                        approval_id: approval_id.clone(),
+                        action_fingerprint: action_fingerprint.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::error!("{error}");
+                if let Some(handle) = state.handle.lock().await.as_ref() {
+                    handle.cancel.cancel();
+                }
+                let _ = req.response_tx.send(Ok(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Cancelled,
+                )));
+                return;
+            }
+
+            let option_kinds: HashMap<String, acp::PermissionOptionKind> = req
+                .request
+                .options
+                .iter()
+                .map(|option| (option.option_id.0.to_string(), option.kind))
+                .collect();
+            // 无头 smoke：自动选第一个选项（引擎约定首项为放行），否则
+            // S3/S4 的命令权限会等前端 600 秒。仅 AUTOTEST 模式生效。
+            if std::env::var("WANCODE_AUTOTEST").is_ok() {
+                let selected = req.request.options.first().map(|option| option.option_id.clone());
+                let decision = selected
+                    .as_ref()
+                    .and_then(|option_id| option_kinds.get(option_id.0.as_ref()))
+                    .map(permission_decision)
+                    .unwrap_or(ApprovalDecision::Cancelled);
+                let persisted = state
+                    .append_live_event(
+                        &session_id,
+                        Some(call_id),
+                        ExecutionEventKind::ApprovalResolved {
+                            approval_id,
+                            decision,
+                        },
+                    )
+                    .await;
+                let outcome = match (persisted, selected) {
+                    (Ok(()), Some(option_id)) => acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(option_id),
+                    ),
+                    (Err(error), _) => {
+                        tracing::error!("{error}");
+                        acp::RequestPermissionOutcome::Cancelled
+                    }
+                    (_, None) => acp::RequestPermissionOutcome::Cancelled,
+                };
+                let _ = req
+                    .response_tx
+                    .send(Ok(acp::RequestPermissionResponse::new(outcome)));
+                return;
+            }
+
             let (tx, rx) = oneshot::channel::<Option<String>>();
-            state.pending_permissions.lock().await.insert(id, tx);
+            state.pending_permissions.lock().await.insert(id, PendingPermission {
+                sender: tx,
+                session_id: session_id.clone(),
+                lease_id,
+                call_id: call_id.clone(),
+                action_fingerprint: action_fingerprint.clone(),
+                option_ids: option_kinds.keys().cloned().collect(),
+            });
 
             let payload = serde_json::json!({
                 "id": id,
@@ -1071,16 +2287,44 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
             let _ = app.emit("agent://permission", payload);
 
             // Wait for the frontend's decision (10 min timeout → cancel).
+            let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let decision =
                     tokio::time::timeout(std::time::Duration::from_secs(600), rx).await;
-                let outcome = match decision {
-                    Ok(Ok(Some(option_id))) => acp::RequestPermissionOutcome::Selected(
+                let selected = match decision {
+                    Ok(Ok(Some(option_id))) => Some(option_id),
+                    _ => None,
+                };
+                let audit_decision = selected
+                    .as_ref()
+                    .and_then(|option_id| option_kinds.get(option_id))
+                    .map(permission_decision)
+                    .unwrap_or(ApprovalDecision::Cancelled);
+                let state: State<'_, AgentState> = app.state();
+                let persisted = state
+                    .append_live_event(
+                        &session_id,
+                        Some(call_id),
+                        ExecutionEventKind::ApprovalResolved {
+                            approval_id,
+                            decision: audit_decision,
+                        },
+                    )
+                    .await;
+                let outcome = match (persisted, selected) {
+                    (Ok(()), Some(option_id)) => acp::RequestPermissionOutcome::Selected(
                         acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(
                             option_id,
                         )),
                     ),
-                    _ => acp::RequestPermissionOutcome::Cancelled,
+                    (Err(error), _) => {
+                        tracing::error!("{error}");
+                        if let Some(handle) = state.handle.lock().await.as_ref() {
+                            handle.cancel.cancel();
+                        }
+                        acp::RequestPermissionOutcome::Cancelled
+                    }
+                    (_, None) => acp::RequestPermissionOutcome::Cancelled,
                 };
                 let _ = req
                     .response_tx
@@ -1251,6 +2495,19 @@ pub struct PromptImage {
     pub mime: String,
 }
 
+/// Read-only, already-redacted execution diagnostics for the timeline/export
+/// UI. The command never returns prompt bodies, tool arguments or tool output.
+#[tauri::command]
+pub fn agent_execution_diagnostics(
+    app: AppHandle,
+    state: State<'_, AgentState>,
+) -> Result<crate::execution_ledger::LedgerDiagnostics, String> {
+    state
+        .execution_ledger(&app)?
+        .diagnostics()
+        .map_err(|error| error.to_string())
+}
+
 /// Send one user prompt (optionally with pasted images for vision models);
 /// resolves when the turn completes.
 #[tauri::command]
@@ -1260,14 +2517,34 @@ pub async fn agent_prompt(
     text: String,
     images: Option<Vec<PromptImage>>,
 ) -> Result<(), String> {
-    let (acp_tx, session_id, surface_kind, work_workspace_id) = {
+    let (
+        acp_tx,
+        session_id,
+        surface_kind,
+        work_workspace_id,
+        provider_catalog_key,
+        agent_id,
+        capability_lease,
+    ) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
+        h.capability_lease
+            .validate()
+            .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
+        if h.capability_lease.session_id != h.session_id.0.as_ref()
+            || h.capability_lease.surface_kind != h.surface_kind
+            || h.capability_lease.policy_version != crate::surface::CURRENT_POLICY_VERSION
+        {
+            return Err("CAPABILITY_LEASE_BINDING_MISMATCH".to_string());
+        }
         (
             h.acp_tx.clone(),
             h.session_id.clone(),
             h.surface_kind,
             h.work_workspace_id.clone(),
+            h.provider_catalog_key.clone(),
+            h.capability_lease.agent_id.clone(),
+            h.capability_lease.clone(),
         )
     };
     let text = if surface_kind == crate::surface::SurfaceKind::Work {
@@ -1284,12 +2561,111 @@ pub async fn agent_prompt(
     } else {
         text
     };
+    let images = images.unwrap_or_default();
+    let evidence = prompt_evidence(
+        &text,
+        images
+            .iter()
+            .map(|image| (image.mime.as_str(), image.data.as_str())),
+    );
+    let tool_schema_sha256 = serde_json::to_vec(&capability_lease.visible_tools)
+        .map(|bytes| hex_sha256(&bytes))
+        .map_err(|error| format!("TOOL_SCHEMA_FINGERPRINT_FAILED: {error}"))?;
+    let provider_key = provider_catalog_key
+        .as_deref()
+        .unwrap_or("provider-route-unavailable");
+    let request_fingerprint = FrozenRequestEvidence {
+        prompt_sha256: &evidence.sha256,
+        tool_schema_sha256: &tool_schema_sha256,
+        provider_catalog_key: provider_key,
+        model_caps_sha256: &capability_lease.model_caps_hash,
+        memory_context_sha256: None,
+    }
+    .fingerprint()
+    .map_err(|error| format!("REQUEST_FINGERPRINT_FAILED: {error}"))?;
+    let turn_id = state.next_turn_id()?;
+    let session_id_string = session_id.0.to_string();
+    let execution_ledger = state.execution_ledger(&app)?;
+    {
+        let mut active_turns = state.active_turns.lock().await;
+        if active_turns.contains_key(&session_id_string) {
+            return Err("TURN_ALREADY_ACTIVE: 当前会话已有未结束回合".to_string());
+        }
+        active_turns.insert(session_id_string.clone(), turn_id.clone());
+    }
+    let ledger_context = EventContext {
+        session_id: session_id_string.clone(),
+        surface_kind,
+        policy_version: crate::surface::CURRENT_POLICY_VERSION,
+        provider_catalog_key,
+        turn_id: Some(turn_id),
+        step_id: None,
+        call_id: None,
+        agent_id: Some(agent_id),
+    };
+    if let Err(error) = execution_ledger.append(
+            ledger_context.clone(),
+            ExecutionEventKind::PromptSubmitted {
+                sha256: evidence.sha256,
+                byte_len: evidence.byte_len,
+                content_types: evidence.content_types,
+            },
+        ) {
+        state.active_turns.lock().await.remove(&session_id_string);
+        return Err(format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"));
+    }
+    if let Err(error) =
+        execution_ledger.append(ledger_context.clone(), ExecutionEventKind::TurnStarted)
+    {
+        state.active_turns.lock().await.remove(&session_id_string);
+        return Err(format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"));
+    }
+    if let Err(error) = execution_ledger.append(
+        ledger_context.clone(),
+        ExecutionEventKind::ProviderRequested {
+            request_fingerprint,
+        },
+    ) {
+        state.active_turns.lock().await.remove(&session_id_string);
+        return Err(format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"));
+    }
+
     let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
-    for img in images.unwrap_or_default() {
+    for img in images {
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(img.data, img.mime)));
     }
     let request = acp::PromptRequest::new(session_id, blocks);
     let result: Result<acp::PromptResponse, _> = acp_send(request, &acp_tx).await;
+    let (provider_event, terminal_event) = match &result {
+        Ok(_) => (
+            ExecutionEventKind::ProviderCompleted {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+            },
+            ExecutionEventKind::TurnEnded {
+                outcome: TurnOutcome::Completed,
+                error_code: None,
+            },
+        ),
+        Err(error) => {
+            let error_code = LedgerRedactor::error_code(&error.to_string()).to_string();
+            (
+                ExecutionEventKind::ProviderFailed {
+                    error_code: error_code.clone(),
+                    retryable: false,
+                },
+                ExecutionEventKind::TurnEnded {
+                    outcome: TurnOutcome::Failed,
+                    error_code: Some(error_code),
+                },
+            )
+        }
+    };
+    let terminal_ledger_result = execution_ledger
+        .append(ledger_context.clone(), provider_event)
+        .and_then(|_| execution_ledger.append(ledger_context, terminal_event));
+    state.active_turns.lock().await.remove(&session_id_string);
     let payload = match &result {
         Ok(resp) => serde_json::json!({
             "ok": true,
@@ -1298,6 +2674,8 @@ pub async fn agent_prompt(
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     let _ = app.emit("agent://turn-end", payload);
+    terminal_ledger_result
+        .map_err(|error| format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))?;
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -1308,14 +2686,36 @@ pub async fn agent_permission_respond(
     id: u64,
     option_id: Option<String>,
 ) -> Result<(), String> {
-    let sender = state.pending_permissions.lock().await.remove(&id);
-    match sender {
-        Some(tx) => {
-            let _ = tx.send(option_id);
-            Ok(())
-        }
-        None => Err(format!("没有待处理的权限请求 #{id}")),
+    let pending = state.pending_permissions.lock().await.remove(&id)
+        .ok_or_else(|| format!("没有待处理的权限请求 #{id}"))?;
+    let live_binding = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().map(|handle| (
+            handle.session_id.0.to_string(),
+            handle.capability_lease.lease_id.clone(),
+        ))
+    };
+    let validation = live_binding.as_ref().ok_or("stale_receipt").and_then(
+        |(session_id, lease_id)| validate_pending_permission(
+            &pending,
+            session_id,
+            lease_id,
+            option_id.as_deref(),
+        ),
+    );
+    if validation == Err("stale_receipt") {
+        let _ = pending.sender.send(None);
+        return Err(format!(
+            "APPROVAL_RECEIPT_STALE: #{id} session={} call={} action={}",
+            pending.session_id, pending.call_id, pending.action_fingerprint
+        ));
     }
+    if validation == Err("invalid_option") {
+        let _ = pending.sender.send(None);
+        return Err(format!("APPROVAL_OPTION_INVALID: #{id}"));
+    }
+    let _ = pending.sender.send(option_id);
+    Ok(())
 }
 
 
@@ -1371,12 +2771,91 @@ pub(crate) async fn ext_call(
             }
         }
     }
+    if let Some((tool, maximum_risk)) = ext_method_capability(method) {
+        let (lease, cwd) = {
+            let guard = state.handle.lock().await;
+            let handle = guard.as_ref().ok_or("会话未启动")?;
+            (handle.capability_lease.clone(), handle.cwd.clone())
+        };
+        lease
+            .authorize_tool(tool, maximum_risk)
+            .map_err(|error| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: {error}"))?;
+        if method.starts_with("x.ai/fs/") {
+            let raw_path = params
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: missing path"))?;
+            let raw_path = std::path::Path::new(raw_path);
+            let target = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                cwd.join(raw_path)
+            };
+            let authorization = if maximum_risk == ToolRisk::ReadOnly {
+                lease.authorize_read(&target)
+            } else {
+                lease.authorize_write(&target)
+            };
+            authorization
+                .map_err(|error| format!("CAPABILITY_PATH_BLOCKED: {method}: {error}"))?;
+        }
+    }
+    let terminal_action = terminal_resource_action(method);
+    let terminal_binding = if terminal_action == TerminalResourceAction::None {
+        None
+    } else {
+        let guard = state.handle.lock().await;
+        let handle = guard.as_ref().ok_or("会话未启动")?;
+        handle.capability_lease.validate()
+            .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
+        Some((handle.capability_lease.clone(), handle.session_id.0.to_string()))
+    };
+    if matches!(terminal_action, TerminalResourceAction::Use | TerminalResourceAction::Release) {
+        let terminal_id = terminal_id_from_params(&params).ok_or_else(|| {
+            format!("RESOURCE_OWNERSHIP_BLOCKED: {method}: missing terminalId")
+        })?;
+        let (lease, _) = terminal_binding.as_ref().expect("terminal action must carry a lease");
+        state.authorize_live_resource(lease, ResourceKind::Terminal, terminal_id)?;
+    }
     let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
     let resp: acp::ExtResponse =
         acp_send(acp::ExtRequest::new(method.to_string(), raw.into()), &acp_tx)
             .await
             .map_err(|e| e.to_string())?;
-    serde_json::from_str(resp.0.get()).map_err(|e| e.to_string())
+    let mut response: serde_json::Value =
+        serde_json::from_str(resp.0.get()).map_err(|e| e.to_string())?;
+    if let Some((lease, lease_session_id)) = terminal_binding.as_ref() {
+        if extension_response_succeeded(&response) {
+            match terminal_action {
+                TerminalResourceAction::Create => {
+                    let terminal_id = terminal_id_from_response(&response)
+                        .ok_or_else(|| format!("RESOURCE_OWNERSHIP_BLOCKED: {method}: missing terminalId response"))?
+                        .to_string();
+                    state.register_live_resource(
+                        lease_session_id,
+                        lease,
+                        ResourceKind::Terminal,
+                        &terminal_id,
+                    ).await?;
+                }
+                TerminalResourceAction::List => {
+                    retain_owned_terminals(&mut response, &state.resource_registry, lease);
+                }
+                TerminalResourceAction::Release => {
+                    let terminal_id = terminal_id_from_params(&params)
+                        .expect("authorized terminal release must include terminalId");
+                    state.release_live_resource(
+                        lease_session_id,
+                        lease,
+                        ResourceKind::Terminal,
+                        terminal_id,
+                    ).await?;
+                }
+                TerminalResourceAction::Use | TerminalResourceAction::None => {}
+            }
+        }
+    }
+    Ok(response)
 }
 
 /// Fire-and-forget ext *notification* (no response), e.g. the `x.ai/queue/*`
@@ -1400,6 +2879,29 @@ pub(crate) async fn ext_notify(
         // 与条目 owner 精确匹配——注入 "wancode" 会永远匹配不上，整族操作
         // 静默 no-op（用户实报"按钮没反应"）。与 yolo_mode_changed 同一教训：
         // 单客户端应用不传标识（None=匹配全部）才是正确姿势。
+    }
+    if let Some((tool, maximum_risk)) = ext_method_capability(method) {
+        let lease = {
+            let guard = state.handle.lock().await;
+            guard
+                .as_ref()
+                .ok_or("会话未启动")?
+                .capability_lease
+                .clone()
+        };
+        lease
+            .authorize_tool(tool, maximum_risk)
+            .map_err(|error| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: {error}"))?;
+    }
+    if terminal_resource_action(method) == TerminalResourceAction::Use {
+        let terminal_id = terminal_id_from_params(&params).ok_or_else(|| {
+            format!("RESOURCE_OWNERSHIP_BLOCKED: {method}: missing terminalId")
+        })?;
+        let lease = {
+            let guard = state.handle.lock().await;
+            guard.as_ref().ok_or("会话未启动")?.capability_lease.clone()
+        };
+        state.authorize_live_resource(&lease, ResourceKind::Terminal, terminal_id)?;
     }
     let raw = serde_json::value::to_raw_value(&params).map_err(|e| e.to_string())?;
     let _: () = acp_send(

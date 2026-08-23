@@ -1,6 +1,10 @@
 mod agent;
 mod config_core;
 mod crash_recovery;
+pub mod capability_broker;
+pub mod execution_ledger;
+pub mod harness_scheduler;
+pub mod provider_profile;
 mod git_ops;
 mod skills_ops;
 mod engine_ops;
@@ -34,6 +38,7 @@ mod plugin_lifecycle_probe;
 mod compat_contracts;
 
 use xai_grok_paths::AbsPathBuf;
+use tauri::Manager;
 
 /// M0.4 minimal-link proof: validate the path with grok-build's
 /// `xai-grok-paths` types, then return the file contents.
@@ -45,6 +50,7 @@ fn read_file(path: String) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // tests stay beside the command they exercise
 mod tests {
     use super::*;
 
@@ -157,7 +163,6 @@ pub fn run() {
             // 启动即触发迁移；agent_start（含 autotest 的 start_inner 路径）
             // 都在 start_inner 顶部等待同一个门。
             {
-                use tauri::Manager;
                 // autotest/smoke 用隔离 sidecar 根（工作区目录内），避免
                 // 开发分支的 smoke 反复改写真实用户的迁移状态与 binding。
                 let root = if let Ok(ws) = std::env::var("WANCODE_AUTOTEST") {
@@ -193,6 +198,7 @@ pub fn run() {
             read_file,
             agent::agent_start,
             agent::agent_prompt,
+            agent::agent_execution_diagnostics,
             agent::agent_permission_respond,
             agent::agent_plan_respond,
             agent::agent_cancel,
@@ -335,10 +341,13 @@ pub fn run() {
             crash_recovery::crash_recovery_info,
             crash_recovery::crash_recovery_ack,
         ])
-        .on_window_event(|_w, e| {
+        .on_window_event(|w, e| {
             // 优雅关闭 → 标记 clean，崩溃则标记保持 dirty（下次启动出恢复横幅）
             if matches!(e, tauri::WindowEvent::CloseRequested { .. }) {
-                crash_recovery::mark_clean_exit();
+                match w.state::<agent::AgentState>().close_active_session_now() {
+                    Ok(()) => crash_recovery::mark_clean_exit(),
+                    Err(error) => tracing::error!("{error}"),
+                }
             }
         })
         .run(tauri::generate_context!())

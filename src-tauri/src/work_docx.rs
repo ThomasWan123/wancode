@@ -541,30 +541,24 @@ mod tests {
         let before_only = p(
             r#"<w:p><w:r><w:t>甲</w:t></w:r><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:p>"#,
         );
-        match parse_document_xml(&before_only, DocxLimits::default()) {
-            Ok(b) => {
-                let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
-                assert!(
-                    joined.contains('甲'),
-                    "嵌套 <p> 覆盖 cur 会丢掉外层段首，得 {joined:?}"
-                );
-                assert!(joined.contains('乙'), "嵌套段正文必须在，得 {joined:?}");
-                assert!(b.iter().all(|x| x.is_well_formed()));
-            }
-            Err(_) => {}
+        if let Ok(b) = parse_document_xml(&before_only, DocxLimits::default()) {
+            let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
+            assert!(
+                joined.contains('甲'),
+                "嵌套 <p> 覆盖 cur 会丢掉外层段首，得 {joined:?}"
+            );
+            assert!(joined.contains('乙'), "嵌套段正文必须在，得 {joined:?}");
+            assert!(b.iter().all(|x| x.is_well_formed()));
         }
         let before_and_after = p(
             r#"<w:p><w:r><w:t>甲</w:t></w:r><w:p><w:r><w:t>乙</w:t></w:r></w:p><w:r><w:t>丙</w:t></w:r></w:p>"#,
         );
-        match parse_document_xml(&before_and_after, DocxLimits::default()) {
-            Ok(b) => {
-                let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
-                assert!(joined.contains('甲'), "段首不得丢，得 {joined:?}");
-                assert!(joined.contains('乙'), "嵌套段不得丢，得 {joined:?}");
-                assert!(joined.contains('丙'), "段尾不得丢，得 {joined:?}");
-                assert!(b.iter().all(|x| x.is_well_formed()));
-            }
-            Err(_) => {}
+        if let Ok(b) = parse_document_xml(&before_and_after, DocxLimits::default()) {
+            let joined: String = b.iter().map(|x| x.raw.as_str()).collect();
+            assert!(joined.contains('甲'), "段首不得丢，得 {joined:?}");
+            assert!(joined.contains('乙'), "嵌套段不得丢，得 {joined:?}");
+            assert!(joined.contains('丙'), "段尾不得丢，得 {joined:?}");
+            assert!(b.iter().all(|x| x.is_well_formed()));
         }
     }
 

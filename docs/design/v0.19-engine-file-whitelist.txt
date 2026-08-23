@@ -18,6 +18,7 @@
 # 路径前缀统一为 crates/codegen/xai-grok-shell/
 
 [product]
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 
 # ── 测试足场的 feature 声明 ──
 # 引擎 --lib 单测在本 commit 基线即不可编译（WorkspaceOps::for_test、

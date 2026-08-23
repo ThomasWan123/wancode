@@ -1748,7 +1748,7 @@ mod blocked_session_recovery_tests {
 ///    ——恢复失败的会话不但发了，而且下次也拦不住了。
 /// 2. 我上一条说"5 条测试覆盖状态转移"是过度表述：那 5 条只测了纯决策
 ///    函数 recover_blocked_model，从没碰过存放 block 的那张表。
-/// 所以落定动作抽成 settle_recovery，对真实 HashMap 操作，下面直接断言表本身。
+///    所以落定动作抽成 settle_recovery，对真实 HashMap 操作，下面直接断言表本身。
 #[cfg(test)]
 mod recovery_commit_order_tests {
     use agent_client_protocol as acp;

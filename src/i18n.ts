@@ -368,6 +368,13 @@ ${p}
   mcpAdd: "添加 / 更新",
   mcpDelete: "删除",
   configFile: "配置文件",
+  executionIntegrity: "执行完整性",
+  executionIntegrityLoading: "正在读取本机执行记录…",
+  executionIntegrityHealthy: "执行记录结构完整，未发现重复事件。",
+  executionIntegrityBlocked: "执行记录存在完整性冲突，新任务会保持阻塞。",
+  executionIntegrityRefresh: "重新检查",
+  executionIntegritySummary: (events: number, sessions: number, openTurns: number, hash: string) =>
+    `${events} 个事件 · ${sessions} 个会话 · ${openTurns} 个未结束回合 · 校验 ${hash}`,
   configHelp:
     "%USERPROFILE%\\.grok\\config.toml —— 在此添加模型（[model.\"…\"] 段）与 MCP 服务器（[mcp_servers.…] 段），保存后重开会话生效。API Key 通过环境变量引用（env_key），不落明文。",
   projectMemory: "项目记忆",
@@ -747,6 +754,13 @@ Remove the worktree?`,
   mcpAdd: "Add / Update",
   mcpDelete: "Delete",
   configFile: "Config file",
+  executionIntegrity: "Execution integrity",
+  executionIntegrityLoading: "Reading the local execution record…",
+  executionIntegrityHealthy: "The execution record is structurally sound with no duplicate events.",
+  executionIntegrityBlocked: "The execution record has an integrity conflict; new work remains blocked.",
+  executionIntegrityRefresh: "Check again",
+  executionIntegritySummary: (events: number, sessions: number, openTurns: number, hash: string) =>
+    `${events} events · ${sessions} sessions · ${openTurns} open turns · checksum ${hash}`,
   configHelp:
     "%USERPROFILE%\\.grok\\config.toml — add models ([model.\"…\"]) and MCP servers ([mcp_servers.…]) here; reopen the session to apply. API keys are referenced via env vars (env_key), never stored in plain text.",
   projectMemory: "Project memory",
