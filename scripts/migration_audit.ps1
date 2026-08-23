@@ -125,7 +125,7 @@ function New-EffectiveTree([string]$repo, [string]$commit, $patches, [string]$ca
     $mirror = (Resolve-Path $EngineMirror).Path
     git -c core.longpaths=true -c core.autocrlf=false clone -q --shared --no-checkout $mirror $dest
     if ($LASTEXITCODE -ne 0) { throw "mirror clone 失败：$mirror" }
-    git -C $dest checkout -q --detach $commit
+    git -c core.autocrlf=false -C $dest checkout -q --detach $commit
   } else {
     # Fetch only the pinned commit. A full clone of the engine is both slow and
     # an unnecessary availability dependency for this byte-level audit.
@@ -135,7 +135,7 @@ function New-EffectiveTree([string]$repo, [string]$commit, $patches, [string]$ca
     if ($LASTEXITCODE -ne 0) { throw "remote 配置失败：$repo" }
     git -C $dest -c protocol.version=2 fetch -q --depth=1 --no-tags origin $commit
     if ($LASTEXITCODE -ne 0) { throw "fetch 失败：$repo@$commit" }
-    git -C $dest checkout -q --detach FETCH_HEAD
+    git -c core.autocrlf=false -C $dest checkout -q --detach FETCH_HEAD
   }
   if ($LASTEXITCODE -ne 0) { throw "checkout 失败：$commit" }
   foreach ($p in $patches) {
