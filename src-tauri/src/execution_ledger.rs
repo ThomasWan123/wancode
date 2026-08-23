@@ -143,6 +143,7 @@ pub struct PromptEvidence {
 pub struct FrozenRequestEvidence<'a> {
     pub prompt_sha256: &'a str,
     pub tool_schema_sha256: &'a str,
+    pub stable_prefix_sha256: &'a str,
     pub provider_catalog_key: &'a str,
     pub model_caps_sha256: &'a str,
     pub memory_context_sha256: Option<&'a str>,
@@ -155,6 +156,7 @@ impl FrozenRequestEvidence<'_> {
     pub fn fingerprint(&self) -> Result<String, LedgerError> {
         validate_hash("request.prompt_sha256", self.prompt_sha256)
             .and_then(|_| validate_hash("request.tool_schema_sha256", self.tool_schema_sha256))
+            .and_then(|_| validate_hash("request.stable_prefix_sha256", self.stable_prefix_sha256))
             .and_then(|_| validate_hash("request.model_caps_sha256", self.model_caps_sha256))
             .and_then(|_| {
                 validate_optional_hash("request.memory_context_sha256", self.memory_context_sha256)
@@ -1117,9 +1119,11 @@ mod tests {
         let schema = hex_sha256(b"schema");
         let caps = hex_sha256(b"caps");
         let memory = hex_sha256(b"memory");
+        let stable_prefix = hex_sha256(b"stable-prefix");
         let baseline = FrozenRequestEvidence {
             prompt_sha256: &prompt,
             tool_schema_sha256: &schema,
+            stable_prefix_sha256: &stable_prefix,
             provider_catalog_key: "deepseek:chat",
             model_caps_sha256: &caps,
             memory_context_sha256: Some(&memory),
@@ -1131,6 +1135,7 @@ mod tests {
         let prompt_2 = hex_sha256(b"prompt-2");
         let schema_2 = hex_sha256(b"schema-2");
         let caps_2 = hex_sha256(b"caps-2");
+        let stable_prefix_2 = hex_sha256(b"stable-prefix-2");
 
         for changed in [
             FrozenRequestEvidence {
@@ -1139,6 +1144,10 @@ mod tests {
             },
             FrozenRequestEvidence {
                 tool_schema_sha256: &schema_2,
+                ..baseline.clone()
+            },
+            FrozenRequestEvidence {
+                stable_prefix_sha256: &stable_prefix_2,
                 ..baseline.clone()
             },
             FrozenRequestEvidence {
@@ -1349,7 +1358,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(LEDGER_FILE_NAME);
         let event_a = ExecutionEvent {
-            schema_version: 1,
+            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
             seq: 1,
             event_id: "duplicate-id".into(),
             time_unix_ms: 1000,
@@ -1357,28 +1366,25 @@ mod tests {
             event: ExecutionEventKind::SurfaceBound,
         };
         let event_b = ExecutionEvent {
-            schema_version: 1,
+            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
             seq: 2,
             event_id: "duplicate-id".into(),
             time_unix_ms: 1001,
             context: context("s1"),
             event: ExecutionEventKind::PolicyApplied,
         };
-        let mut content = serde_json::to_string(&event_a).unwrap();
-        content.push('\n');
-        content.push_str(&serde_json::to_string(&event_b).unwrap());
-        content.push('\n');
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event_a).unwrap(),
+            serde_json::to_string(&event_b).unwrap()
+        );
         std::fs::write(&path, content).unwrap();
 
         let ledger = ExecutionLedger::open(dir.path()).unwrap();
         let diagnostics = ledger.diagnostics().unwrap();
-        assert!(
-            diagnostics.duplicate_event_ids.contains("duplicate-id"),
-            "diagnostics must report the seeded duplicate event ID"
-        );
-        assert!(
-            !diagnostics.duplicate_event_ids.is_empty(),
-            "duplicate_event_ids must be non-empty for integrity-blocked state"
+        assert_eq!(
+            diagnostics.duplicate_event_ids,
+            BTreeSet::from(["duplicate-id".to_string()])
         );
     }
 

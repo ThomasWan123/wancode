@@ -950,6 +950,11 @@ pub async fn agent_set_model(
         crate::surface_policy::ensure_chat_model_allowed(&doc, &model)
             .map_err(|error| ModelSwitchError::SurfacePolicyBlocked { error })?;
     }
+    // Build the provider identity before the engine switch. An invalid catalog
+    // key must fail closed without changing the live engine route.
+    let next_provider_profile = crate::agent::provider_profile_for_catalog_key(Some(&model))
+        .map_err(|message| ModelSwitchError::Other { message })?;
+    let expected_session_id = session_id.0.to_string();
     let mut req = acp::SetSessionModelRequest::new(
         session_id,
         acp::ModelId::new(std::sync::Arc::from(model.as_str())),
@@ -964,22 +969,19 @@ pub async fn agent_set_model(
     let _: acp::SetSessionModelResponse = acp_send(req, &acp_tx)
         .await
         .map_err(|e| ModelSwitchError::from_acp(&e))?;
-    {
-        let mut guard = state.handle.lock().await;
-        if let Some(handle) = guard.as_mut() {
-            let family = crate::provider_profile::infer_family(&model);
-            match crate::provider_profile::ProviderProfile::safe_default(&model, family) {
-                Ok(profile) => {
-                    handle.provider_profile = Some(profile);
-                }
-                Err(error) => {
-                    return Err(ModelSwitchError::Other {
-                        message: format!("PROVIDER_PROFILE_BLOCKED: {model}: {error}"),
-                    });
-                }
-            }
-            handle.provider_catalog_key = Some(model);
-        }
+    // Commit the route and its profile atomically, but only to the same live
+    // session that accepted the request. A closed/replaced session is never
+    // allowed to inherit a stale completion.
+    let mut guard = state.handle.lock().await;
+    let handle = guard.as_mut().ok_or_else(|| ModelSwitchError::Other {
+        message: "MODEL_SWITCH_SESSION_CLOSED".to_string(),
+    })?;
+    if handle.session_id.0.as_ref() != expected_session_id {
+        return Err(ModelSwitchError::Other {
+            message: "MODEL_SWITCH_SESSION_REPLACED".to_string(),
+        });
     }
+    handle.provider_profile = next_provider_profile;
+    handle.provider_catalog_key = Some(model);
     Ok(())
 }

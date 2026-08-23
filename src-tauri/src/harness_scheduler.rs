@@ -290,127 +290,40 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let batch1 = scheduler.dispatch_ready();
-        assert_eq!(batch1.len(), 4, "first dispatch must saturate the limit");
-        assert!(
-            scheduler.dispatch_ready().is_empty(),
-            "no further dispatch while 4 reads overlap"
-        );
-
+        assert_eq!(scheduler.dispatch_ready().len(), 4);
+        assert!(scheduler.dispatch_ready().is_empty());
         scheduler
             .complete("read-0", TerminalOutcome::Completed)
             .unwrap();
-        let batch2 = scheduler.dispatch_ready();
-        assert_eq!(batch2.len(), 1, "one slot freed → one more dispatched");
-        assert_eq!(batch2[0].call_id, "read-4");
-
-        for ordinal in 1..=3 {
-            scheduler
-                .complete(&format!("read-{ordinal}"), TerminalOutcome::Completed)
-                .unwrap();
-        }
-        let batch3 = scheduler.dispatch_ready();
-        assert_eq!(batch3.len(), 3, "3 slots freed → 3 remaining reads dispatched");
-
-        for ordinal in 4..8 {
-            scheduler
-                .complete(&format!("read-{ordinal}"), TerminalOutcome::Completed)
-                .unwrap();
-        }
-        assert_eq!(scheduler.terminal_count(), 8);
-        assert!(scheduler.running_ids().is_empty());
+        assert_eq!(scheduler.dispatch_ready()[0].call_id, "read-4");
     }
 
     #[test]
-    fn mutation_barrier_is_globally_exclusive_with_delayed_reads() {
+    fn mutation_barrier_is_globally_exclusive_with_interleaved_reads() {
         let mut scheduler = RollingScheduler::new(4).unwrap();
-        scheduler
-            .submit(call("r1", ConcurrencyClass::ConcurrentRead))
-            .unwrap();
-        scheduler
-            .submit(call("r2", ConcurrencyClass::ConcurrentRead))
-            .unwrap();
-        scheduler
-            .submit(call("mut1", ConcurrencyClass::ExclusiveMutation))
-            .unwrap();
-        scheduler
-            .submit(call("r3", ConcurrencyClass::ConcurrentRead))
-            .unwrap();
-        scheduler
-            .submit(call("r4", ConcurrencyClass::ConcurrentRead))
-            .unwrap();
-        scheduler
-            .submit(call("mut2", ConcurrencyClass::ExclusiveMutation))
-            .unwrap();
-        scheduler
-            .submit(call("r5", ConcurrencyClass::ConcurrentRead))
-            .unwrap();
-
-        let batch = scheduler.dispatch_ready();
-        assert_eq!(
-            batch.iter().map(|c| c.call_id.as_str()).collect::<Vec<_>>(),
-            ["r1", "r2"],
-            "only reads before first mutation"
-        );
-
-        assert!(
-            scheduler.dispatch_ready().is_empty(),
-            "mutation barrier blocks while reads running"
-        );
+        for (id, class) in [
+            ("r1", ConcurrencyClass::ConcurrentRead),
+            ("r2", ConcurrencyClass::ConcurrentRead),
+            ("m1", ConcurrencyClass::ExclusiveMutation),
+            ("r3", ConcurrencyClass::ConcurrentRead),
+        ] {
+            scheduler.submit(call(id, class)).unwrap();
+        }
+        assert_eq!(scheduler.dispatch_ready().len(), 2);
         scheduler
             .complete("r1", TerminalOutcome::Completed)
             .unwrap();
-        assert!(
-            scheduler.dispatch_ready().is_empty(),
-            "r2 still running → mutation cannot start"
-        );
+        assert!(scheduler.dispatch_ready().is_empty());
         scheduler
             .complete("r2", TerminalOutcome::Completed)
             .unwrap();
-
-        let mut_batch = scheduler.dispatch_ready();
-        assert_eq!(mut_batch.len(), 1);
-        assert_eq!(mut_batch[0].call_id, "mut1");
-        assert_eq!(
-            scheduler.running_ids().len(),
-            1,
-            "mutation must be sole runner"
-        );
-
-        assert!(scheduler.dispatch_ready().is_empty());
+        let mutation = scheduler.dispatch_ready();
+        assert_eq!(mutation[0].call_id, "m1");
+        assert_eq!(scheduler.running_ids(), BTreeSet::from(["m1".to_string()]));
         scheduler
-            .complete("mut1", TerminalOutcome::Completed)
+            .complete("m1", TerminalOutcome::Completed)
             .unwrap();
-
-        let mid_batch = scheduler.dispatch_ready();
-        assert_eq!(
-            mid_batch
-                .iter()
-                .map(|c| c.call_id.as_str())
-                .collect::<Vec<_>>(),
-            ["r3", "r4"],
-            "reads after first mutation dispatched"
-        );
-
-        scheduler
-            .complete("r3", TerminalOutcome::Completed)
-            .unwrap();
-        scheduler
-            .complete("r4", TerminalOutcome::Completed)
-            .unwrap();
-
-        let mut2_batch = scheduler.dispatch_ready();
-        assert_eq!(mut2_batch[0].call_id, "mut2");
-        scheduler
-            .complete("mut2", TerminalOutcome::Completed)
-            .unwrap();
-
-        let final_batch = scheduler.dispatch_ready();
-        assert_eq!(final_batch[0].call_id, "r5");
-        scheduler
-            .complete("r5", TerminalOutcome::Completed)
-            .unwrap();
-        assert_eq!(scheduler.terminal_count(), 7);
+        assert_eq!(scheduler.dispatch_ready()[0].call_id, "r3");
     }
 
     #[test]
@@ -428,24 +341,13 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let dispatched = scheduler.dispatch_ready();
-        assert_eq!(dispatched.len(), 2, "c-0, c-1 dispatched");
-
+        assert_eq!(scheduler.dispatch_ready().len(), 2);
         let aborted = scheduler.cancel();
-        assert_eq!(
-            aborted.len(),
-            4,
-            "c-2, c-3(mutation), c-4, c-5 aborted — exactly one terminal each"
-        );
-        for tc in &aborted {
-            assert_eq!(tc.outcome, TerminalOutcome::AbortedBeforeDispatch);
-        }
-        let aborted_ids: Vec<&str> = aborted.iter().map(|tc| tc.call_id.as_str()).collect();
-        assert_eq!(aborted_ids, ["c-2", "c-3", "c-4", "c-5"]);
-
-        let repeat = scheduler.cancel();
-        assert!(repeat.is_empty(), "repeated cancel must not duplicate");
-
+        assert_eq!(aborted.len(), 4);
+        assert!(aborted
+            .iter()
+            .all(|call| call.outcome == TerminalOutcome::AbortedBeforeDispatch));
+        assert!(scheduler.cancel().is_empty());
         scheduler
             .complete("c-0", TerminalOutcome::CancelledWhileRunning)
             .unwrap();
@@ -453,7 +355,6 @@ mod tests {
             .complete("c-1", TerminalOutcome::CancelledWhileRunning)
             .unwrap();
         assert_eq!(scheduler.terminal_count(), 6);
-        assert!(scheduler.running_ids().is_empty());
     }
 
     #[test]

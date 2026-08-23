@@ -18,10 +18,11 @@ use crate::capability_broker::{
 use crate::crash_recovery::write_session_marker;
 use crate::execution_ledger::{
     hex_sha256, prompt_evidence, ApprovalDecision, EventContext, ExecutionEventKind,
-    ExecutionLedger, FrozenRequestEvidence, LedgerRedactor, SessionEndReason, TurnOutcome,
+    ExecutionLedger, FrozenRequestEvidence, LedgerDiagnostics, LedgerRedactor, SessionEndReason,
+    TurnOutcome,
 };
+use crate::provider_profile::{infer_family, ProviderProfile, ProviderUsageFacts};
 use crate::provider_ops::{inject_managed_keys};
-use crate::provider_profile::{infer_family, ProviderProfile};
 use crate::config_core::{validate_startup_models, StartupModels};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -164,14 +165,13 @@ pub struct AgentHandle {
     /// Catalog identity, never the provider-facing model id. The ledger and
     /// provider policy must not collapse same-named models across providers.
     pub(crate) provider_catalog_key: Option<String>,
+    /// Provider-bound request identity. Tuning fields are evidence records;
+    /// the external engine keeps its separately audited scheduling policy.
+    pub(crate) provider_profile: ProviderProfile,
     /// Immutable authority snapshot issued before this handle becomes visible.
     /// Host dispatchers must authorize against this lease; model-provided tool
     /// metadata is presentation evidence only and cannot expand the lease.
     pub(crate) capability_lease: Arc<CapabilityLease>,
-    /// Provider-specific execution profile derived from the catalog key at
-    /// session start. Concurrency, cache and tool-mode defaults are fail-closed
-    /// (native + serial for unknown providers, evidence-gated for non-native).
-    pub(crate) provider_profile: Option<ProviderProfile>,
 }
 
 #[derive(Default)]
@@ -372,6 +372,35 @@ impl AgentState {
                 resource_id_hash: hex_sha256(resource_id.as_bytes()),
             },
         ).await
+    }
+
+    /// A host resource that cannot be committed to the ownership registry must
+    /// not leave a send-capable session behind. Abort only the exact session
+    /// that created it and release every binding owned by its immutable lease.
+    async fn abort_live_session_after_resource_failure(
+        &self,
+        session_id: &str,
+    ) -> Result<usize, String> {
+        let handle = {
+            let mut guard = self.handle.lock().await;
+            match guard.as_ref() {
+                Some(handle) if handle.session_id.0.as_ref() == session_id => {
+                    guard.take().expect("checked live handle")
+                }
+                Some(_) => return Err("RESOURCE_SESSION_REPLACED".to_string()),
+                None => return Err("RESOURCE_SESSION_NOT_LIVE".to_string()),
+            }
+        };
+        handle.cancel.cancel();
+        self.active_turns.lock().await.remove(session_id);
+        self.pending_permissions
+            .lock()
+            .await
+            .retain(|_, pending| pending.session_id != session_id);
+        self.resource_registry
+            .release_all(&handle.capability_lease)
+            .map(|released| released.len())
+            .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))
     }
 
     /// Window close cannot await Tokio locks. Best effort is explicit and
@@ -640,6 +669,30 @@ fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
         return write();
     }
     None
+}
+
+pub(crate) fn provider_profile_for_catalog_key(
+    provider_catalog_key: Option<&str>,
+) -> Result<ProviderProfile, String> {
+    let key = provider_catalog_key.unwrap_or("provider-route-unavailable");
+    ProviderProfile::safe_default(key, infer_family(key))
+        .map_err(|error| format!("PROVIDER_PROFILE_BLOCKED: {error}"))
+}
+
+fn ensure_execution_integrity(diagnostics: &LedgerDiagnostics) -> Result<(), String> {
+    if diagnostics.duplicate_event_ids.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "EXECUTION_INTEGRITY_BLOCKED: duplicate event ids: {}",
+            diagnostics
+                .duplicate_event_ids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+    }
 }
 
 fn issue_session_capability_lease(
@@ -1326,6 +1379,9 @@ async fn start_inner_with_intent_and_workspace(
         })
         .unwrap_or_default();
 
+    let provider_profile = provider_profile_for_catalog_key(current_model_id.as_deref())
+        .inspect_err(|_| cancel.cancel())
+        .map_err(anyhow::Error::msg)?;
     let capability_lease = Arc::new(
         issue_session_capability_lease(
             session_id.0.as_ref(),
@@ -1368,13 +1424,6 @@ async fn start_inner_with_intent_and_workspace(
         }
     }
 
-    let provider_profile = match current_model_id.as_deref() {
-        Some(key) => Some(
-            ProviderProfile::safe_default(key, infer_family(key))
-                .map_err(|error| anyhow!("PROVIDER_PROFILE_BLOCKED: {key}: {error}"))?,
-        ),
-        None => None,
-    };
     *state.handle.lock().await = Some(AgentHandle {
         acp_tx: acp_tx.clone(),
         session_id: session_id.clone(),
@@ -1383,8 +1432,8 @@ async fn start_inner_with_intent_and_workspace(
         surface_kind: surface_binding.surface_kind,
         work_workspace_id: surface_binding.workspace_id.clone(),
         provider_catalog_key: current_model_id.clone(),
-        capability_lease,
         provider_profile,
+        capability_lease,
     });
 
     // 新会话的技能来自 agent 启动时的内存快照（self.cfg.skills），运行期改
@@ -1483,7 +1532,7 @@ mod surface_launchable_tests {
         terminal_id_from_response, terminal_resource_action, retain_owned_terminals,
         validate_pending_permission, PendingPermission, TerminalResourceAction,
     };
-    use crate::capability_broker::{CapabilityError, McpInheritance, ResourceKind, ResourceRegistry, ToolRisk};
+    use crate::capability_broker::{McpInheritance, ResourceKind, ResourceRegistry, ToolRisk};
     use crate::surface::SurfaceKind;
     use std::collections::BTreeSet;
 
@@ -1633,39 +1682,6 @@ mod surface_launchable_tests {
                 "result": {"terminalId": "terminal-new"}
             })),
             Some("terminal-new")
-        );
-    }
-
-    #[test]
-    fn terminal_create_duplicate_id_skips_kill_to_protect_existing_owner() {
-        let root = tempfile::tempdir().unwrap();
-        let owner = issue_session_capability_lease(
-            "session-existing", SurfaceKind::Code, root.path(), None,
-            Some("deepseek:chat"), &[],
-        ).unwrap();
-        let new_lease = issue_session_capability_lease(
-            "session-new", SurfaceKind::Code, root.path(), None,
-            Some("deepseek:chat"), &[],
-        ).unwrap();
-        let registry = ResourceRegistry::default();
-        registry.register(&owner, ResourceKind::Terminal, "dup-terminal-id").unwrap();
-
-        let result = registry.register(&new_lease, ResourceKind::Terminal, "dup-terminal-id");
-        assert!(
-            matches!(result, Err(CapabilityError::ResourceAlreadyExists)),
-            "duplicate register must fail"
-        );
-
-        let auth_result = registry.authorize(&new_lease, ResourceKind::Terminal, "dup-terminal-id");
-        assert!(
-            auth_result.is_err(),
-            "new lease must NOT be authorized for existing terminal"
-        );
-
-        let existing_auth = registry.authorize(&owner, ResourceKind::Terminal, "dup-terminal-id");
-        assert!(
-            existing_auth.is_ok(),
-            "existing owner must remain authorized after failed duplicate register"
         );
     }
 
@@ -2027,50 +2043,6 @@ async fn record_acp_session_update(
     }
 }
 
-/// Validate provider usage from a session notification when token data is
-/// present. Called on the notification pump path so validate_usage fires
-/// on real token facts rather than being a dead call with None tokens.
-async fn validate_notification_usage(state: &AgentState, update: &acp::SessionUpdate) {
-    let json = match serde_json::to_value(update) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let usage_map = json
-        .get("usage")
-        .or_else(|| {
-            json.get("meta")
-                .and_then(|m| m.get("usage").or_else(|| m.get("x.ai/usage")))
-        })
-        .and_then(serde_json::Value::as_object);
-    let Some(usage) = usage_map else { return };
-    let input = usage
-        .get("input_tokens")
-        .or_else(|| usage.get("prompt_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    let output = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    let cache_read = usage
-        .get("cache_read_tokens")
-        .or_else(|| usage.get("cache_read_input_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    let (Some(input), Some(output)) = (input, output) else {
-        return;
-    };
-    let guard = state.handle.lock().await;
-    let Some(handle) = guard.as_ref() else { return };
-    let Some(profile) = &handle.provider_profile else { return };
-    let facts = crate::provider_profile::ProviderUsageFacts {
-        input_tokens: input,
-        output_tokens: output,
-        cache_read_tokens: cache_read,
-    };
-    if let Err(error) = profile.validate_usage(facts) {
-        tracing::warn!("ProviderProfile usage validation failed on notification: {error}");
-    }
-}
-
 #[cfg(test)]
 mod execution_ledger_projection_tests {
     use super::*;
@@ -2100,6 +2072,7 @@ mod execution_ledger_projection_tests {
             surface_kind: crate::surface::SurfaceKind::Code,
             work_workspace_id: None,
             provider_catalog_key: Some("deepseek:chat".into()),
+            provider_profile: provider_profile_for_catalog_key(Some("deepseek:chat")).unwrap(),
             capability_lease,
         });
         state
@@ -2119,6 +2092,98 @@ mod execution_ledger_projection_tests {
         assert_eq!(
             permission_decision(&acp::PermissionOptionKind::RejectAlways),
             ApprovalDecision::Denied
+        );
+    }
+
+    #[test]
+    fn prompt_integrity_gate_has_positive_control_and_blocks_duplicates() {
+        let mut diagnostics = LedgerDiagnostics {
+            schema_version: 1,
+            event_count: 0,
+            ledger_sha256: hex_sha256(b"ledger"),
+            session_ids: BTreeSet::new(),
+            open_turns: BTreeSet::new(),
+            duplicate_event_ids: BTreeSet::new(),
+        };
+        assert!(ensure_execution_integrity(&diagnostics).is_ok());
+        diagnostics.duplicate_event_ids.insert("evt-duplicate".into());
+        assert!(
+            ensure_execution_integrity(&diagnostics)
+                .unwrap_err()
+                .contains("EXECUTION_INTEGRITY_BLOCKED")
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_commit_failure_aborts_session_and_releases_all_bindings() {
+        let (state, _dir) = ledger_state().await;
+        let (lease, cancel) = {
+            let guard = state.handle.lock().await;
+            let handle = guard.as_ref().unwrap();
+            (handle.capability_lease.clone(), handle.cancel.clone())
+        };
+        state
+            .resource_registry
+            .register(&lease, ResourceKind::Terminal, "terminal-orphan")
+            .unwrap();
+
+        let released = state
+            .abort_live_session_after_resource_failure("s1")
+            .await
+            .unwrap();
+
+        assert_eq!(released, 1);
+        assert!(cancel.is_cancelled());
+        assert!(state.handle.lock().await.is_none());
+        assert!(state.active_turns.lock().await.get("s1").is_none());
+        assert!(
+            state
+                .resource_registry
+                .authorize(&lease, ResourceKind::Terminal, "terminal-orphan")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicate_terminal_id_preserves_the_existing_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = issue_session_capability_lease(
+            "session-existing",
+            crate::surface::SurfaceKind::Code,
+            root.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        let incoming = issue_session_capability_lease(
+            "session-incoming",
+            crate::surface::SurfaceKind::Code,
+            root.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        let registry = ResourceRegistry::default();
+        registry
+            .register(&existing, ResourceKind::Terminal, "terminal-duplicate")
+            .unwrap();
+
+        assert!(
+            registry
+                .register(&incoming, ResourceKind::Terminal, "terminal-duplicate")
+                .is_err()
+        );
+        assert!(
+            registry
+                .authorize(&incoming, ResourceKind::Terminal, "terminal-duplicate")
+                .is_err()
+        );
+        assert!(
+            registry
+                .authorize(&existing, ResourceKind::Terminal, "terminal-duplicate")
+                .is_ok()
         );
     }
 
@@ -2212,70 +2277,6 @@ mod execution_ledger_projection_tests {
             ExecutionEventKind::ToolFailed { .. }
         ));
     }
-
-    #[test]
-    fn enforce_ledger_integrity_gate_denies_on_duplicate_event_ids() {
-        use crate::execution_ledger::{
-            ExecutionEvent, ExecutionEventKind, EventContext, LEDGER_FILE_NAME,
-            EXECUTION_EVENT_SCHEMA_VERSION,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(LEDGER_FILE_NAME);
-
-        let ctx = EventContext {
-            session_id: "s1".into(),
-            surface_kind: crate::surface::SurfaceKind::Code,
-            policy_version: 1,
-            provider_catalog_key: Some("test:model".into()),
-            turn_id: None,
-            step_id: None,
-            call_id: None,
-            agent_id: Some("agent-1".into()),
-        };
-        let event_a = ExecutionEvent {
-            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
-            seq: 1,
-            event_id: "dup-gate-test-id".into(),
-            time_unix_ms: 1000,
-            context: ctx.clone(),
-            event: ExecutionEventKind::SurfaceBound,
-        };
-        let event_b = ExecutionEvent {
-            schema_version: EXECUTION_EVENT_SCHEMA_VERSION,
-            seq: 2,
-            event_id: "dup-gate-test-id".into(),
-            time_unix_ms: 2000,
-            context: ctx,
-            event: ExecutionEventKind::SurfaceBound,
-        };
-        let mut content = serde_json::to_string(&event_a).unwrap();
-        content.push('\n');
-        content.push_str(&serde_json::to_string(&event_b).unwrap());
-        content.push('\n');
-        std::fs::write(&path, content).unwrap();
-
-        let ledger = ExecutionLedger::open(dir.path()).unwrap();
-
-        let result = super::enforce_ledger_integrity_gate(&ledger);
-        assert!(result.is_err(), "gate must deny when duplicates exist");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("EXECUTION_INTEGRITY_BLOCKED"),
-            "error must carry the BLOCKED code: {err}"
-        );
-        assert!(
-            err.contains("duplicate event IDs"),
-            "error must mention duplicate IDs: {err}"
-        );
-    }
-
-    #[test]
-    fn enforce_ledger_integrity_gate_passes_clean_ledger() {
-        let dir = tempfile::tempdir().unwrap();
-        let ledger = ExecutionLedger::open(dir.path()).unwrap();
-        let result = super::enforce_ledger_integrity_gate(&ledger);
-        assert!(result.is_ok(), "clean ledger must pass gate: {result:?}");
-    }
 }
 
 async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
@@ -2293,7 +2294,6 @@ async fn handle_acp_message(app: &AppHandle, msg: AcpClientMessage) {
             let session_id = boxed.request.session_id.0.to_string();
             {
                 let state: State<'_, AgentState> = app.state();
-                validate_notification_usage(&state, &boxed.request.update).await;
                 if let Err(error) = record_acp_session_update(
                     &state,
                     &session_id,
@@ -2663,23 +2663,6 @@ pub fn agent_execution_diagnostics(
         .map_err(|error| error.to_string())
 }
 
-/// Ledger integrity gate: denies prompt execution when the ledger contains
-/// duplicate event IDs or diagnostics fail to compute. Extracted as a
-/// standalone function so unit tests can verify the deny path directly.
-pub(crate) fn enforce_ledger_integrity_gate(
-    ledger: &crate::execution_ledger::ExecutionLedger,
-) -> Result<(), String> {
-    match ledger.diagnostics() {
-        Ok(diag) if !diag.duplicate_event_ids.is_empty() => Err(format!(
-            "EXECUTION_INTEGRITY_BLOCKED: ledger contains {} duplicate event IDs; \
-             prompt denied (same fault shown in Settings > About)",
-            diag.duplicate_event_ids.len()
-        )),
-        Err(error) => Err(format!("EXECUTION_INTEGRITY_BLOCKED: {error}")),
-        Ok(_) => Ok(()),
-    }
-}
-
 /// Send one user prompt (optionally with pasted images for vision models);
 /// resolves when the turn completes.
 #[tauri::command]
@@ -2695,9 +2678,9 @@ pub async fn agent_prompt(
         surface_kind,
         work_workspace_id,
         provider_catalog_key,
+        provider_profile,
         agent_id,
         capability_lease,
-        provider_profile,
     ) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or("会话未启动")?;
@@ -2716,9 +2699,9 @@ pub async fn agent_prompt(
             h.surface_kind,
             h.work_workspace_id.clone(),
             h.provider_catalog_key.clone(),
+            h.provider_profile.clone(),
             h.capability_lease.agent_id.clone(),
             h.capability_lease.clone(),
-            h.provider_profile.clone(),
         )
     };
     let text = if surface_kind == crate::surface::SurfaceKind::Work {
@@ -2748,30 +2731,36 @@ pub async fn agent_prompt(
     let provider_key = provider_catalog_key
         .as_deref()
         .unwrap_or("provider-route-unavailable");
-    let stable_prefix_hash = provider_profile.as_ref().and_then(|profile| {
-        if profile.stable_prompt_prefix {
-            Some(profile.stable_prefix_fingerprint(
-                &evidence.sha256,
-                &tool_schema_sha256,
-                None,
-            ))
-        } else {
-            None
-        }
-    });
+    let host_policy_prefix_sha256 = hex_sha256(
+        format!(
+            "surface={surface_kind:?};policy={};caps={}",
+            crate::surface::CURRENT_POLICY_VERSION,
+            capability_lease.model_caps_hash
+        )
+        .as_bytes(),
+    );
+    let stable_prefix_sha256 = provider_profile.stable_prefix_fingerprint(
+        &host_policy_prefix_sha256,
+        &tool_schema_sha256,
+        None,
+    );
     let request_fingerprint = FrozenRequestEvidence {
         prompt_sha256: &evidence.sha256,
         tool_schema_sha256: &tool_schema_sha256,
+        stable_prefix_sha256: &stable_prefix_sha256,
         provider_catalog_key: provider_key,
         model_caps_sha256: &capability_lease.model_caps_hash,
-        memory_context_sha256: stable_prefix_hash.as_deref(),
+        memory_context_sha256: None,
     }
     .fingerprint()
     .map_err(|error| format!("REQUEST_FINGERPRINT_FAILED: {error}"))?;
     let turn_id = state.next_turn_id()?;
     let session_id_string = session_id.0.to_string();
     let execution_ledger = state.execution_ledger(&app)?;
-    enforce_ledger_integrity_gate(&execution_ledger)?;
+    let diagnostics = execution_ledger
+        .diagnostics()
+        .map_err(|error| format!("EXECUTION_DIAGNOSTICS_FAILED: {error}"))?;
+    ensure_execution_integrity(&diagnostics)?;
     {
         let mut active_turns = state.active_turns.lock().await;
         if active_turns.contains_key(&session_id_string) {
@@ -2822,19 +2811,43 @@ pub async fn agent_prompt(
     }
     let request = acp::PromptRequest::new(session_id, blocks);
     let result: Result<acp::PromptResponse, _> = acp_send(request, &acp_tx).await;
+    let mut usage_validation_error = None;
     let (provider_event, terminal_event) = match &result {
-        Ok(_) => {
-            (
-                ExecutionEventKind::ProviderCompleted {
-                    input_tokens: None,
-                    output_tokens: None,
-                    cache_read_tokens: None,
-                },
-                ExecutionEventKind::TurnEnded {
-                    outcome: TurnOutcome::Completed,
-                    error_code: None,
-                },
-            )
+        Ok(response) => {
+            let usage = response.usage.as_ref();
+            let usage_validation = usage.map(|usage| {
+                provider_profile.validate_usage(ProviderUsageFacts {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_tokens: usage.cached_read_tokens,
+                })
+            });
+            if let Some(Err(error)) = usage_validation {
+                let error_code = "provider_usage_invalid".to_string();
+                usage_validation_error = Some(format!("PROVIDER_USAGE_BLOCKED: {error}"));
+                (
+                    ExecutionEventKind::ProviderFailed {
+                        error_code: error_code.clone(),
+                        retryable: false,
+                    },
+                    ExecutionEventKind::TurnEnded {
+                        outcome: TurnOutcome::Failed,
+                        error_code: Some(error_code),
+                    },
+                )
+            } else {
+                (
+                    ExecutionEventKind::ProviderCompleted {
+                        input_tokens: usage.map(|usage| usage.input_tokens),
+                        output_tokens: usage.map(|usage| usage.output_tokens),
+                        cache_read_tokens: usage.and_then(|usage| usage.cached_read_tokens),
+                    },
+                    ExecutionEventKind::TurnEnded {
+                        outcome: TurnOutcome::Completed,
+                        error_code: None,
+                    },
+                )
+            }
         }
         Err(error) => {
             let error_code = LedgerRedactor::error_code(&error.to_string()).to_string();
@@ -2854,16 +2867,20 @@ pub async fn agent_prompt(
         .append(ledger_context.clone(), provider_event)
         .and_then(|_| execution_ledger.append(ledger_context, terminal_event));
     state.active_turns.lock().await.remove(&session_id_string);
-    let payload = match &result {
-        Ok(resp) => serde_json::json!({
+    let payload = match (&result, &usage_validation_error) {
+        (_, Some(error)) => serde_json::json!({ "ok": false, "error": error }),
+        (Ok(resp), None) => serde_json::json!({
             "ok": true,
             "stopReason": serde_json::to_value(resp.stop_reason).unwrap_or(serde_json::Value::Null),
         }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        (Err(e), None) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     let _ = app.emit("agent://turn-end", payload);
     terminal_ledger_result
         .map_err(|error| format!("EXECUTION_LEDGER_APPEND_FAILED: {error}"))?;
+    if let Some(error) = usage_validation_error {
+        return Err(error);
+    }
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -3019,46 +3036,51 @@ pub(crate) async fn ext_call(
                     let terminal_id = terminal_id_from_response(&response)
                         .ok_or_else(|| format!("RESOURCE_OWNERSHIP_BLOCKED: {method}: missing terminalId response"))?
                         .to_string();
-                    if let Err(register_error) = state.register_live_resource(
+                    let register_result = state.register_live_resource(
                         lease_session_id,
                         lease,
                         ResourceKind::Terminal,
                         &terminal_id,
-                    ).await {
-                        let is_duplicate = register_error.contains("RESOURCE_OWNERSHIP_BLOCKED")
-                            && state.resource_registry
+                    ).await;
+                    if let Err(register_error) = register_result {
+                        let conflicts_with_existing_owner = register_error
+                            .contains("resource already exists")
+                            && state
+                                .resource_registry
                                 .authorize(lease, ResourceKind::Terminal, &terminal_id)
                                 .is_err();
-                        if is_duplicate {
+                        if conflicts_with_existing_owner {
+                            let released = state
+                                .abort_live_session_after_resource_failure(lease_session_id)
+                                .await?;
                             return Err(format!(
-                                "TERMINAL_CREATE_BLOCKED: {terminal_id}: \
-                                 duplicate ID conflicts with existing registered terminal; \
-                                 compensating kill skipped to protect existing owner. \
-                                 Original: {register_error}"
+                                "TERMINAL_CREATE_BLOCKED: {terminal_id}: duplicate ID conflicts with an existing owner; compensating kill skipped; new session aborted; released bindings={released}; {register_error}"
                             ));
                         }
-                        let kill_params = serde_json::json!({ "terminalId": terminal_id });
-                        let kill_result = match serde_json::value::to_raw_value(&kill_params) {
-                            Ok(raw_kill) => {
-                                let r: Result<acp::ExtResponse, _> = acp_send(
-                                    acp::ExtRequest::new(
-                                        "x.ai/terminal/kill".to_string(),
-                                        raw_kill.into(),
-                                    ),
-                                    &acp_tx,
-                                ).await;
-                                r
-                            }
-                            Err(e) => Err(acp::Error::new(e.to_string())),
-                        };
-                        if let Err(kill_error) = kill_result {
-                            return Err(format!(
-                                "TERMINAL_CREATE_FAILED: register failed ({register_error}) \
-                                 AND compensating kill also failed ({kill_error}); \
-                                 orphan terminal {terminal_id} may remain"
-                            ));
+                        let kill_result: Result<bool, String> = async {
+                            let kill_params = serde_json::json!({
+                                "sessionId": lease_session_id,
+                                "terminalId": terminal_id,
+                            });
+                            let raw = serde_json::value::to_raw_value(&kill_params)
+                                .map_err(|error| error.to_string())?;
+                            let kill_response: acp::ExtResponse = acp_send(
+                                acp::ExtRequest::new("x.ai/terminal/kill".to_string(), raw.into()),
+                                &acp_tx,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                            let value: serde_json::Value = serde_json::from_str(kill_response.0.get())
+                                .map_err(|error| error.to_string())?;
+                            Ok(extension_response_succeeded(&value))
                         }
-                        return Err(register_error);
+                        .await;
+                        let released = state
+                            .abort_live_session_after_resource_failure(lease_session_id)
+                            .await?;
+                        return Err(format!(
+                            "{register_error}; terminal compensation={kill_result:?}; session aborted; released bindings={released}"
+                        ));
                     }
                 }
                 TerminalResourceAction::List => {
