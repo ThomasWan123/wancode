@@ -144,6 +144,7 @@ pub mod win {
     /// 复刻 tauri-plugin-updater 2.10.1 的 NSIS 参数转义（其 fn 为私有，
     /// 无法直接引用）。用于 `/ARGS` 后透传应用当前启动参数——安装器 `/R`
     /// 重启应用时以此恢复启动上下文。相比 std 的规则额外转义 `/`。
+    #[allow(dead_code)] // Kept as a parity-tested contract for the updater handoff.
     pub fn escape_nsis_current_exe_arg(arg: &OsStr) -> String {
         let arg = arg.to_string_lossy();
         let mut cmd: Vec<char> = Vec::new();
@@ -173,12 +174,12 @@ pub mod win {
 
     #[cfg(test)]
     mod tests {
-        use std::ffi::OsStr;
-
         /// 用例逐字取自插件自带测试 it_escapes_correctly_for_nsis——
         /// 保证与被复刻实现行为一致。
         #[test]
         fn escape_matches_plugin_behavior() {
+            use std::ffi::OsStr;
+
             let cases = [
                 ("something", "something"),
                 ("--flag", "--flag"),

@@ -26,8 +26,8 @@
 #   本批为有意行为变化：effective_tree_sha256 与 commit 变更，等价审计
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
-commit=2f480062e2645b0afa760f5b0b552bc4cde5d9e0
-migration_audit_mode=version-only
+commit=9e9adb62d3251c5cdafbbfe4dcc17ea83b411910
+migration_audit_mode=intentional-delta
 declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
@@ -49,7 +49,14 @@ declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-o
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
 cargo_lock_sha256=9cf4cd162e0f1863c97c9ead2368958ed6a2b33dbb5a6dab9a200e05e33f92ee
-effective_tree_sha256=06bab09c216c0f8f3d627ca206f2b14b61b8cf3a0d4a5867f62554bfff89d8c1
+effective_tree_sha256=0365143a48b0462f5fe91aba0c0c2db0c381ea9c66fe95dd0ee73c2b5ebcbed1
+
+# 【harness-kernel delta · v0.21 W3】真实工具执行调度
+#   引擎 commit 变、Cargo.lock/接线/紧急补丁均不变；差异仅为
+#   acp_session_impl/tool_calls.rs。只读调用最多四路滚动并发；任何非只读
+#   调用是全局屏障，必须等待此前调用结束，且后续调用不得越过。
+#   白名单：docs/design/v0.19-engine-file-whitelist.txt（历史文件名，现作为
+#   intentional-delta 的累积机器白名单；v0.21 条目在文件末尾单列）。
 #
 # 【历史】上面的 declared_added_packages（W3 dependency-delta）与
 # declared_added_wancode_dependencies（#67 wancode-lock-delta）属于此前两轮，

@@ -3,6 +3,7 @@
 # 用法：powershell -File scripts/migration_audit.ps1 -BeforeSha <迁移前 wancode commit>
 #                  [-Mode equivalent|intentional-delta|version-only|dependency-delta|wancode-lock-delta|security-upgrade-delta]
 #                  [-Whitelist docs/design/v0.19-engine-file-whitelist.txt]
+#                  [-EngineMirror ..\grok-build]
 #                  [-OutFile migration-audit-summary.json]
 #
 # 语义：
@@ -21,6 +22,7 @@ param(
   [Parameter(Mandatory)][string]$BeforeSha,
   [ValidateSet("equivalent", "intentional-delta", "version-only", "dependency-delta", "wancode-lock-delta", "security-upgrade-delta")][string]$Mode = "equivalent",
   [string]$Whitelist,
+  [string]$EngineMirror,
   [string]$OutFile = "migration-audit-summary.json"
 )
 $ErrorActionPreference = "Stop"
@@ -119,9 +121,22 @@ $afterBuildManifest = Read-BuildManifest (Join-Path $root "vendor\grok-build.loc
 
 # ── 同一个 materializer 构造两棵树 ─────────────────────────────
 function New-EffectiveTree([string]$repo, [string]$commit, $patches, [string]$cargoLock, [string]$dest) {
-  git clone -q -c core.longpaths=true -c core.autocrlf=false $repo $dest
-  if ($LASTEXITCODE -ne 0) { throw "clone 失败：$repo" }
-  git -C $dest checkout -q $commit
+  if ($EngineMirror) {
+    $mirror = (Resolve-Path $EngineMirror).Path
+    git -c core.longpaths=true -c core.autocrlf=false clone -q --shared --no-checkout $mirror $dest
+    if ($LASTEXITCODE -ne 0) { throw "mirror clone 失败：$mirror" }
+    git -c core.autocrlf=false -C $dest checkout -q --detach $commit
+  } else {
+    # Fetch only the pinned commit. A full clone of the engine is both slow and
+    # an unnecessary availability dependency for this byte-level audit.
+    git -c core.longpaths=true -c core.autocrlf=false init -q $dest
+    if ($LASTEXITCODE -ne 0) { throw "init 失败：$dest" }
+    git -C $dest remote add origin $repo
+    if ($LASTEXITCODE -ne 0) { throw "remote 配置失败：$repo" }
+    git -C $dest -c protocol.version=2 fetch -q --depth=1 --no-tags origin $commit
+    if ($LASTEXITCODE -ne 0) { throw "fetch 失败：$repo@$commit" }
+    git -c core.autocrlf=false -C $dest checkout -q --detach FETCH_HEAD
+  }
   if ($LASTEXITCODE -ne 0) { throw "checkout 失败：$commit" }
   foreach ($p in $patches) {
     if ((Get-Item $p).Length -gt 0) {

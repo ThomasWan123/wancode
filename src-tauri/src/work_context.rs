@@ -209,7 +209,7 @@ mod tests {
         .unwrap();
         let lines: Vec<_> = rendered.lines().collect();
         assert_eq!(lines.last(), Some(&"</document-jsonl>"));
-        assert!(!lines.iter().any(|line| *line == "[USER REQUEST]"));
+        assert!(!lines.contains(&"[USER REQUEST]"));
         let block_json: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(
             block_json["text"],

@@ -556,13 +556,8 @@ async fn serve_model_mock(mock: ModelMock) -> u16 {
         {
             let hits = mock.hits.clone();
             tokio::spawn(async move {
-                loop {
-                    match listener.accept().await {
-                        Ok(_) => {
-                            hits.fetch_add(1, Ordering::SeqCst);
-                        }
-                        Err(_) => break,
-                    }
+                while listener.accept().await.is_ok() {
+                    hits.fetch_add(1, Ordering::SeqCst);
                 }
             });
         }

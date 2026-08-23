@@ -1,6 +1,7 @@
 /* v0.13 拆分：设置弹窗（步 A：纯 JSX 搬移，全部依赖经 props 透传；
    步 B 将把仅设置页使用的状态与处理器迁入本文件）。 */
 import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
 import { saveLang, type Lang } from "../../i18n";
 import { IconX, IconPencil } from "../../icons";
 import { ModalDialog } from "../dialogs/ModalDialog";
@@ -27,6 +28,62 @@ const MODEL_PRESETS: Record<string, { name: string; model: string; base_url: str
   OpenAI: { name: "GPT-4o", model: "gpt-4o", base_url: "https://api.openai.com/v1" },
   Ollama: { name: "Ollama (Local)", model: "qwen2.5-coder", base_url: "http://localhost:11434/v1" },
 };
+
+type ExecutionDiagnostics = {
+  schema_version: number;
+  event_count: number;
+  ledger_sha256: string;
+  session_ids: string[];
+  open_turns: string[];
+  duplicate_event_ids: string[];
+};
+
+function ExecutionIntegrityPanel({ t, setError }: { t: any; setError: (error: string) => void }) {
+  const [diagnostics, setDiagnostics] = useState<ExecutionDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setDiagnostics(await invoke<ExecutionDiagnostics>("agent_execution_diagnostics"));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // The command is read-only and intentionally runs once when About opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const healthy = diagnostics && diagnostics.duplicate_event_ids.length === 0;
+  return (
+    <div className="modal-section">
+      <div className="modal-label">{t.executionIntegrity}</div>
+      <div className="modal-body">
+        {!diagnostics ? t.executionIntegrityLoading : healthy ? t.executionIntegrityHealthy : t.executionIntegrityBlocked}
+      </div>
+      {diagnostics && (
+        <div className="modal-body mono">
+          {t.executionIntegritySummary(
+            diagnostics.event_count,
+            diagnostics.session_ids.length,
+            diagnostics.open_turns.length,
+            diagnostics.ledger_sha256.slice(0, 12),
+          )}
+        </div>
+      )}
+      <div className="about-actions">
+        <button className="ghost" disabled={loading} onClick={() => void refresh()}>
+          {loading ? t.executionIntegrityLoading : t.executionIntegrityRefresh}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsModal(props: Record<string, any>) {
   const { showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, sessionId, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, surface, testModel, theme, updateMsg, version, workspace, hooks, t } = props;
@@ -542,6 +599,7 @@ export function SettingsModal(props: Record<string, any>) {
             )}
             {settingsTab === "about" && (
             <>
+            <ExecutionIntegrityPanel t={t} setError={setError} />
             <div className="modal-section">
               <div className="modal-label">{t.projectMemory}</div>
               <div className="modal-body">{t.projectMemoryHelp}</div>
