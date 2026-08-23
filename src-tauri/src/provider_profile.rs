@@ -190,6 +190,20 @@ impl ProviderProfile {
     }
 }
 
+/// Infer `ProviderFamily` from a catalog key using the same slug/hostname
+/// conventions as `model_caps::provider_of`. Returns `Custom` for anything
+/// that does not match a known family — this is the fail-closed default.
+pub fn infer_family(catalog_key: &str) -> ProviderFamily {
+    let lower = catalog_key.to_ascii_lowercase();
+    if lower.starts_with("glm") || lower.contains("bigmodel") || lower.contains("zhipu") {
+        ProviderFamily::Glm
+    } else if lower.starts_with("deepseek") {
+        ProviderFamily::DeepSeek
+    } else {
+        ProviderFamily::Custom
+    }
+}
+
 fn validate_catalog_key(value: &str) -> Result<(), ProfileError> {
     if value.is_empty()
         || value.len() > 256
@@ -296,6 +310,68 @@ mod tests {
             }),
             Err(ProfileError::CacheTelemetryUnsupported)
         );
+    }
+
+    #[test]
+    fn infer_family_classifies_known_providers_and_fails_closed_on_unknown() {
+        assert_eq!(infer_family("glm-4-flash"), ProviderFamily::Glm);
+        assert_eq!(infer_family("GLM-5.2"), ProviderFamily::Glm);
+        assert_eq!(infer_family("deepseek-chat"), ProviderFamily::DeepSeek);
+        assert_eq!(infer_family("deepseek-reasoner"), ProviderFamily::DeepSeek);
+        assert_eq!(infer_family("custom:my-model"), ProviderFamily::Custom);
+        assert_eq!(infer_family("gpt-4o"), ProviderFamily::Custom);
+        assert_eq!(infer_family("qwen2.5-coder"), ProviderFamily::Custom);
+    }
+
+    #[test]
+    fn glm_deepseek_custom_get_native_serial_defaults_without_evidence() {
+        let glm = ProviderProfile::safe_default("glm-4-flash", ProviderFamily::Glm).unwrap();
+        assert_eq!(glm.tool_presentation, ToolPresentation::Native);
+        assert_eq!(glm.max_concurrent_reads, 2);
+        assert!(glm.stable_prompt_prefix);
+        assert!(!glm.cache_read_telemetry);
+        assert!(glm.benchmark_evidence_hash.is_none());
+
+        let deepseek =
+            ProviderProfile::safe_default("deepseek-chat", ProviderFamily::DeepSeek).unwrap();
+        assert_eq!(deepseek.tool_presentation, ToolPresentation::Native);
+        assert_eq!(deepseek.max_concurrent_reads, 2);
+        assert!(deepseek.cache_read_telemetry);
+        assert!(deepseek.benchmark_evidence_hash.is_none());
+
+        let custom =
+            ProviderProfile::safe_default("qwen2.5-coder", ProviderFamily::Custom).unwrap();
+        assert_eq!(custom.tool_presentation, ToolPresentation::Native);
+        assert_eq!(custom.max_concurrent_reads, 1);
+        assert!(!custom.cache_read_telemetry);
+        assert!(custom.benchmark_evidence_hash.is_none());
+    }
+
+    #[test]
+    fn unknown_provider_fails_closed_on_production_path() {
+        let family = infer_family("completely-unknown-model-xyz");
+        assert_eq!(family, ProviderFamily::Custom);
+        let profile =
+            ProviderProfile::safe_default("completely-unknown-model-xyz", family).unwrap();
+        assert_eq!(profile.tool_presentation, ToolPresentation::Native);
+        assert_eq!(profile.max_concurrent_reads, 1);
+        assert!(!profile.cache_read_telemetry);
+        assert!(!profile.reasoning_round_trip);
+        assert!(profile.benchmark_evidence_hash.is_none());
+
+        let evidence = ToolModeEvidence {
+            provider_catalog_key: "completely-unknown-model-xyz".into(),
+            benchmark_id: "B-attempt".into(),
+            requested_mode: ToolPresentation::Hybrid,
+            trials: 30,
+            baseline_correctness: 0.90,
+            candidate_correctness: 0.91,
+            median_latency_improvement: 0.20,
+            write_order_drift_count: 0,
+        };
+        let upgraded = profile.apply_tool_mode_evidence(&evidence).unwrap();
+        assert_eq!(upgraded.tool_presentation, ToolPresentation::Hybrid);
+        assert!(upgraded.benchmark_evidence_hash.is_some());
     }
 
     #[test]

@@ -964,5 +964,18 @@ pub async fn agent_set_model(
     let _: acp::SetSessionModelResponse = acp_send(req, &acp_tx)
         .await
         .map_err(|e| ModelSwitchError::from_acp(&e))?;
+    {
+        let mut guard = state.handle.lock().await;
+        if let Some(handle) = guard.as_mut() {
+            let family = crate::provider_profile::infer_family(&model);
+            handle.provider_profile =
+                crate::provider_profile::ProviderProfile::safe_default(&model, family)
+                    .inspect_err(|error| {
+                        tracing::warn!("ProviderProfile refresh on route change failed for {model}: {error}");
+                    })
+                    .ok();
+            handle.provider_catalog_key = Some(model);
+        }
+    }
     Ok(())
 }

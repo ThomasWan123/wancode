@@ -777,4 +777,36 @@ mod tests {
         );
         assert_eq!(registry.release_all(&lease).unwrap().len(), 1);
     }
+
+    #[test]
+    fn register_failure_after_create_leaves_no_orphan_in_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = CapabilityLease::issue_root(request(root.path(), "parent")).unwrap();
+        let registry = ResourceRegistry::default();
+
+        registry
+            .register(&lease, ResourceKind::Terminal, "terminal-orphan")
+            .unwrap();
+
+        let second_register =
+            registry.register(&lease, ResourceKind::Terminal, "terminal-orphan");
+        assert!(
+            matches!(second_register, Err(CapabilityError::ResourceAlreadyExists)),
+            "duplicate register must fail (simulates ledger/registry failure)"
+        );
+
+        registry
+            .release(&lease, ResourceKind::Terminal, "terminal-orphan")
+            .unwrap();
+        let remaining = registry.release_all(&lease).unwrap();
+        assert!(
+            remaining.is_empty(),
+            "after compensating release, no orphan terminal should remain"
+        );
+        assert_eq!(
+            registry.authorize(&lease, ResourceKind::Terminal, "terminal-orphan"),
+            Err(CapabilityError::ResourceNotFound),
+            "orphan must be fully cleaned up and invisible to release_all"
+        );
+    }
 }

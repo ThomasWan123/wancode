@@ -1345,6 +1345,44 @@ mod tests {
     }
 
     #[test]
+    fn seeded_duplicate_event_ids_are_detected_by_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEDGER_FILE_NAME);
+        let event_a = ExecutionEvent {
+            schema_version: 1,
+            seq: 1,
+            event_id: "duplicate-id".into(),
+            time_unix_ms: 1000,
+            context: context("s1"),
+            event: ExecutionEventKind::SurfaceBound,
+        };
+        let event_b = ExecutionEvent {
+            schema_version: 1,
+            seq: 2,
+            event_id: "duplicate-id".into(),
+            time_unix_ms: 1001,
+            context: context("s1"),
+            event: ExecutionEventKind::PolicyApplied,
+        };
+        let mut content = serde_json::to_string(&event_a).unwrap();
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&event_b).unwrap());
+        content.push('\n');
+        std::fs::write(&path, content).unwrap();
+
+        let ledger = ExecutionLedger::open(dir.path()).unwrap();
+        let diagnostics = ledger.diagnostics().unwrap();
+        assert!(
+            diagnostics.duplicate_event_ids.contains("duplicate-id"),
+            "diagnostics must report the seeded duplicate event ID"
+        );
+        assert!(
+            !diagnostics.duplicate_event_ids.is_empty(),
+            "duplicate_event_ids must be non-empty for integrity-blocked state"
+        );
+    }
+
+    #[test]
     fn future_schema_and_non_monotonic_sequence_are_distinct_failures() {
         let dir = tempfile::tempdir().unwrap();
         let event = ExecutionEvent {
