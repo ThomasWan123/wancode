@@ -22,9 +22,9 @@ Unlike single-provider clients, WanCode treats model choice as a first-class fea
 
 The desktop client is built with Tauri 2, React, and TypeScript. Its Rust agent runtime is based on the open-source [grok-build](https://github.com/ThomasWan123/grok-build) project and is pinned through a reproducible, audited vendor manifest.
 
-## Current release: v0.20.3
+## Current release: v0.21.0
 
-[WanCode v0.20.3](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.3) adds **text-PDF** support to the Work surface on top of v0.20.2's durable document context, restart recovery, and startup coordination fixes. Work now imports PDF and DOCX files, extracts bounded text in a crash-contained worker, and supplies citation-ready context to every turn. Image-only PDFs are rejected with an explicit OCR boundary.
+[WanCode v0.21.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.21.0) adds an auditable harness kernel beneath the existing Chat, Code, and Work surfaces: an append-only execution ledger, immutable capability leases, lease-bound terminal and job ownership, single-use approval receipts, fail-closed execution-integrity checks, provider-profile evidence, and bounded read concurrency with mutation barriers. Cowork and scanned-document OCR remain gated.
 
 | Surface | Intended use | Local capabilities |
 |---|---|---|
@@ -129,7 +129,7 @@ powershell -File scripts/smoke.ps1
 
 ## Project status
 
-- **Latest stable release:** [v0.20.3](https://github.com/ThomasWan123/wancode/releases/tag/v0.20.3)
+- **Latest stable release:** [v0.21.0](https://github.com/ThomasWan123/wancode/releases/tag/v0.21.0)
 - **Available surfaces:** Chat, Code, and Work
 - **Gated surface:** Cowork
 - **Platform:** Windows x64

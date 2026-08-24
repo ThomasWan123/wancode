@@ -49,6 +49,10 @@ jobs:
           powershell -File scripts/bootstrap.ps1 -Dest $engine
           powershell -File scripts/audit_effective_tree.ps1 verify -Engine $engine
 
+      - name: Fetch and verify the pinned PDFium runtime
+        shell: pwsh
+        run: ./scripts/fetch_pdfium.ps1
+
       - name: Install frontend dependencies
         run: npm ci
 
