@@ -82,29 +82,6 @@ function extractToolContent(content: any[] | undefined): { diffs: ToolDiff[]; ou
   return { diffs, output };
 }
 
-function DiffView({ diff }: { diff: ToolDiff }) {
-  const oldLines = (diff.oldText ?? "").split("\n");
-  const newLines = diff.newText.split("\n");
-  return (
-    <div className="diff">
-      <div className="diff-path">{diff.path}</div>
-      <pre>
-        {diff.oldText !== undefined &&
-          oldLines.map((l, i) => (
-            <div key={"o" + i} className="line del">
-              - {l}
-            </div>
-          ))}
-        {newLines.map((l, i) => (
-          <div key={"n" + i} className="line add">
-            + {l}
-          </div>
-        ))}
-      </pre>
-    </div>
-  );
-}
-
 type TreeNode = { name: string; path: string; children?: Record<string, TreeNode> };
 
 function buildTree(paths: string[]): TreeNode {
@@ -430,6 +407,9 @@ function App() {
   function cycleTranscript() {
     const order = ["default", "compact", "verbose"];
     const next = order[(order.indexOf(transcriptMode) + 1) % order.length];
+    persistTranscript(next);
+  }
+  function persistTranscript(next: string) {
     setTranscriptMode(next);
     localStorage.setItem("wancode-transcript", next);
   }
@@ -2310,7 +2290,7 @@ function App() {
     <main className="chat-app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">W</div>
+          <div className="brand-mark"><img src="/app-icon.png" alt="" /></div>
           <div className="brand-name">WanCode</div>
         </div>
         <div className="surface-switch" role="group" aria-label={lang === "zh" ? "会话层" : "Session surface"}>
@@ -2542,11 +2522,11 @@ function App() {
         <div className="main-col">
       <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t }} />
 
-      <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t }} />
+      <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); setWbTab("diff"); } }} />
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode: persistTranscript }} />
         </div>
 
         {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />}
