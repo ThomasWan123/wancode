@@ -334,6 +334,11 @@ pub async fn git_diffs(
     paths: Option<Vec<String>>,
     include_patch: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let Some(root) = session_git_root(&state).await? else {
+        // 与 git_status_ext 同一信封：不是仓库就 data=null，绝不触发 #83
+        // workspace-hub 回退，也不把「当前工作区不是 git 仓库」抛成错误条。
+        return Ok(serde_json::json!({ "result": { "data": null } }));
+    };
     ext_call(
         &state,
         "x.ai/git/diffs",
@@ -341,6 +346,7 @@ pub async fn git_diffs(
         // 超限则整个请求失败"（check_diff_size_limits），一把 lock 文件就能
         // 把整个 Diff 面板打死。超大 patch 由前端截断显示。
         serde_json::json!({
+            "gitRoot": root,
             "paths": paths,
             "includePatch": include_patch.unwrap_or(false),
         }),

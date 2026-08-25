@@ -2,7 +2,7 @@
    步 A 透传。红线：
    - 队列编辑不做乐观更新，引擎 queue/changed 广播回来才刷新（版本守卫是良性 no-op）；
    - ↑/↓ 历史调取只在无候选弹窗时接管，histIdxRef/draftRef 语义保持在 App 层。 */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { activateOnKeyboard } from "../../accessibility";
 import { assertNever, type AmbiguousCandidate, type ModelBlock } from "../../modelBlock";
@@ -81,6 +81,8 @@ export function Composer(props: Record<string, any>) {
   // 按钮看着能点、点了被 App 的 send() 静默吞掉——用户得不到任何解释。
   const sessionBlocked = !!block;
   const shownNotice = modelBlockOpen ? blockView.notice : null;
+  const composingRef = useRef(false);
+  const atPopupEmpty = popup?.kind === "at" && popupItems.length === 0;
 
   async function switchModel(target: string, previous: string) {
     try {
@@ -211,30 +213,44 @@ export function Composer(props: Record<string, any>) {
               ))}
             </div>
           )}
-          {popup && popupItems.length > 0 && (
+          {(popup && popupItems.length > 0) || atPopupEmpty ? (
             <div className="mention-popup">
-              {popupItems.map((it: any, idx: any) => (
-                <div
-                  key={it.label}
-                  className={`mention-item ${idx === popup.sel ? "active" : ""}`}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    acceptPopup(idx);
-                  }}
-                >
-                  <span className="mention-label">{it.label}</span>
-                  {it.desc && <span className="mention-desc">{it.desc}</span>}
-                </div>
-              ))}
+              {atPopupEmpty ? (
+                <div className="mention-item mention-empty">{t.mentionNoFiles}</div>
+              ) : (
+                popupItems.map((it: any, idx: any) => (
+                  <div
+                    key={it.label}
+                    className={`mention-item ${idx === popup.sel ? "active" : ""}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      acceptPopup(idx);
+                    }}
+                  >
+                    <span className="mention-label">{it.label}</span>
+                    {it.desc && <span className="mention-desc">{it.desc}</span>}
+                  </div>
+                ))
+              )}
             </div>
-          )}
+          ) : null}
           <textarea
             ref={taRef}
             value={input}
-            onChange={(e) => onComposerChange(e.currentTarget.value)}
+            onChange={(e) => onComposerChange(e.currentTarget.value, composingRef.current)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={(e) => {
+              composingRef.current = false;
+              onComposerChange(e.currentTarget.value, false);
+            }}
             onPaste={onPaste}
             onKeyDown={(e) => {
-              if (popup && popupItems.length > 0) {
+              // IME confirmation (Space/Enter) must not send or steal the key.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              const visiblePopup = !!(popup && popupItems.length > 0);
+              if (visiblePopup) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
                   setPopup({ ...popup, sel: (popup.sel + 1) % popupItems.length });
@@ -257,7 +273,7 @@ export function Composer(props: Record<string, any>) {
                 }
               }
               // ↑/↓ 调取历史输入：只在没有候选弹窗、且不是在多行文本里移动光标时接管。
-              if (e.key === "ArrowUp" && !popup && historyRef.current.length > 0) {
+              if (e.key === "ArrowUp" && !visiblePopup && historyRef.current.length > 0) {
                 const atStart = e.currentTarget.selectionStart === 0;
                 if (input === "" || histIdxRef.current >= 0 || atStart) {
                   e.preventDefault();
@@ -268,7 +284,7 @@ export function Composer(props: Record<string, any>) {
                   return;
                 }
               }
-              if (e.key === "ArrowDown" && !popup && histIdxRef.current >= 0) {
+              if (e.key === "ArrowDown" && !visiblePopup && histIdxRef.current >= 0) {
                 e.preventDefault();
                 const next = histIdxRef.current - 1;
                 histIdxRef.current = next;
@@ -367,7 +383,7 @@ export function Composer(props: Record<string, any>) {
                 )}
               </div>
               {surface === "chat" ? (
-                <span className="ws-inline"><span className="dot" />Chat</span>
+                <span className="ws-inline"><span className="dot" />{t.surfaceChat}</span>
               ) : workspace ? (
                 <span className="ws-inline" title={workspace}>
                   <span className="dot" />
@@ -553,6 +569,7 @@ export function Composer(props: Record<string, any>) {
                           {permMode === m && <IconCheck size={15} className="mode-item-check" />}
                         </button>
                       ))}
+                      <div className="mode-menu-sep" role="separator" />
                       <button
                         className="mode-item mode-reset"
                         onClick={() => {

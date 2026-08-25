@@ -31,9 +31,12 @@ import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   decideBackendSurface,
   resolveActiveSurface,
+  surfaceLabel,
   surfaceSwitchRequiresNewSession,
   type SurfaceKind,
 } from "./surface";
+import { detectComposerPopup, popupIsVisible, type ComposerPopup } from "./features/composer/composerPopup";
+import { isNotGitRepoError } from "./features/git/gitStatus";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -388,7 +391,7 @@ function App() {
   const [searchHits, setSearchHits] = useState<SessionEntry[] | null>(null);
   const [updateMsg, setUpdateMsg] = useState("");
   const [fileList, setFileList] = useState<string[]>([]);
-  const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
+  const [popup, setPopup] = useState<ComposerPopup | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
   // v0.14 工作台：Code 面默认打开，宽度可拖、写入 localStorage
@@ -474,6 +477,9 @@ function App() {
   const [openThoughts, setOpenThoughts] = useState<Set<number>>(new Set());
   const [planSteps, setPlanSteps] = useState<{ content: string; status?: string }[]>([]);
   const [gitInfo, setGitInfo] = useState<any>(null);
+  /// Bumped on workspace/session change so in-flight git_status / git_diffs
+  /// from the previous folder cannot overwrite the new view (split-brain).
+  const gitViewEpochRef = useRef(0);
   const [showGit, setShowGit] = useState(false);
   const [gitBranches, setGitBranches] = useState<string[]>([]);
   const [bgTasks, setBgTasks] = useState<any[]>([]);
@@ -594,6 +600,7 @@ function App() {
         source_sha256: string;
       }>("work_import", { workspaceId: workWorkspaceId, sourcePath: path });
       setWorkDocs((prev) => [...prev, rec]);
+      setWorkDocSelected(rec.import_id);
     } catch (e) {
       setError(String(e));
     }
@@ -823,13 +830,19 @@ function App() {
       setGitInfo(null);
       return;
     }
+    const epoch = gitViewEpochRef.current;
     try {
       const r = await invoke<any>("git_status_ext");
+      if (epoch !== gitViewEpochRef.current) return;
       // 引擎统一包成 { result: T | null, error? }。失败时 result 为 null ——
       // 必须区分"引擎报错"和"这不是 git 仓库"，否则会把故障伪装成正常状态。
       if (r?.error) {
+        if (isNotGitRepoError(r.error)) {
+          setGitInfo({ isRepo: false });
+          return;
+        }
         setGitInfo(null);
-        setError(`git: ${typeof r.error === "string" ? r.error : JSON.stringify(r.error)}`);
+        setError(t.gitReadFailed);
         return;
       }
       // 兼容 {result:{format,data}} / {format,data} / 旧版扁平 GitStatusData
@@ -845,8 +858,14 @@ function App() {
       }
       // PR 状态锦上添花：静默拉取，失败即 null（无 gh/无 PR 都正常）
       invoke<any>("git_pr_status")
-        .then((p) => setPrStatus(p ?? null))
-        .catch(() => setPrStatus(null));
+        .then((p) => {
+          if (epoch !== gitViewEpochRef.current) return;
+          setPrStatus(p ?? null);
+        })
+        .catch(() => {
+          if (epoch !== gitViewEpochRef.current) return;
+          setPrStatus(null);
+        });
       setGitInfo({
         isRepo: true,
         branch: d.branch ?? "",
@@ -857,8 +876,14 @@ function App() {
         // 底部状态行只关心"有多少改动"
         files: [...(d.staged ?? []), ...(d.unstaged ?? [])],
       });
-    } catch {
+    } catch (e) {
+      if (epoch !== gitViewEpochRef.current) return;
+      if (isNotGitRepoError(e)) {
+        setGitInfo({ isRepo: false });
+        return;
+      }
       setGitInfo(null);
+      setError(t.gitReadFailed);
     }
   }
 
@@ -899,12 +924,17 @@ function App() {
 
   /// Review：只读子会话审查未提交改动（review_run，最长 5 分钟）。
   async function runReview() {
+    if (gitInfo?.isRepo !== true) return;
     setReviewLoading(true);
     setReviewResult(null);
     try {
       const r = await invoke<any>("review_run");
       setReviewResult(r);
     } catch (e) {
+      if (isNotGitRepoError(e)) {
+        setGitInfo({ isRepo: false });
+        return;
+      }
       setError(String(e));
     } finally {
       setReviewLoading(false);
@@ -952,22 +982,38 @@ function App() {
       setWbFiles(null);
       return;
     }
+    const epoch = gitViewEpochRef.current;
     setWbLoading(true);
     try {
       const r = await invoke<any>("git_diffs", { paths: null, includePatch: true });
+      if (epoch !== gitViewEpochRef.current) return;
       if (r?.error) {
         setWbFiles(null);
-        setError(`diff: ${typeof r.error === "string" ? r.error : JSON.stringify(r.error)}`);
+        if (isNotGitRepoError(r.error)) {
+          setGitInfo((prev: any) => prev?.isRepo === true ? prev : { isRepo: false });
+          return;
+        }
+        setError(t.gitReadFailed);
         return;
       }
       const env = r?.result ?? r;
       const d = env?.data ?? env;
-      setWbFiles(Array.isArray(d?.files) ? d.files : null);
+      if (!d || d.files == null) {
+        setWbFiles(null);
+        setGitInfo((prev: any) => prev?.isRepo === true ? prev : { isRepo: false });
+        return;
+      }
+      setWbFiles(Array.isArray(d.files) ? d.files : null);
     } catch (e) {
+      if (epoch !== gitViewEpochRef.current) return;
       setWbFiles(null);
-      setError(String(e));
+      if (isNotGitRepoError(e)) {
+        setGitInfo((prev: any) => prev?.isRepo === true ? prev : { isRepo: false });
+        return;
+      }
+      setError(t.gitReadFailed);
     } finally {
-      setWbLoading(false);
+      if (epoch === gitViewEpochRef.current) setWbLoading(false);
     }
   }
 
@@ -1425,6 +1471,7 @@ function App() {
         // P2.10 通知监听：能力对应的刷新函数已存在，直接挂接
         if (m === "x.ai/git_head_changed" || m === "x.ai/gitHeadChanged") {
           refreshGit();
+          if (showWorkbenchRef.current) refreshWorkbench();
           return;
         }
         if (m === "x.ai/sessions/changed") {
@@ -1589,7 +1636,10 @@ function App() {
       setModelBlockOpen(true);
       // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
       setGitInfo(null);
+      setWbFiles(null);
+      setReviewResult(null);
     }
+    gitViewEpochRef.current += 1;
     try {
       const r = await invoke<{
         session_id: string;
@@ -1641,7 +1691,10 @@ function App() {
         rememberWorkSession(localStorage, r.session_id);
         rememberWorkWorkspace(localStorage, workId);
         setWorkWorkspaceId(workId);
-        if (!preserve) setWorkDocs([]);
+        if (!preserve) {
+          setWorkDocs([]);
+          setWorkDocSelected(null);
+        }
         if (workId) {
           invoke<
             { import_id: string; display_name: string; kind: string; source_sha256: string }[]
@@ -1679,17 +1732,27 @@ function App() {
       // 加载结果一起回来，直接进选择器状态。
       setModelBlock(parseModelBlock(r.model_block));
       refreshSessions(r.cwd || wsPath);
+      const codeWorkspace =
+        decision.surface === "code" ? (r.cwd || wsPath) : workspaceStateRef.current;
+      const loadFiles = (ws: string) => {
+        invoke<string[]>("list_workspace_files", { workspace: ws })
+          .then((files) => {
+            if (sessionIdRef.current === r.session_id) setFileList(files);
+          })
+          .catch(() => {
+            if (sessionIdRef.current === r.session_id) setFileList([]);
+          });
+      };
       if (decision.surface === "code") {
-        invoke<string[]>("list_workspace_files", { workspace: wsPath })
-          .then(setFileList)
-          .catch(() => {});
+        if (codeWorkspace) loadFiles(codeWorkspace);
         refreshGit();
         refreshTasks();
         refreshMcpLive();
         refreshOtherRecent(wsPath);
-        if (showWorkbenchRef.current) refreshWorkbench();
+        refreshWorkbench();
       } else {
-        setFileList([]);
+        if (decision.surface === "chat" && codeWorkspace) loadFiles(codeWorkspace);
+        else setFileList([]);
         setGitInfo(null);
         setMcpServers([]);
       }
@@ -2042,7 +2105,11 @@ function App() {
   }
 
   async function send() {
-    if (popup) return;
+    // Only a *visible* popup row consumes Send. An empty/stale popup (slash
+    // with zero matches, @ with no files) used to no-op here while the UI
+    // showed nothing — Enter looked dead and the send button did nothing.
+    if (popupIsVisible(popup, popupItems.length)) return;
+    if (popup) setPopup(null);
     // 引擎已挂起这个会话的发送。放行只会换来一个空 EndTurn——用户看不出
     // 发生了什么，还以为消息发出去了。在这里拦住并把选择器摆回来。
     if (modelBlock) {
@@ -2144,23 +2211,25 @@ function App() {
           )
         : [];
 
-  function onComposerChange(v: string) {
+  function onComposerChange(v: string, composing = false) {
     setInput(v);
+    if (composing) return;
     const caret = taRef.current?.selectionStart ?? v.length;
-    const before = v.slice(0, caret);
-    // slash: only when it's the very first char of the input
-    if (/^\/[\w-]*$/.test(before) && v === before) {
-      setPopup({ kind: "slash", query: before, sel: 0 });
+    const found = detectComposerPopup(v, caret);
+    if (!found) {
+      if (popup?.kind === "at") fuzzyStop();
+      if (popup) setPopup(null);
       return;
     }
-    // @: token after a whitespace/start, no spaces inside
-    const m = before.match(/(?:^|\s)@([^\s@]*)$/);
-    if (m) {
-      setPopup({ kind: "at", query: m[1], sel: 0 });
-      fuzzyKick(m[1]);
-    } else {
-      if (popup?.kind === "at") fuzzyStop();
-      setPopup(null);
+    setPopup({ kind: found.kind, query: found.query, sel: 0 });
+    if (found.kind === "at") {
+      const ws = workspaceStateRef.current;
+      if (fileList.length === 0 && ws) {
+        invoke<string[]>("list_workspace_files", { workspace: ws })
+          .then(setFileList)
+          .catch(() => {});
+      }
+      fuzzyKick(found.query);
     }
   }
 
@@ -2393,7 +2462,7 @@ function App() {
                 localStorage.setItem("wancode-surface", next);
               }}
             >
-              {next === "chat" ? "Chat" : next === "code" ? "Code" : "Work"}
+              {surfaceLabel(next, t)}
             </button>
           ))}
         </div>
@@ -2622,7 +2691,7 @@ function App() {
           />
         )}
 
-        {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench: (v: boolean) => { setShowWorkbench(v); localStorage.setItem("wancode-wb-open", v ? "1" : "0"); }, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, setWbFileText, wbFileLoading, openWbFile, saveWbFile, wbFileDirty, wbFileSaving, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, wbWidth, t }} />}
+        {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench: (v: boolean) => { setShowWorkbench(v); localStorage.setItem("wancode-wb-open", v ? "1" : "0"); }, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, gitInfo, wbFilePath, wbFileText, setWbFileText, wbFileLoading, openWbFile, saveWbFile, wbFileDirty, wbFileSaving, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, wbWidth, t }} />}
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

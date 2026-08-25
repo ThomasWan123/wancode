@@ -3,10 +3,12 @@ import {
   decideBackendSurface,
   parseSurface,
   resolveActiveSurface,
+  surfaceLabel,
   surfaceNeedsWorkspace,
   surfaceSwitchRequiresNewSession,
   WORK_UI_READY,
 } from "./surface";
+import { STRINGS } from "./i18n";
 
 describe("surface navigation contract", () => {
   it("recognizes known surfaces and fails unknown back to Code", () => {
@@ -25,6 +27,13 @@ describe("surface navigation contract", () => {
     expect(surfaceSwitchRequiresNewSession("code", "work", "s1")).toBe(true);
     expect(surfaceSwitchRequiresNewSession("chat", "chat", "s1")).toBe(false);
     expect(surfaceSwitchRequiresNewSession("chat", "code", "")).toBe(false);
+  });
+
+  it("localizes switcher labels through i18n (default zh)", () => {
+    expect(surfaceLabel("chat", STRINGS.zh)).toBe("聊天");
+    expect(surfaceLabel("code", STRINGS.zh)).toBe("代码");
+    expect(surfaceLabel("work", STRINGS.zh)).toBe("工作");
+    expect(surfaceLabel("chat", STRINGS.en)).toBe("Chat");
   });
 
   it("only Work needs a workspace identity", () => {

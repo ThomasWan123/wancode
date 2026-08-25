@@ -8,6 +8,7 @@
  * RTL 是回归门，真机 dogfooding 是最终体验验收，两者不互相替代。 */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
@@ -215,5 +216,149 @@ describe("模型阻塞的 UI 状态机", () => {
     expect(sendButton()).toBeEnabled();
     expect(screen.queryByText(t.ambiguousTitle)).not.toBeInTheDocument();
     expect(screen.queryByText(new RegExp(t.ambiguousBlocked))).not.toBeInTheDocument();
+  });
+});
+
+describe("composer send / popup / @", () => {
+  it("Enter with an empty popup still sends", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      popup: { kind: "slash", query: "/nope", sel: 0 },
+      popupItems: [],
+      send,
+      input: "hello world",
+    });
+    await user.type(screen.getByRole("textbox"), "{Enter}");
+    expect(send).toHaveBeenCalled();
+  });
+
+  it("Send is not blocked by a hidden empty popup", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      popup: { kind: "at", query: "", sel: 0 },
+      popupItems: [],
+      send,
+      input: "hello world",
+    });
+    await user.click(sendButton());
+    expect(send).toHaveBeenCalled();
+  });
+
+  it("Enter with a visible popup row accepts it instead of sending", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn();
+    const acceptPopup = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      popup: { kind: "slash", query: "/", sel: 0 },
+      popupItems: [{ label: "/review", desc: "Review" }],
+      send,
+      acceptPopup,
+      input: "/",
+    });
+    await user.type(screen.getByRole("textbox"), "{Enter}");
+    expect(acceptPopup).toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("typing @ with no files shows a one-line empty hint", () => {
+    renderComposer({
+      modelBlock: null,
+      popup: { kind: "at", query: "", sel: 0 },
+      popupItems: [],
+      fileList: [],
+      workspace: "",
+    });
+    expect(screen.getByText(t.mentionNoFiles)).toBeVisible();
+  });
+
+  it("keeps spaces when typing a normal sentence", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [input, setInput] = useState("");
+      const props = {
+        MODE_ORDER: ["default"],
+        busy: false,
+        draftRef: { current: "" },
+        histIdxRef: { current: -1 },
+        historyRef: { current: [] },
+        fileInputRef: { current: null },
+        taRef: { current: null },
+        input,
+        lang: "zh",
+        model: "glm-open",
+        models: ["glm-open"],
+        modeMeta: { default: { label: "默认", desc: "" } },
+        modeMenu: false,
+        pastedImages: [],
+        permMode: "default",
+        popup: null,
+        popupItems: [],
+        queue: [],
+        sessionId: "s1",
+        starting: false,
+        workspace: "D:/proj",
+        t,
+        modelBlock: null,
+        setError: vi.fn(),
+        setInput,
+        setItems: vi.fn(),
+        setMode: vi.fn(),
+        setModeMenu: vi.fn(),
+        setModel: vi.fn(),
+        setPastedImages: vi.fn(),
+        setPlusMenu: vi.fn(),
+        setPopup: vi.fn(),
+        setEditingQueueId: vi.fn(),
+        setSettingsTab: vi.fn(),
+        setShowSettings: vi.fn(),
+        setShowTerminal: vi.fn(),
+        send: vi.fn(),
+        sendInterject: vi.fn(),
+        onComposerChange: (v: string) => setInput(v),
+        onPaste: vi.fn(),
+        onPickImages: vi.fn(),
+        acceptPopup: vi.fn(),
+        pickFolderAndConnect: vi.fn(),
+        refreshMcpConfig: vi.fn(),
+      };
+      return <Composer {...props} />;
+    }
+    render(<Harness />);
+    await user.type(screen.getByRole("textbox"), "hello world test");
+    expect(screen.getByRole("textbox")).toHaveValue("hello world test");
+  });
+
+  it("separates Reset permission memory from Plan in the mode menu", async () => {
+    const setModeMenu = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      MODE_ORDER: ["manual", "acceptEdits", "plan", "auto", "bypass"],
+      permMode: "plan",
+      modeMenu: true,
+      setModeMenu,
+      modeMeta: {
+        manual: { label: t.modeManual, desc: t.modeManualDesc },
+        acceptEdits: { label: t.modeAcceptEdits, desc: t.modeAcceptEditsDesc },
+        plan: { label: t.modePlan, desc: t.modePlanDesc },
+        auto: { label: t.modeAuto, desc: t.modeAutoDesc },
+        bypass: { label: t.modeBypass, desc: t.modeBypassDesc },
+      },
+    });
+    const menu = document.querySelector(".mode-menu") as HTMLElement;
+    expect(menu).toBeTruthy();
+    const lastMode = menu.querySelector('[data-mode="bypass"]') as HTMLElement;
+    const sep = menu.querySelector('[role="separator"]') as HTMLElement;
+    const reset = menu.querySelector(".mode-reset") as HTMLElement;
+    expect(lastMode).toBeTruthy();
+    expect(sep).toBeTruthy();
+    expect(reset).toBeTruthy();
+    expect(screen.getByText(t.permReset)).toBeVisible();
+    expect(lastMode.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(sep.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

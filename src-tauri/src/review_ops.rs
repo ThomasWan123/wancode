@@ -5,6 +5,7 @@ use agent_client_protocol as acp;
 
 use crate::agent::{ext_call, AgentState};
 use crate::autotest::walkdir_find;
+use crate::git_ops::session_git_root;
 
 /// v0.15 Review：只读子会话审查未提交改动，返回结构化 findings。
 ///
@@ -23,11 +24,15 @@ pub async fn review_run(
         (h.acp_tx.clone(), h.cwd.clone(), h.session_id.0.to_string())
     };
 
+    let Some(root) = session_git_root(&state).await? else {
+        return Err("当前工作区不是 git 仓库".into());
+    };
+
     // 1. 收集未提交改动的 unified diff（总量截断，防撑爆上下文）
     let diffs = ext_call(
         &state,
         "x.ai/git/diffs",
-        serde_json::json!({ "includePatch": true }),
+        serde_json::json!({ "gitRoot": root, "includePatch": true }),
     )
     .await?;
     let env = diffs.get("result").unwrap_or(&diffs);
