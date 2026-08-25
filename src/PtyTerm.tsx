@@ -56,7 +56,7 @@ export default function PtyTerm({
       convertEol: false,
       theme: dark
         ? { background: "#171717", foreground: "#ececec", cursor: "#ececec" }
-        : { background: "#ffffff", foreground: "#1a1a1a", cursor: "#1a1a1a" },
+        : { background: "#f5f5f5", foreground: "#1a1a1a", cursor: "#1a1a1a" },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -147,7 +147,7 @@ export default function PtyTerm({
     if (!termRef.current) return;
     termRef.current.options.theme = dark
       ? { background: "#171717", foreground: "#ececec", cursor: "#ececec" }
-      : { background: "#ffffff", foreground: "#1a1a1a", cursor: "#1a1a1a" };
+      : { background: "#f5f5f5", foreground: "#1a1a1a", cursor: "#1a1a1a" };
   }, [dark]);
 
   return <div className="pty-host" ref={hostRef} />;

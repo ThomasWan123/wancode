@@ -28,7 +28,8 @@ export function resolveActiveSurface(value: unknown): SurfaceKind {
   return parsed;
 }
 
-/** 换层从不改写既有会话,只准备新会话。 */
+/** 换层从不改写既有会话的层身份（引擎 SurfaceBinding 不可变），只准备新会话。
+ *  UI 必须保留上一层的 transcript 并在目标层重连，而不是看起来像硬重置。 */
 export function surfaceSwitchRequiresNewSession(
   current: SurfaceKind,
   next: SurfaceKind,

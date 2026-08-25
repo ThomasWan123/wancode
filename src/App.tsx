@@ -11,6 +11,8 @@ import { Messages } from "./features/messages/Messages";
 import { Dialogs } from "./features/dialogs/Dialogs";
 import { Home } from "./features/home/Home";
 import { Workbench } from "./features/workbench/Workbench";
+import { PlanDocument } from "./features/plan/PlanDocument";
+import { WorkDesk } from "./features/work/WorkDesk";
 import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
@@ -47,6 +49,11 @@ import {
   rememberWorkWorkspace,
 } from "./workSessionPersistence";
 import { workPromptForDisplay } from "./workPromptDisplay";
+import {
+  restoreSurfaceSession,
+  snapshotSurfaceSession,
+  type SurfaceSessionCache,
+} from "./surfaceSession";
 
 type SessionEntry = {
   session_id: string;
@@ -80,29 +87,6 @@ function extractToolContent(content: any[] | undefined): { diffs: ToolDiff[]; ou
     }
   }
   return { diffs, output };
-}
-
-function DiffView({ diff }: { diff: ToolDiff }) {
-  const oldLines = (diff.oldText ?? "").split("\n");
-  const newLines = diff.newText.split("\n");
-  return (
-    <div className="diff">
-      <div className="diff-path">{diff.path}</div>
-      <pre>
-        {diff.oldText !== undefined &&
-          oldLines.map((l, i) => (
-            <div key={"o" + i} className="line del">
-              - {l}
-            </div>
-          ))}
-        {newLines.map((l, i) => (
-          <div key={"n" + i} className="line add">
-            + {l}
-          </div>
-        ))}
-      </pre>
-    </div>
-  );
 }
 
 type TreeNode = { name: string; path: string; children?: Record<string, TreeNode> };
@@ -278,6 +262,9 @@ function App() {
   >([]);
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
+  const surfaceCacheRef = useRef<SurfaceSessionCache>({});
+  const preserveTranscriptRef = useRef(false);
+  const [workDocSelected, setWorkDocSelected] = useState<string | null>(null);
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
   // 结构化下拉选项（v0.18.7-B）：value=catalog key，显示 name+端点。
@@ -404,8 +391,18 @@ function App() {
   const [popup, setPopup] = useState<{ kind: "at" | "slash"; query: string; sel: number } | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
-  // v0.14 工作台（右侧第二栏）：Diff 一级视图
-  const [showWorkbench, setShowWorkbench] = useState(false);
+  // v0.14 工作台：Code 面默认打开，宽度可拖、写入 localStorage
+  const [showWorkbench, setShowWorkbench] = useState(
+    () => localStorage.getItem("wancode-wb-open") !== "0",
+  );
+  const [wbWidth, setWbWidth] = useState(() => {
+    const n = Number(localStorage.getItem("wancode-wb-width"));
+    return Number.isFinite(n) && n >= 280 && n <= 720 ? n : 420;
+  });
+  const wbWidthRef = useRef(wbWidth);
+  wbWidthRef.current = wbWidth;
+  const showWorkbenchRef = useRef(showWorkbench);
+  showWorkbenchRef.current = showWorkbench;
   const [wbFiles, setWbFiles] = useState<any[] | null>(null);
   const [wbLoading, setWbLoading] = useState(false);
   const [wbOpenPaths, setWbOpenPaths] = useState<Set<string>>(new Set());
@@ -414,6 +411,9 @@ function App() {
   const [wbFileText, setWbFileText] = useState<string | null>(null);
   const [wbFileLoading, setWbFileLoading] = useState(false);
   const [wbFileFilter, setWbFileFilter] = useState("");
+  const [wbFileOriginal, setWbFileOriginal] = useState<string | null>(null);
+  const [wbFileSaving, setWbFileSaving] = useState(false);
+  const wbFileDirty = wbFileText !== null && wbFileOriginal !== null && wbFileText !== wbFileOriginal;
   const [reviewResult, setReviewResult] = useState<any>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   // v0.17 预览标签：URL 记忆到 localStorage（按工作区无区分，够用）
@@ -430,6 +430,9 @@ function App() {
   function cycleTranscript() {
     const order = ["default", "compact", "verbose"];
     const next = order[(order.indexOf(transcriptMode) + 1) % order.length];
+    persistTranscript(next);
+  }
+  function persistTranscript(next: string) {
     setTranscriptMode(next);
     localStorage.setItem("wancode-transcript", next);
   }
@@ -649,10 +652,11 @@ function App() {
     return workspace;
   }
 
-  async function respondPlan(outcome: string) {
+  async function respondPlan(outcome: string, feedbackOverride?: string | null) {
     if (!planApproval) return;
     const id = planApproval.id;
-    const fb = planFeedback.trim() || null;
+    const fb =
+      feedbackOverride !== undefined ? feedbackOverride : planFeedback.trim() || null;
     setPlanApproval(null);
     setPlanFeedback("");
     await invoke("agent_plan_respond", { id, outcome, feedback: fb }).catch((e) => setError(String(e)));
@@ -911,17 +915,33 @@ function App() {
   async function openWbFile(path: string | null) {
     setWbFilePath(path);
     setWbFileText(null);
+    setWbFileOriginal(null);
     if (!path) return;
     setWbFileLoading(true);
     try {
       const r = await invoke<any>("fs_read", { path });
       const env = r?.result ?? r;
       const d = env?.data ?? env;
-      setWbFileText(typeof d?.content === "string" ? d.content : null);
+      const text = typeof d?.content === "string" ? d.content : null;
+      setWbFileText(text);
+      setWbFileOriginal(text);
     } catch (e) {
       setError(String(e));
     } finally {
       setWbFileLoading(false);
+    }
+  }
+
+  async function saveWbFile() {
+    if (!wbFilePath || wbFileText === null) return;
+    setWbFileSaving(true);
+    try {
+      await invoke("fs_write", { path: wbFilePath, content: wbFileText });
+      setWbFileOriginal(wbFileText);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setWbFileSaving(false);
     }
   }
 
@@ -1555,15 +1575,21 @@ function App() {
     }
     setStarting(true);
     setError("");
-    setItems([]);
-    setSessionId("");
-    sessionIdRef.current = "";
-    // 阻塞状态属于某一个具体会话。清在这里而不是拿到响应后——启动失败时
-    // 界面已经空了，却还挂着上一个会话的"请选择模型"，是自相矛盾的状态。
-    setModelBlock(null);
-    setModelBlockOpen(true);
-    // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
-    setGitInfo(null);
+    const preserve = preserveTranscriptRef.current;
+    preserveTranscriptRef.current = false;
+    if (preserve) {
+      replaySuppressRef.current = true;
+    } else {
+      setItems([]);
+      setSessionId("");
+      sessionIdRef.current = "";
+      // 阻塞状态属于某一个具体会话。清在这里而不是拿到响应后——启动失败时
+      // 界面已经空了，却还挂着上一个会话的"请选择模型"，是自相矛盾的状态。
+      setModelBlock(null);
+      setModelBlockOpen(true);
+      // 换会话先清面板数据——失败时留着上一个工作区的 git 状态最危险（#83）
+      setGitInfo(null);
+    }
     try {
       const r = await invoke<{
         session_id: string;
@@ -1615,7 +1641,7 @@ function App() {
         rememberWorkSession(localStorage, r.session_id);
         rememberWorkWorkspace(localStorage, workId);
         setWorkWorkspaceId(workId);
-        setWorkDocs([]);
+        if (!preserve) setWorkDocs([]);
         if (workId) {
           invoke<
             { import_id: string; display_name: string; kind: string; source_sha256: string }[]
@@ -1661,6 +1687,7 @@ function App() {
         refreshTasks();
         refreshMcpLive();
         refreshOtherRecent(wsPath);
+        if (showWorkbenchRef.current) refreshWorkbench();
       } else {
         setFileList([]);
         setGitInfo(null);
@@ -1689,6 +1716,11 @@ function App() {
       }
       return "";
     } finally {
+      if (preserve) {
+        window.setTimeout(() => {
+          replaySuppressRef.current = false;
+        }, 400);
+      }
       setStarting(false);
     }
   }
@@ -2221,6 +2253,7 @@ function App() {
     if (surface !== "code") return;
     const next = !showWorkbench;
     setShowWorkbench(next);
+    localStorage.setItem("wancode-wb-open", next ? "1" : "0");
     if (next) refreshWorkbench();
   };
   paletteRef.current = { toggleWorkbench };
@@ -2310,7 +2343,7 @@ function App() {
     <main className="chat-app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">W</div>
+          <div className="brand-mark"><img src="/app-icon.png" alt="" /></div>
           <div className="brand-name">WanCode</div>
         </div>
         <div className="surface-switch" role="group" aria-label={lang === "zh" ? "会话层" : "Session surface"}>
@@ -2322,14 +2355,39 @@ function App() {
               onClick={() => {
                 if (surface === next) return;
                 if (surfaceSwitchRequiresNewSession(surface, next, sessionId)) {
-                  setSessionId("");
-                  sessionIdRef.current = "";
-                  setItems([]);
-                  setModelBlock(null);
-                  setShowGit(false);
-                  setShowWorkbench(false);
-                  setShowTerminal(false);
-                  setSidebarTab("sessions");
+                  surfaceCacheRef.current = snapshotSurfaceSession(
+                    surfaceCacheRef.current,
+                    surface,
+                    {
+                      sessionId,
+                      items,
+                      workspace,
+                      workWorkspaceId,
+                    },
+                  );
+                  const cached = restoreSurfaceSession(surfaceCacheRef.current, next);
+                  setSurface(next);
+                  localStorage.setItem("wancode-surface", next);
+                  if (cached?.sessionId) {
+                    setItems(cached.items as ChatItem[]);
+                    setSessionId(cached.sessionId);
+                    sessionIdRef.current = cached.sessionId;
+                    preserveTranscriptRef.current = true;
+                    void startSession(
+                      cached.sessionId,
+                      next === "code" ? cached.workspace || undefined : undefined,
+                      false,
+                      next === "work" ? cached.workWorkspaceId || undefined : undefined,
+                    );
+                  } else {
+                    setSessionId("");
+                    sessionIdRef.current = "";
+                    setItems([]);
+                    setShowGit(false);
+                    setShowTerminal(false);
+                    setSidebarTab("sessions");
+                  }
+                  return;
                 }
                 setSurface(next);
                 localStorage.setItem("wancode-surface", next);
@@ -2376,6 +2434,7 @@ function App() {
             onClick={() => {
               const next = !showWorkbench;
               setShowWorkbench(next);
+              localStorage.setItem("wancode-wb-open", next ? "1" : "0");
               if (next) refreshWorkbench();
             }}
           >
@@ -2397,10 +2456,10 @@ function App() {
         {surface === "work" && sessionId && (
           <button
             className="icon-btn"
-            title={lang === "zh" ? "导入文档 (PDF / DOCX)" : "Import document (PDF / DOCX)"}
+            title={t.workImport}
             onClick={importWorkDoc}
           >
-            {lang === "zh" ? "导入" : "Import"}
+            {t.workImport}
           </button>
         )}
         <button
@@ -2421,27 +2480,14 @@ function App() {
           <IconSettings />
         </button>
       </header>
-      {/* W2-fe-b:Work 视图(最小版)——导入的文档列表(只读,原件不可改)。
-          文档内容查看/引用回源归 W3(解析锚点 + 只读查看器)。 */}
       {surface === "work" && sessionId && (
-        <div className="work-docs" role="region" aria-label={lang === "zh" ? "Work 文档" : "Work documents"}>
-          {workDocs.length === 0 ? (
-            <div className="work-docs-empty">
-              {lang === "zh"
-                ? "尚无文档。点“导入”添加 PDF 或 DOCX（原件只读复制到本会话工作区）。"
-                : "No documents yet. Click Import to add a PDF or DOCX (copied read-only into this session's workspace)."}
-            </div>
-          ) : (
-            <ul className="work-docs-list">
-              {workDocs.map((d) => (
-                <li key={d.import_id} title={`sha256 ${d.source_sha256}`}>
-                  <span className="work-doc-kind">{d.kind.toUpperCase()}</span>
-                  <span className="work-doc-name">{d.display_name}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <WorkDesk
+          docs={workDocs}
+          selectedId={workDocSelected}
+          onSelect={setWorkDocSelected}
+          onImport={importWorkDoc}
+          t={t}
+        />
       )}
 
       {ctx && sessionId && (
@@ -2465,7 +2511,7 @@ function App() {
         </div>
       )}
 
-      <Dialogs {...{ answers, doRewind, editingSkill, planApproval, planFeedback, question, refreshSkills, respondPlan, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setPlanFeedback, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t }} />
+      <Dialogs {...{ answers, doRewind, editingSkill, question, refreshSkills, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t }} />
 
       {crashInfo && (
         <div className="crash-banner">
@@ -2537,19 +2583,46 @@ function App() {
 
 
       <div className="body-row">
-        <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang }} />
+        <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang, onOpenFile: (p: string) => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("file"); void openWbFile(p); } }} />
 
         <div className="main-col">
-      <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t }} />
+      <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t, planPending: !!planApproval }} />
 
-      <Messages {...{ DiffView, bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t }} />
+      <PlanDocument {...{ planApproval, planFeedback, setPlanFeedback, respondPlan, t }} />
+
+      <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("diff"); } }} />
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode: persistTranscript }} />
         </div>
 
-        {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, t }} />}
+        {surface === "code" && showWorkbench && (
+          <div
+            className="wb-splitter"
+            role="separator"
+            aria-orientation="vertical"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startW = wbWidthRef.current;
+              const onMove = (ev: MouseEvent) => {
+                const next = Math.min(720, Math.max(280, startW + (startX - ev.clientX)));
+                wbWidthRef.current = next;
+                setWbWidth(next);
+              };
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                localStorage.setItem("wancode-wb-width", String(wbWidthRef.current));
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+          />
+        )}
+
+        {surface === "code" && <Workbench {...{ showWorkbench, setShowWorkbench: (v: boolean) => { setShowWorkbench(v); localStorage.setItem("wancode-wb-open", v ? "1" : "0"); }, wbTab, setWbTab, wbFiles, wbLoading, wbOpenPaths, setWbOpenPaths, refreshWorkbench, gitOp, fileList, wbFilePath, wbFileText, setWbFileText, wbFileLoading, openWbFile, saveWbFile, wbFileDirty, wbFileSaving, wbFileFilter, setWbFileFilter, reviewResult, reviewLoading, runReview, fixFindings, previewUrl, setPreviewUrl, previewLive, setPreviewLive, wbWidth, t }} />}
       </div>
       {showPalette && <CommandPalette actions={paletteActions} onClose={() => setShowPalette(false)} t={t} />}
     </main>

@@ -63,12 +63,14 @@ function PatchView({ patch, annotations }: { patch: string; annotations?: Map<nu
   );
 }
 
-/** 文件查看标签：过滤输入 + 文件列表 + 只读内容（行号）。 */
+/** 文件查看标签：过滤 + 列表 + 轻量编辑/保存（过大文件只读）。 */
 function FileTab(props: Record<string, any>) {
-  const { fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter, t } = props;
+  const {
+    fileList, wbFilePath, wbFileText, wbFileLoading, openWbFile, wbFileFilter, setWbFileFilter,
+    setWbFileText, saveWbFile, wbFileDirty, wbFileSaving, t,
+  } = props;
   const hits: string[] = wbFileFilter
     ? (fileList as string[]).filter((p) => {
-        // 子序列匹配，与 @ 联想同语义
         const q = wbFileFilter.toLowerCase();
         const s = p.toLowerCase();
         let i = 0;
@@ -81,7 +83,7 @@ function FileTab(props: Record<string, any>) {
     : fileList;
   const lines = (wbFileText ?? "").split("\n");
   const MAX = 3000;
-  const shown = lines.length > MAX ? lines.slice(0, MAX) : lines;
+  const tooBig = lines.length > MAX;
   return (
     <>
       <input
@@ -109,29 +111,42 @@ function FileTab(props: Record<string, any>) {
         </div>
       ) : (
         <div className="wb-body">
-          <div
-            className="wb-file-row wb-file-back"
-            role="button"
-            tabIndex={0}
-            onClick={() => openWbFile(null)}
-            onKeyDown={(event) => activateOnKeyboard(event, () => openWbFile(null))}
-          >
-            ← {wbFilePath}
+          <div className="wb-file-edit-bar">
+            <div
+              className="wb-file-row wb-file-back"
+              role="button"
+              tabIndex={0}
+              onClick={() => openWbFile(null)}
+              onKeyDown={(event) => activateOnKeyboard(event, () => openWbFile(null))}
+            >
+              ← {wbFilePath}
+            </div>
+            {!tooBig && wbFileText !== null && (
+              <button className="ghost small" disabled={!wbFileDirty || wbFileSaving} onClick={saveWbFile}>
+                {wbFileSaving ? t.wbSaving : wbFileDirty ? t.wbSave : t.wbSaved}
+              </button>
+            )}
           </div>
           {wbFileLoading && <div className="sidebar-empty">{t.loading}</div>}
           {!wbFileLoading && wbFileText === null && <div className="sidebar-empty">{t.wbNoPatch}</div>}
-          {!wbFileLoading && wbFileText !== null && (
+          {!wbFileLoading && wbFileText !== null && tooBig && (
             <pre className="wb-patch wb-file-view">
-              {shown.map((l: string, i: number) => (
+              {lines.slice(0, MAX).map((l: string, i: number) => (
                 <div key={i} className="wb-line">
                   <span className="wb-lineno">{i + 1}</span>
                   {l || " "}
                 </div>
               ))}
-              {lines.length > MAX && (
-                <div className="wb-line hunk">… {lines.length - MAX} more lines (truncated)</div>
-              )}
+              <div className="wb-line hunk">{t.wbFileTooLarge}</div>
             </pre>
+          )}
+          {!wbFileLoading && wbFileText !== null && !tooBig && (
+            <textarea
+              className="wb-file-editor"
+              value={wbFileText}
+              spellCheck={false}
+              onChange={(e) => setWbFileText(e.currentTarget.value)}
+            />
           )}
         </div>
       )}
@@ -290,7 +305,7 @@ export function Workbench(props: Record<string, any>) {
     });
 
   return (
-    <aside className="workbench">
+    <aside className="workbench" style={props.wbWidth ? { width: props.wbWidth, flex: "none" } : undefined}>
       <div className="wb-head">
         <span className="wb-title">
           <button

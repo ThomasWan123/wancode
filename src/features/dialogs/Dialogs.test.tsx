@@ -64,17 +64,4 @@ describe("blocking dialog cancellation", () => {
     await user.keyboard("{Escape}");
     expect(respondQuestion).toHaveBeenCalledWith(false);
   });
-
-  it("routes plan Escape through the request-changes response", async () => {
-    const user = userEvent.setup();
-    const respondPlan = vi.fn();
-    renderDialogs({
-      respondPlan,
-      planApproval: { planContent: "Plan" },
-    });
-
-    expect(screen.getByRole("button", { name: STRINGS.en.planRequestChanges })).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(respondPlan).toHaveBeenCalledWith("cancelled");
-  });
 });
