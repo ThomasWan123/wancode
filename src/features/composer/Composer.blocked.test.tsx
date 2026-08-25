@@ -78,6 +78,7 @@ function renderComposer(overrides: Record<string, any> = {}) {
     onComposerChange: vi.fn(),
     onPaste: vi.fn(),
     onPickImages: vi.fn(),
+    addWorkDocument: vi.fn(),
     acceptPopup: vi.fn(),
     pickFolderAndConnect: vi.fn(),
     refreshMcpConfig: vi.fn(),
@@ -360,5 +361,20 @@ describe("composer send / popup / @", () => {
     expect(screen.getByText(t.permReset)).toBeVisible();
     expect(lastMode.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sep.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("routes the Work plus menu to the shared Add document action", async () => {
+    const user = userEvent.setup();
+    const addWorkDocument = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      surface: "work",
+      plusMenu: true,
+      addWorkDocument,
+    });
+
+    await user.click(screen.getByRole("button", { name: t.workImport }));
+    expect(addWorkDocument).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: t.menuAddImage })).toBeNull();
   });
 });
