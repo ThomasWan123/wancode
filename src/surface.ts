@@ -44,6 +44,16 @@ export function surfaceNeedsWorkspace(kind: SurfaceKind): boolean {
   return kind === "work";
 }
 
+/** Localized top-bar label. Default language is zh (聊天 / 代码 / 工作). */
+export function surfaceLabel(
+  kind: SurfaceKind,
+  t: { surfaceChat: string; surfaceCode: string; surfaceWork: string },
+): string {
+  if (kind === "chat") return t.surfaceChat;
+  if (kind === "code") return t.surfaceCode;
+  return t.surfaceWork;
+}
+
 /** 前端**已全链路接线**、可作为当前层激活的 surface。Work 待 W2-fe-b、
  *  Cowork 待 Cowork 线。后端 agent.rs 的 surface_launchable 与此协同。 */
 const WIRED: readonly SurfaceKind[] = WORK_UI_READY ? ["chat", "code", "work"] : ["chat", "code"];

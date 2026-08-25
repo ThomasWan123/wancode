@@ -38,4 +38,45 @@ describe("WorkDesk", () => {
     await user.click(screen.getByRole("button", { name: /brief\.pdf/ }));
     expect(onSelect).toHaveBeenCalledWith("imp-1");
   });
+
+  it("shows fingerprint immediately when import auto-selects the new doc", () => {
+    render(
+      <WorkDesk
+        docs={[
+          {
+            import_id: "imp-2",
+            display_name: "notes.docx",
+            kind: "docx",
+            source_sha256: "abcdef0123456789ffff",
+          },
+        ]}
+        selectedId="imp-2"
+        onSelect={vi.fn()}
+        onImport={vi.fn()}
+        t={t}
+      />,
+    );
+    expect(screen.getByText(/abcdef012345/)).toBeVisible();
+    expect(screen.queryByText(t.workSelectHint)).toBeNull();
+  });
+
+  it("asks the user to pick a doc when the list has items but none is selected", () => {
+    render(
+      <WorkDesk
+        docs={[
+          {
+            import_id: "imp-1",
+            display_name: "brief.pdf",
+            kind: "pdf",
+            source_sha256: "abcdef0123456789",
+          },
+        ]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onImport={vi.fn()}
+        t={t}
+      />,
+    );
+    expect(screen.getByText(t.workSelectHint)).toBeVisible();
+  });
 });

@@ -195,7 +195,8 @@ function PreviewTab(props: Record<string, any>) {
 
 /** Review 标签：一键只读审查未提交改动，findings 按文件分组渲染。 */
 function ReviewTab(props: Record<string, any>) {
-  const { reviewResult, reviewLoading, runReview, fixFindings, t } = props;
+  const { reviewResult, reviewLoading, runReview, fixFindings, t, gitInfo } = props;
+  const isRepo = gitInfo?.isRepo === true;
   const findings: any[] = Array.isArray(reviewResult?.findings) ? reviewResult.findings : [];
   const byFile = new Map<string, any[]>();
   for (const f of findings) {
@@ -203,10 +204,17 @@ function ReviewTab(props: Record<string, any>) {
     if (!byFile.has(k)) byFile.set(k, []);
     byFile.get(k)!.push(f);
   }
+  if (!isRepo && !reviewLoading && !reviewResult) {
+    return (
+      <div className="wb-body">
+        <div className="sidebar-empty">{t.gitNeedRepo}</div>
+      </div>
+    );
+  }
   return (
     <div className="wb-body">
       <div className="wb-review-bar">
-        <button disabled={reviewLoading} onClick={runReview}>
+        <button disabled={reviewLoading || !isRepo} onClick={runReview}>
           {reviewLoading ? t.reviewRunning : t.reviewRun}
         </button>
         {findings.length > 0 && !reviewLoading && (
@@ -353,11 +361,16 @@ export function Workbench(props: Record<string, any>) {
       {wbTab === "diff" && (
       <div className="wb-body">
         {wbLoading && <div className="sidebar-empty">{t.loading}</div>}
-        {!wbLoading && wbFiles === null && <div className="sidebar-empty">{t.gitNotRepo}</div>}
-        {!wbLoading && wbFiles !== null && files.length === 0 && (
+        {!wbLoading && props.gitInfo?.isRepo !== true && (
+          <div className="sidebar-empty">{t.gitNeedRepo}</div>
+        )}
+        {!wbLoading && props.gitInfo?.isRepo === true && wbFiles === null && (
+          <div className="sidebar-empty">{t.gitReadFailed}</div>
+        )}
+        {!wbLoading && props.gitInfo?.isRepo === true && wbFiles !== null && files.length === 0 && (
           <div className="sidebar-empty">{t.gitClean}</div>
         )}
-        {files.map((f) => {
+        {props.gitInfo?.isRepo === true && files.map((f) => {
           const open = wbOpenPaths.has(f.path);
           return (
             <div key={f.path} className="wb-file">
