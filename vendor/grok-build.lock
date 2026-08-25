@@ -49,7 +49,7 @@ declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-o
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
 cargo_lock_sha256=31fbad689896c3eae39e1d6b86a4445936ff53b520ef4088503283f51f8d76ad
-effective_tree_sha256=c511ef50830a0950ac772a64635095a79438d1bd414c0456b1028035a13791e4
+effective_tree_sha256=9fbedf7ee04f650fb5b0e135f7b2036803a0a079eaf6ec93be7cd27e4e781259
 
 # 【harness-kernel delta · v0.21 W3】真实工具执行调度
 #   引擎 commit 变、Cargo.lock/接线/紧急补丁均不变；差异仅为
