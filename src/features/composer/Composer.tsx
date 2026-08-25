@@ -31,7 +31,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode } = props;
+  const { surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -342,8 +342,18 @@ export function Composer(props: Record<string, any>) {
                   <>
                     <div className="plus-backdrop" onClick={() => setPlusMenu(false)} />
                     <div className="plus-menu">
-                      {surface === "code" && <button className="plus-item" onClick={pickFolderAndConnect}>
+                      {(surface === "code" || surface === "work") && <button className="plus-item" onClick={pickFolderAndConnect}>
                         <IconFolder size={15} /> {t.menuOpenFolder}
+                      </button>}
+                      {surface === "work" && <button
+                        className="plus-item"
+                        disabled={!workspace}
+                        onClick={() => {
+                          setPlusMenu(false);
+                          onAttachWorkFile?.();
+                        }}
+                      >
+                        <IconFile size={15} /> {t.menuAddFile}
                       </button>}
                       <button
                         className="plus-item"

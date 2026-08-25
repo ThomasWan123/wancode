@@ -276,6 +276,19 @@ describe("composer send / popup / @", () => {
     expect(screen.getByText(t.mentionNoFiles)).toBeVisible();
   });
 
+  it("Work plus menu opens a folder and attaches a file without MCP", () => {
+    renderComposer({
+      modelBlock: null,
+      surface: "work",
+      plusMenu: true,
+      workspace: "D:/docs",
+      onAttachWorkFile: vi.fn(),
+    });
+    expect(screen.getByText(t.menuOpenFolder)).toBeVisible();
+    expect(screen.getByText(t.menuAddFile)).toBeVisible();
+    expect(screen.queryByText(t.menuMcp)).toBeNull();
+  });
+
   it("keeps spaces when typing a normal sentence", async () => {
     const user = userEvent.setup();
     function Harness() {

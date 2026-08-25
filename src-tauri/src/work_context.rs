@@ -24,14 +24,17 @@ pub fn build_work_prompt(
 ) -> Result<String, String> {
     let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
     if !manifest_path.exists() {
-        return Err("Work 工作区尚未导入文档".into());
+        // Folder-first Work: talking about files on disk does not require a
+        // quarantined import library. Empty/missing manifests pass the user
+        // text through so @mentions and xlsx-only folders still send.
+        return Ok(user_text.to_string());
     }
     let manifest = WorkManifest::read(&manifest_path).map_err(|e| e.to_string())?;
     if &manifest.workspace_id != workspace_id {
         return Err("Work 清单工作区身份不匹配".into());
     }
     if manifest.imports.is_empty() {
-        return Err("Work 工作区尚未导入文档".into());
+        return Ok(user_text.to_string());
     }
     if manifest.imports.len() > MAX_WORK_DOCUMENTS {
         return Err(format!(
@@ -225,5 +228,31 @@ mod tests {
             runs: vec![[1, 3]],
         };
         assert!(render_document("imp", "bad.docx", &"b".repeat(64), &[bad]).is_err());
+    }
+
+    #[test]
+    fn missing_manifest_passes_through_user_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = crate::work_staging::WorkspaceId::mint();
+        let prompt = build_work_prompt(tmp.path(), &ws, "hello from folder").unwrap();
+        assert_eq!(prompt, "hello from folder");
+        assert!(!prompt.contains("UNTRUSTED DATA"));
+    }
+
+    #[test]
+    fn empty_manifest_passes_through_user_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = crate::work_staging::WorkspaceId::mint();
+        let dir = crate::work_staging::workspace_dir_under(tmp.path().to_path_buf(), &ws);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = WorkManifest::new(ws.clone());
+        manifest
+            .write_atomic(&crate::work_staging::manifest_path_under(
+                tmp.path().to_path_buf(),
+                &ws,
+            ))
+            .unwrap();
+        let prompt = build_work_prompt(tmp.path(), &ws, "only xlsx").unwrap();
+        assert_eq!(prompt, "only xlsx");
     }
 }
