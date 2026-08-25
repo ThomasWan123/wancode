@@ -2,7 +2,7 @@
 //!
 //! 把一份不受信文档导入某 Work 工作区的暂存区:
 //!   1. 读原件、算完整 sha256(与 import_id 联合定位,设计 §1.2);
-//!   2. 按扩展名判类型（PDF / DOCX，其余拒绝）;
+//!   2. 按扩展名判类型（PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP）;
 //!   3. 铸造 import_id,建 `work/<ws>/<import_id>/`,原件复制进去;
 //!   4. 暂存副本置**只读**(设计底线:原件全程只读);
 //!   5. 原子更新工作区清单(复用 W2-a 的 write_atomic);
@@ -13,6 +13,7 @@
 //! (防路径穿越,与 W2-a 的 id 逃逸防线同源)。**不含**解析/锚点(W3)、
 //! 前端(W2-c)。
 
+use std::io::Read;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -22,13 +23,18 @@ use crate::work_staging::{
     WorkStagingError, WorkspaceId,
 };
 
+const MAX_DOCUMENT_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
 pub enum WorkImportError {
-    /// 不支持的文档类型（当前仅 PDF / DOCX 可进入理解链）。
+    /// 不支持的文档类型。
     UnsupportedKind(String),
     /// 源文件不存在或不可读。
     SourceUnreadable(String),
+    /// 源文件超过进入暂存区前的硬上限。
+    InputTooLarge { bytes: u64, cap: u64 },
     /// 暂存/清单层错误。
     Staging(WorkStagingError),
     /// 现有清单归属另一工作区(codex R2-F1)。
@@ -44,6 +50,9 @@ impl std::fmt::Display for WorkImportError {
         match self {
             WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}"),
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
+            WorkImportError::InputTooLarge { bytes, cap } => {
+                write!(f, "源文件大小 {bytes} 超过导入上限 {cap}")
+            }
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
             WorkImportError::WorkspaceMismatch { requested, found } => {
                 write!(f, "工作区身份不符: 请求 {requested},清单声称 {found}")
@@ -59,7 +68,7 @@ impl From<WorkStagingError> for WorkImportError {
     }
 }
 
-/// 由扩展名判文档类型。当前支持 PDF / DOCX；大小写不敏感。
+/// 由扩展名判文档类型；大小写不敏感。旧二进制 Office 格式不猜测转换。
 fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     let ext = source
         .extension()
@@ -69,8 +78,13 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     match ext.as_str() {
         "docx" => Ok("docx"),
         "pdf" => Ok("pdf"),
+        "xlsx" => Ok("xlsx"),
+        "pptx" => Ok("pptx"),
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpeg"),
+        "webp" => Ok("webp"),
         other => Err(WorkImportError::UnsupportedKind(format!(
-            "{other}（当前可理解格式为 PDF / DOCX）"
+            "{other}（当前支持 PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP；旧 DOC / XLS / PPT 尚不支持）"
         ))),
     }
 }
@@ -78,6 +92,13 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
 /// 暂存副本文件名:固定 `original.<ext>`,不含原始文件名(防路径穿越)。
 fn staged_file_name(kind: &str) -> String {
     format!("original.{kind}")
+}
+
+fn import_byte_cap(kind: &str) -> u64 {
+    match kind {
+        "png" | "jpeg" | "webp" => MAX_IMAGE_IMPORT_BYTES,
+        _ => MAX_DOCUMENT_IMPORT_BYTES,
+    }
 }
 
 /// 核心导入逻辑(可测,不依赖 Tauri)。app_data_dir 由调用方给出。
@@ -92,9 +113,21 @@ pub fn import_document(
 ) -> Result<ImportRecord, WorkImportError> {
     let kind = kind_from_extension(source)?;
 
-    // 读原件 + 算完整 sha256(纯读,无落盘)。
-    let bytes = std::fs::read(source)
+    // 有界读取原件 + 算完整 sha256(纯读,无落盘)。`take(cap + 1)` 也覆盖
+    // metadata/read 之间文件被替换的竞态，避免按攻击者声明尺寸无限分配。
+    let cap = import_byte_cap(kind);
+    let file = std::fs::File::open(source)
         .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+    if bytes.len() as u64 > cap {
+        return Err(WorkImportError::InputTooLarge {
+            bytes: bytes.len() as u64,
+            cap,
+        });
+    }
     let sha256 = hex_lower(&Sha256::digest(&bytes));
 
     let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
@@ -345,6 +378,48 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn modern_document_and_image_extensions_are_normalized() {
+        let cases = [
+            ("book.XLSX", "xlsx", "original.xlsx"),
+            ("deck.PptX", "pptx", "original.pptx"),
+            ("scan.PNG", "png", "original.png"),
+            ("photo.jpg", "jpeg", "original.jpeg"),
+            ("photo.JPEG", "jpeg", "original.jpeg"),
+            ("diagram.WeBp", "webp", "original.webp"),
+        ];
+        for (name, kind, safe_name) in cases {
+            let app = tmp_dir("modern-kind-app");
+            let src_dir = tmp_dir("modern-kind-src");
+            let src = write_source(&src_dir, name, b"fixture");
+            let ws = WorkspaceId::mint();
+            let rec = import_document(&app, &ws, &src).unwrap();
+            assert_eq!(rec.kind, kind, "{name}");
+            assert!(rec.staging_rel_path.ends_with(safe_name), "{name}");
+            let _ = std::fs::remove_dir_all(&app);
+            let _ = std::fs::remove_dir_all(&src_dir);
+        }
+    }
+
+    #[test]
+    fn legacy_binary_office_formats_fail_closed() {
+        for name in ["legacy.doc", "legacy.xls", "legacy.ppt"] {
+            assert!(matches!(
+                kind_from_extension(Path::new(name)),
+                Err(WorkImportError::UnsupportedKind(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn image_and_document_import_caps_are_explicit() {
+        assert_eq!(import_byte_cap("png"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("jpeg"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("webp"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("pdf"), 64 * 1024 * 1024);
+        assert_eq!(import_byte_cap("xlsx"), 64 * 1024 * 1024);
     }
 
     #[test]

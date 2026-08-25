@@ -1,6 +1,6 @@
 /* Work surface as a document desk: visible list, empty copy, metadata preview.
-   Binary PDF/DOCX page preview needs a staged absolute path the frontend does
-   not have without a new backend command — show identity, not a fake editor. */
+   Rich document preview needs a staged absolute path and a format-specific safe
+   renderer — show identity, not a fake editor. */
 import { IconFile, IconFolder } from "../../icons";
 
 export type WorkDoc = {

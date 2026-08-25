@@ -10,6 +10,7 @@
 //!     OutputTooLarge），不是「反正 is_err()」。笼统的 is_err() 会让超时被
 //!     误判成崩溃、死锁被误判成超时，恰好放过这类外壳最容易出的错。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -118,6 +119,22 @@ fn materialize_text_pdf_fixture(dir: &Path, name: &str, text: &str) -> PathBuf {
     path
 }
 
+fn materialize_office_fixture(dir: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+    let path = dir.join(name);
+    let file = std::fs::File::create(&path).expect("create Office fixture");
+    let mut package = zip::ZipWriter::new(file);
+    for (entry_name, body) in entries {
+        package
+            .start_file(*entry_name, zip::write::SimpleFileOptions::default())
+            .expect("start Office fixture entry");
+        package
+            .write_all(body.as_bytes())
+            .expect("write Office fixture entry");
+    }
+    package.finish().expect("finish Office fixture");
+    path
+}
+
 fn with_mode<T>(mode: Option<&str>, f: impl FnOnce() -> T) -> T {
     match mode {
         // SAFETY: 本测试 main 串行执行，无并发线程读环境变量
@@ -167,6 +184,22 @@ fn main() {
         "Project Orion budget 128400 owner Lin Mei deadline 2026-09-30 risk AMBER",
     );
     let blank_pdf = materialize_text_pdf_fixture(fixtures.path(), "image-only.pdf", "");
+    let xlsx_sample = materialize_office_fixture(
+        fixtures.path(),
+        "project-orion.xlsx",
+        &[
+            ("xl/sharedStrings.xml", r#"<sst><si><t>Budget</t></si></sst>"#),
+            ("xl/worksheets/sheet1.xml", r#"<worksheet><c r="A1" t="s"><v>0</v></c><c r="B1"><v>128400</v></c></worksheet>"#),
+        ],
+    );
+    let pptx_sample = materialize_office_fixture(
+        fixtures.path(),
+        "project-orion.pptx",
+        &[(
+            "ppt/slides/slide1.xml",
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><a:t>Project Orion</a:t><a:t>Risk AMBER</a:t></p:sld>"#,
+        )],
+    );
 
     let mut pass = 0usize;
     let mut fail = 0usize;
@@ -456,6 +489,60 @@ fn main() {
             .map(|text| format!("context_utf16={}", text.encode_utf16().count()))
             .unwrap_or_else(|error| error.clone()),
     );
+
+    // Modern Office formats must cross the same worker, staging, hash, and
+    // untrusted-context boundaries as PDF/DOCX. These are mandatory fixtures,
+    // not environment-variable breadth probes.
+    for (kind, source, expected_path, expected_text, name) in [
+        (
+            DocKind::Xlsx,
+            &xlsx_sample,
+            "workbook/sheet[1]/cell[B1]",
+            "128400",
+            "xlsx_end_to_end_through_worker",
+        ),
+        (
+            DocKind::Pptx,
+            &pptx_sample,
+            "slides/slide[1]/text[1]",
+            "Risk AMBER",
+            "pptx_end_to_end_through_worker",
+        ),
+    ] {
+        let parsed = parse_in_worker(
+            &ParseRequest {
+                kind,
+                source_path: source.to_string_lossy().into_owned(),
+            },
+            ParseLimits::default(),
+        );
+        let parsed_ok = match (&kind, &parsed) {
+            (DocKind::Xlsx, Ok(ParsedDoc::Xlsx { blocks }))
+            | (DocKind::Pptx, Ok(ParsedDoc::Pptx { blocks })) => blocks.iter().any(|block| {
+                block.path == expected_path
+                    && block.raw.contains(expected_text)
+                    && block.is_well_formed()
+            }),
+            _ => false,
+        };
+        check(name, parsed_ok, format!("{parsed:?}"));
+
+        let tmp = tempfile::tempdir().expect("Office work context tempdir");
+        let ws = WorkspaceId::mint();
+        let imported = import_document(tmp.path(), &ws, source);
+        let prompt = imported
+            .as_ref()
+            .map_err(|error| error.to_string())
+            .and_then(|_| build_work_prompt(tmp.path(), &ws, "Summarize this file"));
+        check(
+            &format!("{name}_to_model_context"),
+            matches!(&prompt, Ok(text)
+                if text.contains(expected_path)
+                    && text.contains(expected_text)
+                    && text.ends_with("Summarize this file")),
+            format!("{prompt:?}"),
+        );
+    }
 
     // Optional local breadth probe against a real-world PDF. CI correctness
     // does not depend on private files; when supplied, it still uses the exact

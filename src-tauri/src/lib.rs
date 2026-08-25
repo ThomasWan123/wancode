@@ -24,6 +24,7 @@ pub mod work_context;
 pub mod work_anchor;
 pub mod work_blocks;
 pub mod work_docx;
+pub mod work_office;
 pub mod work_pdf;
 pub mod work_parse_worker;
 pub mod cowork_escape_probe;

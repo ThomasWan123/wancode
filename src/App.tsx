@@ -13,6 +13,7 @@ import { Home } from "./features/home/Home";
 import { Workbench } from "./features/workbench/Workbench";
 import { PlanDocument } from "./features/plan/PlanDocument";
 import { WorkDesk } from "./features/work/WorkDesk";
+import { isWorkImageKind, WORK_DOCUMENT_EXTENSIONS } from "./features/work/workFormats";
 import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
@@ -579,7 +580,7 @@ function App() {
     }
   }
 
-  // 把一份 PDF / DOCX 导入当前 Work 会话的工作区。原件只读复制、
+  // 把一份受支持的文档导入当前 Work 会话的工作区。原件只读复制、
   // 记完整 sha256(后端 work_import)。成功后 append 到本会话文档列表。
   async function importWorkDoc() {
     if (!workWorkspaceId) {
@@ -589,7 +590,10 @@ function App() {
     const path = await openDialog({
       directory: false,
       title: lang === "zh" ? "选择要添加的文档" : "Choose a document to add",
-      filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
+      filters: [{
+        name: "Documents",
+        extensions: [...WORK_DOCUMENT_EXTENSIONS],
+      }],
     });
     if (typeof path !== "string" || !path) return;
     try {
@@ -2134,10 +2138,12 @@ function App() {
       }
     }
     const imgs = pastedImages;
+    const hasPersistedWorkImages =
+      surface === "work" && workDocs.some((document) => isWorkImageKind(document.kind));
     // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
     // Block* 阻断并针对性引导；Warn* 二次确认；未知载荷 fail-closed 阻断。
     // 判定期间置重入护栏：await 窗口内再按 Enter 不得二次发送。
-    if (imgs.length > 0) {
+    if (imgs.length > 0 || hasPersistedWorkImages) {
       if (imageGateRef.current) return;
       imageGateRef.current = true;
       try {
