@@ -332,4 +332,33 @@ describe("composer send / popup / @", () => {
     await user.type(screen.getByRole("textbox"), "hello world test");
     expect(screen.getByRole("textbox")).toHaveValue("hello world test");
   });
+
+  it("separates Reset permission memory from Plan in the mode menu", async () => {
+    const setModeMenu = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      MODE_ORDER: ["manual", "acceptEdits", "plan", "auto", "bypass"],
+      permMode: "plan",
+      modeMenu: true,
+      setModeMenu,
+      modeMeta: {
+        manual: { label: t.modeManual, desc: t.modeManualDesc },
+        acceptEdits: { label: t.modeAcceptEdits, desc: t.modeAcceptEditsDesc },
+        plan: { label: t.modePlan, desc: t.modePlanDesc },
+        auto: { label: t.modeAuto, desc: t.modeAutoDesc },
+        bypass: { label: t.modeBypass, desc: t.modeBypassDesc },
+      },
+    });
+    const menu = document.querySelector(".mode-menu") as HTMLElement;
+    expect(menu).toBeTruthy();
+    const lastMode = menu.querySelector('[data-mode="bypass"]') as HTMLElement;
+    const sep = menu.querySelector('[role="separator"]') as HTMLElement;
+    const reset = menu.querySelector(".mode-reset") as HTMLElement;
+    expect(lastMode).toBeTruthy();
+    expect(sep).toBeTruthy();
+    expect(reset).toBeTruthy();
+    expect(screen.getByText(t.permReset)).toBeVisible();
+    expect(lastMode.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(sep.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });

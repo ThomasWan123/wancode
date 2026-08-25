@@ -569,6 +569,7 @@ export function Composer(props: Record<string, any>) {
                           {permMode === m && <IconCheck size={15} className="mode-item-check" />}
                         </button>
                       ))}
+                      <div className="mode-menu-sep" role="separator" />
                       <button
                         className="mode-item mode-reset"
                         onClick={() => {

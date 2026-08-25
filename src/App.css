@@ -2815,9 +2815,14 @@ button.session-item {
   outline: none;
 }
 
-/* 权限菜单底部的重置项：弱化显示 */
+/* 权限菜单底部的重置项：与 Plan 等模式选项拉开，避免误点 */
+.mode-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 8px 6px;
+}
 .mode-item.mode-reset {
-  border-top: 1px solid var(--border-soft);
+  margin-top: 2px;
   opacity: 0.85;
 }
 

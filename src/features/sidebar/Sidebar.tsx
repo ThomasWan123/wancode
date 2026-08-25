@@ -3,13 +3,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { displaySessionTitle } from "../../i18n";
 import { activateOnKeyboard } from "../../accessibility";
+import { liveMcpBadgeCount } from "./mcpBadge";
 import {
   IconFolder, IconGitBranch, IconPlus, IconSearch, IconChevron,
   IconFile, IconFolderClosed, IconSettings,  IconPencil, IconTrash, IconClipboard,
 } from "../../icons";
 
 export function Sidebar(props: Record<string, any>) {
-  const { surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t } = props;
+  const { surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t } = props;
   if (surface === "chat") {
     return (
       <aside className="sidebar">
@@ -82,15 +83,11 @@ export function Sidebar(props: Record<string, any>) {
               }}
             >
               <IconGitBranch size={15} /> {t.navMcp}
-              {/* 有实时数据时数"真正启用的"，而不是配置文件里的条目数 ——
-                  被文件夹信任挡住的服务器不该被算成可用。 */}
-              {(mcpLive.length ? mcpLive.filter((s: any) => s.session?.enabled !== false).length : mcpServers.length) > 0 && (
-                <span className="side-nav-count">
-                  {mcpLive.length
-                    ? mcpLive.filter((s: any) => s.session?.enabled !== false).length
-                    : mcpServers.length}
-                </span>
-              )}
+              {/* Live-session count only — never configured-but-not-loaded. */}
+              {(() => {
+                const n = liveMcpBadgeCount(mcpLive);
+                return n > 0 ? <span className="side-nav-count">{n}</span> : null;
+              })()}
             </button>
             <button
               className="side-nav-item"
