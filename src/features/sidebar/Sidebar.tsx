@@ -162,9 +162,13 @@ export function Sidebar(props: Record<string, any>) {
                   ) : (
                     <TreeView
                       node={buildTree(fileList)}
-                      onPick={(p: any) =>
-                        setInput((v: any) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + p + " ")
-                      }
+                      onPick={(p: any) => {
+                        if (surface === "code" && typeof props.onOpenFile === "function") {
+                          props.onOpenFile(p);
+                          return;
+                        }
+                        setInput((v: any) => v + (v && !v.endsWith(" ") ? " " : "") + "@" + p + " ");
+                      }}
                     />
                   ))}
               </div>

@@ -165,7 +165,7 @@ body {
   font-size: 13px;
 }
 .work-docs-empty {
-  color: var(--text-dim, #888);
+  color: var(--faint);
 }
 .work-docs-list {
   list-style: none;
@@ -186,7 +186,7 @@ body {
   padding: 1px 6px;
   border-radius: 6px;
   border: 1px solid var(--border-soft);
-  color: var(--text-dim, #888);
+  color: var(--faint);
 }
 .work-doc-name {
   overflow: hidden;
@@ -1361,12 +1361,12 @@ button.session-item {
 
 .inline-approval button.deny {
   background: transparent;
-  border: 1px solid rgba(248, 113, 113, 0.5);
+  border: 1px solid color-mix(in srgb, var(--err) 50%, transparent);
   color: var(--err);
 }
 
 .inline-approval button.deny:hover {
-  background: rgba(248, 113, 113, 0.12);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
   filter: none;
 }
 
@@ -1446,12 +1446,12 @@ button.session-item {
 
 .permission-actions button.deny {
   background: transparent;
-  border: 1px solid rgba(248, 113, 113, 0.5);
+  border: 1px solid color-mix(in srgb, var(--err) 50%, transparent);
   color: var(--err);
 }
 
 .permission-actions button.deny:hover {
-  background: rgba(248, 113, 113, 0.12);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 
 /* ── 上下文用量条 ─────────────────────────────────── */
@@ -1681,13 +1681,13 @@ button.session-item {
 
 .plan-approval-actions .deny {
   background: transparent;
-  border: 1px solid rgba(248, 113, 113, 0.5);
+  border: 1px solid color-mix(in srgb, var(--err) 50%, transparent);
   color: var(--err);
   margin-left: auto;
 }
 
 .plan-approval-actions .deny:hover {
-  background: rgba(248, 113, 113, 0.12);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
   filter: none;
 }
 
@@ -2770,11 +2770,11 @@ button.session-item {
 }
 .wt-msg.ok {
   color: var(--ok);
-  background: rgba(107, 191, 138, 0.1);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
 }
 .wt-msg.bad {
   color: var(--err);
-  background: rgba(224, 115, 107, 0.1);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 
 /* 插话按钮：琥珀色区分于发送/停止 */
@@ -2868,13 +2868,53 @@ button.session-item {
 /* ── v0.14 工作台（右侧第二栏；关闭即回单栏，布局零侵入） ───────── */
 .workbench {
   width: 42%;
-  min-width: 360px;
+  min-width: 280px;
   max-width: 720px;
   border-left: 1px solid var(--border);
   background: var(--bg);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+.wb-splitter {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--border-soft);
+  align-self: stretch;
+}
+.wb-splitter:hover,
+.wb-splitter.dragging {
+  background: var(--accent);
+}
+.wb-file-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 0;
+}
+.wb-file-edit-bar .wb-file-back {
+  flex: 1;
+  position: static;
+}
+.wb-file-editor {
+  flex: 1;
+  min-height: 0;
+  width: calc(100% - 16px);
+  margin: 8px;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  outline: none;
+}
+.wb-file-editor:focus {
+  border-color: var(--accent);
 }
 .wb-head {
   display: flex;
@@ -3047,7 +3087,7 @@ button.session-item {
 /* 工作台：预览标签 */
 .wb-preview { display: flex; flex-direction: column; }
 .wb-preview-url { flex: 1; margin: 0; }
-.wb-preview-frame { flex: 1; border: none; background: #fff; min-height: 300px; }
+.wb-preview-frame { flex: 1; border: none; background: var(--bg0); min-height: 300px; }
 
 /* Git 面板：PR 状态行 */
 .git-pr-row {
@@ -3059,7 +3099,7 @@ button.session-item {
 .git-pr-row:hover { background: var(--bg2); }
 .git-pr-badge { font-weight: 600; white-space: nowrap; }
 .git-pr-row.open .git-pr-badge { color: var(--ok); }
-.git-pr-row.merged .git-pr-badge { color: #a371f7; }
+.git-pr-row.merged .git-pr-badge { color: var(--accent); }
 .git-pr-row.closed .git-pr-badge { color: var(--danger); }
 .git-pr-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); }
 .git-pr-ci { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
@@ -3194,6 +3234,140 @@ button.session-item {
   font-size: 11px;
   line-height: 16px;
 }
-.cap-badge.cap-ok { background: color-mix(in srgb, #22c55e 18%, transparent); color: #16a34a; }
-.cap-badge.cap-no { background: color-mix(in srgb, #ef4444 15%, transparent); color: #dc2626; }
-.cap-badge.cap-unk { background: color-mix(in srgb, #9ca3af 20%, transparent); color: #6b7280; }
+.cap-badge.cap-ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.cap-badge.cap-no { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+.cap-badge.cap-unk { background: color-mix(in srgb, var(--faint) 20%, transparent); color: var(--faint); }
+
+/* ── P1: plan as annotatable document ─────────────────────────── */
+.plan-doc {
+  margin: 0;
+  background: var(--bg0);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 16px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+.plan-doc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.plan-doc-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+.plan-doc-hint {
+  font-size: 12px;
+  color: var(--faint);
+  margin-top: 2px;
+}
+.plan-doc-body {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.plan-doc-editor {
+  flex: 1;
+  min-height: 140px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  resize: vertical;
+  outline: none;
+}
+.plan-doc-editor:focus { border-color: var(--accent); }
+.plan-doc-comments-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── P1: Work document desk ───────────────────────────────────── */
+.work-desk {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg1);
+}
+.work-desk-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.work-desk-title { font-weight: 700; font-size: 14px; }
+.work-desk-sub { font-size: 12px; color: var(--faint); margin-top: 2px; }
+.work-desk-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 28px 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.work-desk-empty-hint { font-size: 12px; color: var(--faint); max-width: 420px; }
+.work-desk-split {
+  display: grid;
+  grid-template-columns: minmax(180px, 32%) 1fr;
+  gap: 12px;
+  min-height: 120px;
+}
+.work-desk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.work-desk-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-weight: 500;
+}
+.work-desk-card:hover { background: var(--bg2); opacity: 1; }
+.work-desk-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.work-desk-preview {
+  background: var(--bg0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  min-height: 100px;
+}
+.work-desk-preview h3 { margin: 0 0 6px; font-size: 14px; }
+.work-desk-meta { font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+.work-desk-preview-hint { font-size: 12.5px; color: var(--faint); line-height: 1.5; }

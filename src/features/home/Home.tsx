@@ -5,10 +5,10 @@ import { IconClipboard, IconGitBranch } from "../../icons";
 import { displaySessionTitle } from "../../i18n";
 
 export function Home(props: Record<string, any>) {
-  const { buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t } = props;
+  const { buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t, planPending } = props;
   return (
     <>
-      {items.length === 0 && !busy && (
+      {items.length === 0 && !busy && !planPending && (
         <div className="empty-state">
           <div className="empty-logo"><img src="/app-icon.png" alt="" /></div>
           <div className="empty-title">{t.appTagline}</div>

@@ -1,17 +1,16 @@
-/* v0.13 拆分：全局对话框（回滚/技能编辑/文件夹信任/引擎提问/计划审批）。
-   步 A 透传。红线：
-   - 信任/提问/计划审批都是引擎在等回包的请求——关闭路径也必须应答
-     （respondQuestion(false)/trust:false/respondPlan），不能只 setState 关掉；
+/* v0.13 拆分：全局对话框（回滚/技能编辑/文件夹信任/引擎提问）。
+   计划审批已迁到 PlanDocument（P1：文档面板，不再是 modal）。
+   红线：
+   - 信任/提问都是引擎在等回包的请求——关闭路径也必须应答
+     （respondQuestion(false)/trust:false），不能只 setState 关掉；
    - 回滚 doRewind 的两段式（预览冲突→确认）逻辑留在 App 层。 */
 import { invoke } from "@tauri-apps/api/core";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { IconCheck } from "../../icons";
 import { activateOnKeyboard } from "../../accessibility";
 import { ModalDialog } from "./ModalDialog";
 
 export function Dialogs(props: Record<string, any>) {
-  const { answers, doRewind, editingSkill, planApproval, planFeedback, question, refreshSkills, respondPlan, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setPlanFeedback, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t } = props;
+  const { answers, doRewind, editingSkill, question, refreshSkills, respondQuestion, rewindMode, rewindPoints, setEditingSkill, setError, setRewindMode, setRewindPoints, setTrustReq, toggleAnswer, trustReq, t } = props;
 
   async function rejectTrust() {
     if (!trustReq) return;
@@ -202,41 +201,6 @@ export function Dialogs(props: Record<string, any>) {
                 onClick={() => respondQuestion(false)}
               >
                 {t.cancel}
-              </button>
-            </div>
-          </ModalDialog>
-        </div>
-      )}
-
-      {planApproval && (
-        <div className="modal-mask">
-          <ModalDialog
-            ariaLabel={t.planApprovalTitle}
-            className="modal plan-approval-modal"
-            onEscape={() => respondPlan("cancelled")}
-          >
-            <div className="modal-title">{t.planApprovalTitle}</div>
-            <div className="plan-approval-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{planApproval.planContent || "_(empty plan)_"}</ReactMarkdown>
-            </div>
-            <textarea
-              className="plan-feedback"
-              value={planFeedback}
-              placeholder={t.planFeedbackPlaceholder}
-              onChange={(e) => setPlanFeedback(e.currentTarget.value)}
-              rows={2}
-            />
-            <div className="plan-approval-actions">
-              <button onClick={() => respondPlan("approved")}>{t.planApprove}</button>
-              <button
-                className="ghost"
-                data-dialog-autofocus
-                onClick={() => respondPlan("cancelled")}
-              >
-                {t.planRequestChanges}
-              </button>
-              <button className="deny" onClick={() => respondPlan("abandoned")}>
-                {t.planAbandon}
               </button>
             </div>
           </ModalDialog>
