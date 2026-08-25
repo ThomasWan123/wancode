@@ -5,7 +5,10 @@
 //! folder are left in place (no extra copy).
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use crate::work_import::validate_image_bytes;
 
 /// Copy `source` into `workspace`, returning the workspace-relative path
 /// (forward slashes). No-ops when the file is already inside the folder.
@@ -16,6 +19,7 @@ pub fn copy_into_workspace_dir(workspace: &Path, source: &Path) -> Result<String
     if !source.is_file() {
         return Err("源文件不存在".into());
     }
+    reject_legacy_or_fake_image(source)?;
     let name = source
         .file_name()
         .ok_or_else(|| "源文件名无效".to_string())?;
@@ -44,6 +48,35 @@ pub fn copy_into_workspace_dir(workspace: &Path, source: &Path) -> Result<String
     dest.strip_prefix(&ws)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .map_err(|_| "目标路径逃逸".into())
+}
+
+fn reject_legacy_or_fake_image(source: &Path) -> Result<(), String> {
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "doc" | "xls" | "ppt" => {
+            return Err(format!(
+                "不支持旧版 {ext}（当前支持 PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP）"
+            ));
+        }
+        "png" | "jpg" | "jpeg" | "webp" => {
+            let mime = match ext.as_str() {
+                "png" => "image/png",
+                "webp" => "image/webp",
+                _ => "image/jpeg",
+            };
+            let mut file =
+                std::fs::File::open(source).map_err(|e| format!("源文件不可读: {e}"))?;
+            let mut header = [0u8; 16];
+            let n = file.read(&mut header).map_err(|e| format!("源文件不可读: {e}"))?;
+            validate_image_bytes(mime, &header[..n]).map_err(|e| e.to_string())?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn unique_dest(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
@@ -149,5 +182,25 @@ mod tests {
         let dir = tmp();
         assert!(copy_into_workspace_dir(&dir.path().join("missing"), Path::new("x")).is_err());
         assert!(copy_into_workspace_dir(dir.path(), &dir.path().join("nope.pdf")).is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_office_and_fake_images() {
+        let dir = tmp();
+        let src_dir = tmp();
+        let doc = src_dir.path().join("old.doc");
+        std::fs::write(&doc, b"DOC").unwrap();
+        let err = copy_into_workspace_dir(dir.path(), &doc).unwrap_err();
+        assert!(err.contains("旧版") || err.contains("doc"), "{err}");
+
+        let fake = src_dir.path().join("chart.png");
+        std::fs::write(&fake, b"not a png").unwrap();
+        let err = copy_into_workspace_dir(dir.path(), &fake).unwrap_err();
+        assert!(err.contains("扩展名与文件签名不匹配"), "{err}");
+
+        let ok = src_dir.path().join("chart.png");
+        std::fs::write(&ok, b"\x89PNG\r\n\x1a\n").unwrap();
+        let rel = copy_into_workspace_dir(dir.path(), &ok).unwrap();
+        assert_eq!(rel, "chart.png");
     }
 }

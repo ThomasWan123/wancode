@@ -355,7 +355,7 @@ export function Composer(props: Record<string, any>) {
                       >
                         <IconFile size={15} /> {t.menuAddFile}
                       </button>}
-                      <button
+                      {surface !== "work" && <button
                         className="plus-item"
                         disabled={!sessionId}
                         onClick={() => {
@@ -364,7 +364,7 @@ export function Composer(props: Record<string, any>) {
                         }}
                       >
                         <IconFile size={15} /> {t.menuAddImage}
-                      </button>
+                      </button>}
                       {surface === "code" && <button
                         className="plus-item"
                         disabled={!sessionId}

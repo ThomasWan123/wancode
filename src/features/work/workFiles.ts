@@ -1,15 +1,19 @@
 /** Work talks about ordinary files in an opened folder — not a quarantined import library. */
 
-export type WorkDocKind = "pdf" | "docx" | "xlsx";
+import { isWorkImageKind, WORK_DOCUMENT_EXTENSIONS } from "./workFormats";
 
-export const WORK_DOC_EXTENSIONS: readonly WorkDocKind[] = ["pdf", "docx", "xlsx"];
+export type WorkDocKind = (typeof WORK_DOCUMENT_EXTENSIONS)[number];
+
+export { isWorkImageKind, WORK_DOCUMENT_EXTENSIONS };
+
+const WORK_KIND_SET = new Set<string>(WORK_DOCUMENT_EXTENSIONS);
 
 export function workDocKind(path: string): WorkDocKind | null {
   const base = fileBaseName(path);
   const dot = base.lastIndexOf(".");
   if (dot < 0) return null;
   const ext = base.slice(dot + 1).toLowerCase();
-  if (ext === "pdf" || ext === "docx" || ext === "xlsx") return ext;
+  if (WORK_KIND_SET.has(ext)) return ext as WorkDocKind;
   return null;
 }
 
@@ -17,9 +21,17 @@ export function isWorkDocument(path: string): boolean {
   return workDocKind(path) !== null;
 }
 
-/** PDF / DOCX still feed the existing parse pipeline; Excel is a normal folder file. */
+export function isLegacyOffice(path: string): boolean {
+  const base = fileBaseName(path);
+  const dot = base.lastIndexOf(".");
+  if (dot < 0) return false;
+  const ext = base.slice(dot + 1).toLowerCase();
+  return ext === "doc" || ext === "xls" || ext === "ppt";
+}
+
+/** Text parsers run at send; images take the vision path instead. */
 export function canParseForWorkContext(kind: WorkDocKind | null): boolean {
-  return kind === "pdf" || kind === "docx";
+  return kind === "pdf" || kind === "docx" || kind === "xlsx" || kind === "pptx";
 }
 
 export function workDeskFiles(fileList: string[]): { path: string; kind: WorkDocKind }[] {
@@ -58,4 +70,46 @@ export function pathsFromDataTransfer(
     if (typeof path === "string" && path.trim()) out.push(path.trim());
   }
   return out;
+}
+
+function mentionPresent(text: string, token: string): boolean {
+  let from = 0;
+  while (from < text.length) {
+    const idx = text.indexOf(token, from);
+    if (idx < 0) return false;
+    const after = text[idx + token.length];
+    if (after === undefined || /\s/.test(after)) return true;
+    from = idx + token.length;
+  }
+  return false;
+}
+
+/**
+ * Folder files that this turn actually uses: @mentions, otherwise the selected
+ * file. Empty means send user text through with no snapshot.
+ */
+export function referencedWorkSources(opts: {
+  text: string;
+  folder: string;
+  files: { path: string; kind: WorkDocKind }[];
+  selectedPath: string | null;
+}): string[] {
+  if (!opts.folder) return [];
+  const mentioned: string[] = [];
+  for (const file of opts.files) {
+    const name = fileBaseName(file.path);
+    if (mentionPresent(opts.text, `@${file.path}`) || mentionPresent(opts.text, `@${name}`)) {
+      mentioned.push(joinWorkspacePath(opts.folder, file.path));
+    }
+  }
+  if (mentioned.length) return mentioned;
+  if (opts.selectedPath && workDocKind(opts.selectedPath)) {
+    return [joinWorkspacePath(opts.folder, opts.selectedPath)];
+  }
+  return [];
+}
+
+export function sourceIsWorkImage(path: string): boolean {
+  const kind = workDocKind(path);
+  return kind != null && isWorkImageKind(kind);
 }

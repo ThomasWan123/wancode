@@ -14,11 +14,10 @@ import { Workbench } from "./features/workbench/Workbench";
 import { PlanDocument } from "./features/plan/PlanDocument";
 import { WorkDesk } from "./features/work/WorkDesk";
 import {
-  canParseForWorkContext,
-  fileBaseName,
-  joinWorkspacePath,
+  referencedWorkSources,
+  sourceIsWorkImage,
   workDeskFiles,
-  workDocKind,
+  WORK_DOCUMENT_EXTENSIONS,
 } from "./features/work/workFiles";
 import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
@@ -267,9 +266,6 @@ function App() {
   // 当前 Work 会话的工作区身份与持久文档清单。清单以后端 manifest 为真源，
   // 每次启动/恢复 Work 会话都重读，React 状态只作当前视图缓存。
   const [workWorkspaceId, setWorkWorkspaceId] = useState<string>("");
-  const [workDocs, setWorkDocs] = useState<
-    { import_id: string; display_name: string; kind: string; source_sha256: string }[]
-  >([]);
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
   const surfaceCacheRef = useRef<SurfaceSessionCache>({});
@@ -621,8 +617,8 @@ function App() {
   const placeFilesDedupedRef = useRef(placeFilesDeduped);
   placeFilesDedupedRef.current = placeFilesDeduped;
 
-  // Copy into the opened folder (Claude Code grammar). PDF/DOCX still feed the
-  // existing parse pipeline internally; the UI never asks the user to Import.
+  // Copy into the opened folder (Claude Code grammar). Parsing is a send-time
+  // kernel: the file lives in the folder until Send snapshots it.
   async function placeFilesInWorkFolder(sourcePaths: string[]) {
     const ws = workspaceStateRef.current;
     if (!ws) {
@@ -637,23 +633,6 @@ function App() {
           sourcePath: src,
         });
         lastRel = rel;
-        const kind = workDocKind(rel);
-        if (workWorkspaceId && canParseForWorkContext(kind)) {
-          const dest = joinWorkspacePath(ws, rel);
-          try {
-            const rec = await invoke<{
-              import_id: string;
-              display_name: string;
-              kind: string;
-              source_sha256: string;
-            }>("work_import", { workspaceId: workWorkspaceId, sourcePath: dest });
-            setWorkDocs((prev) =>
-              prev.some((d) => d.import_id === rec.import_id) ? prev : [...prev, rec],
-            );
-          } catch {
-            /* parse pipeline is optional; the file already lives in the folder */
-          }
-        }
       } catch (e) {
         setError(String(e));
       }
@@ -671,32 +650,14 @@ function App() {
     const picked = await openDialog({
       multiple: true,
       title: t.workAddFile,
-      filters: [{ name: "Documents", extensions: ["pdf", "docx", "xlsx"] }],
+      filters: [{ name: "Documents", extensions: [...WORK_DOCUMENT_EXTENSIONS] }],
     });
     const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
     if (paths.length) await placeFilesInWorkFolder(paths.filter((p): p is string => typeof p === "string"));
   }
 
-  async function selectWorkFile(relPath: string) {
+  function selectWorkFile(relPath: string) {
     setWorkFileSelected(relPath);
-    const ws = workspaceStateRef.current;
-    const kind = workDocKind(relPath);
-    if (!ws || !workWorkspaceId || !canParseForWorkContext(kind)) return;
-    const name = fileBaseName(relPath);
-    if (workDocs.some((d) => d.display_name === name)) return;
-    try {
-      const rec = await invoke<{
-        import_id: string;
-        display_name: string;
-        kind: string;
-        source_sha256: string;
-      }>("work_import", { workspaceId: workWorkspaceId, sourcePath: joinWorkspacePath(ws, relPath) });
-      setWorkDocs((prev) =>
-        prev.some((d) => d.import_id === rec.import_id) ? prev : [...prev, rec],
-      );
-    } catch {
-      /* listing and @mention still work without the parse pipeline */
-    }
   }
 
   function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1810,19 +1771,7 @@ function App() {
         rememberWorkWorkspace(localStorage, workId);
         setWorkWorkspaceId(workId);
         if (!preserve) {
-          setWorkDocs([]);
           setWorkFileSelected(null);
-        }
-        if (workId) {
-          invoke<
-            { import_id: string; display_name: string; kind: string; source_sha256: string }[]
-          >("work_list_imports", { workspaceId: workId })
-            .then((docs) => {
-              if (sessionIdRef.current === r.session_id) setWorkDocs(docs);
-            })
-            .catch((e) => {
-              if (sessionIdRef.current === r.session_id) setError(String(e));
-            });
         }
       } else {
         setWorkWorkspaceId("");
@@ -2248,11 +2197,22 @@ function App() {
         return; // a start is already in flight; user can press Enter again
       }
     }
+    const workSources =
+      surface === "work" && workspace
+        ? referencedWorkSources({
+            text,
+            folder: workspace,
+            files: workDeskFiles(fileList),
+            selectedPath: workFileSelected,
+          })
+        : [];
+    const hasWorkImages = workSources.some((path) => sourceIsWorkImage(path));
     const imgs = pastedImages;
     // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
     // Block* 阻断并针对性引导；Warn* 二次确认；未知载荷 fail-closed 阻断。
     // 判定期间置重入护栏：await 窗口内再按 Enter 不得二次发送。
-    if (imgs.length > 0) {
+    // Work folder images use the same gate as pasted images.
+    if (imgs.length > 0 || hasWorkImages) {
       if (imageGateRef.current) return;
       imageGateRef.current = true;
       try {
@@ -2280,6 +2240,17 @@ function App() {
         }
       } finally {
         imageGateRef.current = false;
+      }
+    }
+    if (surface === "work" && workWorkspaceId) {
+      try {
+        await invoke("work_snapshot_sources", {
+          workspaceId: workWorkspaceId,
+          sourcePaths: workSources,
+        });
+      } catch (e) {
+        setError(String(e));
+        return;
       }
     }
     setInput("");

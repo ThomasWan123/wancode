@@ -286,6 +286,7 @@ describe("composer send / popup / @", () => {
     });
     expect(screen.getByText(t.menuOpenFolder)).toBeVisible();
     expect(screen.getByText(t.menuAddFile)).toBeVisible();
+    expect(screen.queryByText(t.menuAddImage)).toBeNull();
     expect(screen.queryByText(t.menuMcp)).toBeNull();
   });
 
@@ -373,5 +374,22 @@ describe("composer send / popup / @", () => {
     expect(screen.getByText(t.permReset)).toBeVisible();
     expect(lastMode.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sep.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("routes the Work plus menu to add-file-into-folder, not Add image or Import document", async () => {
+    const user = userEvent.setup();
+    const onAttachWorkFile = vi.fn();
+    renderComposer({
+      modelBlock: null,
+      surface: "work",
+      plusMenu: true,
+      workspace: "D:/docs",
+      onAttachWorkFile,
+    });
+
+    await user.click(screen.getByRole("button", { name: t.menuAddFile }));
+    expect(onAttachWorkFile).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: t.menuAddImage })).toBeNull();
+    expect(screen.queryByRole("button", { name: /import document/i })).toBeNull();
   });
 });

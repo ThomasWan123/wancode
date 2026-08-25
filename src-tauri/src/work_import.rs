@@ -2,18 +2,22 @@
 //!
 //! 把一份不受信文档导入某 Work 工作区的暂存区:
 //!   1. 读原件、算完整 sha256(与 import_id 联合定位,设计 §1.2);
-//!   2. 按扩展名判类型（PDF / DOCX，其余拒绝）;
+//!   2. 按扩展名判类型（PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP）;
 //!   3. 铸造 import_id,建 `work/<ws>/<import_id>/`,原件复制进去;
 //!   4. 暂存副本置**只读**(设计底线:原件全程只读);
 //!   5. 原子更新工作区清单(复用 W2-a 的 write_atomic);
 //!   6. 返回 ImportRecord。
+//!
+//! The Work UI treats this as a **send-time snapshot** of files that already
+//! live in the opened folder, not as a user-facing import desk.
 //!
 //! 安全不变量:暂存路径由 workspace_id/import_id(严格校验的新类型)拼出,
 //! 不含调用方可控的路径段 —— 原始文件名只作 display_name,绝不入路径
 //! (防路径穿越,与 W2-a 的 id 逃逸防线同源)。**不含**解析/锚点(W3)、
 //! 前端(W2-c)。
 
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -22,13 +26,20 @@ use crate::work_staging::{
     WorkStagingError, WorkspaceId,
 };
 
+const MAX_DOCUMENT_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
 pub enum WorkImportError {
-    /// 不支持的文档类型（当前仅 PDF / DOCX 可进入理解链）。
+    /// 不支持的文档类型。
     UnsupportedKind(String),
     /// 源文件不存在或不可读。
     SourceUnreadable(String),
+    /// 源文件超过进入暂存区前的硬上限。
+    InputTooLarge { bytes: u64, cap: u64 },
+    /// 扩展名与文件签名不匹配。
+    SignatureMismatch(String),
     /// 暂存/清单层错误。
     Staging(WorkStagingError),
     /// 现有清单归属另一工作区(codex R2-F1)。
@@ -44,6 +55,10 @@ impl std::fmt::Display for WorkImportError {
         match self {
             WorkImportError::UnsupportedKind(k) => write!(f, "不支持的文档类型: {k}"),
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
+            WorkImportError::InputTooLarge { bytes, cap } => {
+                write!(f, "源文件大小 {bytes} 超过导入上限 {cap}")
+            }
+            WorkImportError::SignatureMismatch(s) => write!(f, "{s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
             WorkImportError::WorkspaceMismatch { requested, found } => {
                 write!(f, "工作区身份不符: 请求 {requested},清单声称 {found}")
@@ -59,7 +74,7 @@ impl From<WorkStagingError> for WorkImportError {
     }
 }
 
-/// 由扩展名判文档类型。当前支持 PDF / DOCX；大小写不敏感。
+/// 由扩展名判文档类型；大小写不敏感。旧二进制 Office 格式不猜测转换。
 fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     let ext = source
         .extension()
@@ -69,8 +84,13 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
     match ext.as_str() {
         "docx" => Ok("docx"),
         "pdf" => Ok("pdf"),
+        "xlsx" => Ok("xlsx"),
+        "pptx" => Ok("pptx"),
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpeg"),
+        "webp" => Ok("webp"),
         other => Err(WorkImportError::UnsupportedKind(format!(
-            "{other}（当前可理解格式为 PDF / DOCX）"
+            "{other}（当前支持 PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP；旧 DOC / XLS / PPT 尚不支持）"
         ))),
     }
 }
@@ -78,6 +98,36 @@ fn kind_from_extension(source: &Path) -> Result<&'static str, WorkImportError> {
 /// 暂存副本文件名:固定 `original.<ext>`,不含原始文件名(防路径穿越)。
 fn staged_file_name(kind: &str) -> String {
     format!("original.{kind}")
+}
+
+fn import_byte_cap(kind: &str) -> u64 {
+    match kind {
+        "png" | "jpeg" | "webp" => MAX_IMAGE_IMPORT_BYTES,
+        _ => MAX_DOCUMENT_IMPORT_BYTES,
+    }
+}
+
+fn image_mime_for_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "png" => Some("image/png"),
+        "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+pub fn validate_image_bytes(mime: &str, bytes: &[u8]) -> Result<(), &'static str> {
+    let valid = match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.len() >= 3 && bytes[..3] == [0xff, 0xd8, 0xff],
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("扩展名与文件签名不匹配")
+    }
 }
 
 /// 核心导入逻辑(可测,不依赖 Tauri)。app_data_dir 由调用方给出。
@@ -92,9 +142,26 @@ pub fn import_document(
 ) -> Result<ImportRecord, WorkImportError> {
     let kind = kind_from_extension(source)?;
 
-    // 读原件 + 算完整 sha256(纯读,无落盘)。
-    let bytes = std::fs::read(source)
+    // 有界读取原件 + 算完整 sha256(纯读,无落盘)。`take(cap + 1)` 也覆盖
+    // metadata/read 之间文件被替换的竞态，避免按攻击者声明尺寸无限分配。
+    let cap = import_byte_cap(kind);
+    let file = std::fs::File::open(source)
         .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+    if bytes.len() as u64 > cap {
+        return Err(WorkImportError::InputTooLarge {
+            bytes: bytes.len() as u64,
+            cap,
+        });
+    }
+    if let Some(mime) = image_mime_for_kind(kind) {
+        validate_image_bytes(mime, &bytes).map_err(|e| {
+            WorkImportError::SignatureMismatch(format!("图片签名校验失败：{e}"))
+        })?;
+    }
     let sha256 = hex_lower(&Sha256::digest(&bytes));
 
     let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
@@ -239,6 +306,69 @@ pub fn work_list_imports(
     list_imports(&app_data, &ws).map_err(|e| e.to_string())
 }
 
+/// Snapshot folder files into the Work staging area for this send.
+/// Replaces any previous snapshot. Empty `source_paths` clears the snapshot.
+#[tauri::command]
+pub fn work_snapshot_sources(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    source_paths: Vec<String>,
+) -> Result<Vec<ImportRecord>, String> {
+    use tauri::Manager;
+    let ws = WorkspaceId::parse(workspace_id).map_err(|e| e.to_string())?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+    replace_work_snapshot(
+        &app_data,
+        &ws,
+        &source_paths.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Replace the send-time snapshot with the given folder files.
+/// Empty `sources` clears the snapshot so the next turn passes user text through.
+pub fn replace_work_snapshot(
+    app_data_dir: &Path,
+    workspace_id: &WorkspaceId,
+    sources: &[PathBuf],
+) -> Result<Vec<ImportRecord>, WorkImportError> {
+    let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
+    std::fs::create_dir_all(&ws_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
+    let old_ids = {
+        let _lock = acquire_workspace_lock(&ws_dir)?;
+        let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
+        let old_ids = if manifest_path.exists() {
+            let manifest = WorkManifest::read(&manifest_path)?;
+            if &manifest.workspace_id != workspace_id {
+                return Err(WorkImportError::WorkspaceMismatch {
+                    requested: workspace_id.as_str().to_string(),
+                    found: manifest.workspace_id.as_str().to_string(),
+                });
+            }
+            manifest
+                .imports
+                .iter()
+                .map(|r| r.import_id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        WorkManifest::new(workspace_id.clone()).write_atomic(&manifest_path)?;
+        old_ids
+    };
+    for import_id in old_ids {
+        cleanup_import_dir(&ws_dir.join(import_id.as_str()));
+    }
+    let mut records = Vec::with_capacity(sources.len());
+    for source in sources {
+        records.push(import_document(app_data_dir, workspace_id, source)?);
+    }
+    Ok(records)
+}
+
 pub fn list_imports(
     app_data: &Path,
     ws: &WorkspaceId,
@@ -359,6 +489,87 @@ mod tests {
         ));
         // 拒绝时不建暂存目录、不写清单
         assert!(!manifest_path_under(app.clone(), &ws).exists());
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn modern_document_and_image_extensions_are_normalized() {
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let jpeg = [0xff, 0xd8, 0xff, 0x00];
+        let webp = b"RIFF1234WEBPrest";
+        let cases: &[(&str, &str, &str, &[u8])] = &[
+            ("book.XLSX", "xlsx", "original.xlsx", b"fixture"),
+            ("deck.PptX", "pptx", "original.pptx", b"fixture"),
+            ("scan.PNG", "png", "original.png", png),
+            ("photo.jpg", "jpeg", "original.jpeg", &jpeg),
+            ("photo.JPEG", "jpeg", "original.jpeg", &jpeg),
+            ("diagram.WeBp", "webp", "original.webp", webp),
+        ];
+        for (name, kind, safe_name, bytes) in cases {
+            let app = tmp_dir("modern-kind-app");
+            let src_dir = tmp_dir("modern-kind-src");
+            let src = write_source(&src_dir, name, bytes);
+            let ws = WorkspaceId::mint();
+            let rec = import_document(&app, &ws, &src).unwrap();
+            assert_eq!(rec.kind, *kind, "{name}");
+            assert!(rec.staging_rel_path.ends_with(safe_name), "{name}");
+            let _ = std::fs::remove_dir_all(&app);
+            let _ = std::fs::remove_dir_all(&src_dir);
+        }
+    }
+
+    #[test]
+    fn legacy_binary_office_formats_fail_closed() {
+        for name in ["legacy.doc", "legacy.xls", "legacy.ppt"] {
+            assert!(matches!(
+                kind_from_extension(Path::new(name)),
+                Err(WorkImportError::UnsupportedKind(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn image_and_document_import_caps_are_explicit() {
+        assert_eq!(import_byte_cap("png"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("jpeg"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("webp"), 20 * 1024 * 1024);
+        assert_eq!(import_byte_cap("pdf"), 64 * 1024 * 1024);
+        assert_eq!(import_byte_cap("xlsx"), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn fake_image_extension_is_rejected_at_snapshot() {
+        let app = tmp_dir("fake-png-app");
+        let src_dir = tmp_dir("fake-png-src");
+        let src = write_source(&src_dir, "not-really.png", b"this is not a png");
+        let ws = WorkspaceId::mint();
+        assert!(matches!(
+            import_document(&app, &ws, &src),
+            Err(WorkImportError::SignatureMismatch(_))
+        ));
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn replace_snapshot_clears_previous_files() {
+        let app = tmp_dir("snap-app");
+        let src_dir = tmp_dir("snap-src");
+        let ws = WorkspaceId::mint();
+        let first = write_source(&src_dir, "old.docx", b"old");
+        import_document(&app, &ws, &first).unwrap();
+        let next = write_source(&src_dir, "budget.xlsx", b"PK");
+        let recs = replace_work_snapshot(&app, &ws, &[next]).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "xlsx");
+        assert_eq!(recs[0].display_name, "budget.xlsx");
+        let listed = list_imports(&app, &ws).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].kind, "xlsx");
+        let empty = replace_work_snapshot(&app, &ws, &[]).unwrap();
+        assert!(empty.is_empty());
+        assert!(list_imports(&app, &ws).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }

@@ -25,6 +25,7 @@ pub mod work_context;
 pub mod work_anchor;
 pub mod work_blocks;
 pub mod work_docx;
+pub mod work_office;
 pub mod work_pdf;
 pub mod work_parse_worker;
 pub mod cowork_escape_probe;
@@ -301,6 +302,7 @@ pub fn run() {
             agent::chat_workspace,
             work_import::work_import,
             work_import::work_list_imports,
+            work_import::work_snapshot_sources,
             workspace_copy::copy_into_workspace,
             agent::agent_list_sessions,
             agent::agent_list_mcp,

@@ -72,7 +72,7 @@ describe("WorkDesk", () => {
     expect(screen.queryByRole("button", { name: /import document/i })).toBeNull();
   });
 
-  it("lists pdf, docx, and xlsx from the opened folder", async () => {
+  it("lists pdf, docx, xlsx, pptx, and images from the opened folder", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(
@@ -82,6 +82,8 @@ describe("WorkDesk", () => {
           { path: "brief.pdf", kind: "pdf" },
           { path: "notes.docx", kind: "docx" },
           { path: "budget.xlsx", kind: "xlsx" },
+          { path: "deck.pptx", kind: "pptx" },
+          { path: "chart.png", kind: "png" },
         ]}
         selectedPath={null}
         onSelect={onSelect}
@@ -94,6 +96,8 @@ describe("WorkDesk", () => {
     expect(screen.getByRole("button", { name: /brief\.pdf/ })).toBeVisible();
     expect(screen.getByRole("button", { name: /notes\.docx/ })).toBeVisible();
     expect(screen.getByRole("button", { name: /budget\.xlsx/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /deck\.pptx/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /chart\.png/ })).toBeVisible();
     await user.click(screen.getByRole("button", { name: /budget\.xlsx/ }));
     expect(onSelect).toHaveBeenCalledWith("budget.xlsx");
   });
