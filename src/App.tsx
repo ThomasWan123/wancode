@@ -588,7 +588,7 @@ function App() {
     }
     const path = await openDialog({
       directory: false,
-      title: lang === "zh" ? "选择要导入的文档" : "Pick a document to import",
+      title: lang === "zh" ? "选择要添加的文档" : "Choose a document to add",
       filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
     });
     if (typeof path !== "string" || !path) return;

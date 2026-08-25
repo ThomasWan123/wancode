@@ -37,6 +37,13 @@ describe("surface switcher i18n", () => {
     expect(surfaceLabel("work", STRINGS.en)).toBe("Work");
   });
 
+  it("uses format-neutral copy for adding Work documents", () => {
+    expect(STRINGS.zh.workImport).toBe("添加文档");
+    expect(STRINGS.en.workImport).toBe("Add document");
+    expect(STRINGS.zh.workDeskSubtitle).not.toMatch(/PDF|Word|DOCX|Excel|图片/iu);
+    expect(STRINGS.en.workDeskSubtitle).not.toMatch(/PDF|Word|DOCX|Excel|image/iu);
+  });
+
   it("shares one friendly empty-git string for Diff and Review", () => {
     expect(STRINGS.zh.gitNeedRepo).toBe("先打开一个 git 项目才能看改动 / 审查。");
     expect(STRINGS.en.gitNeedRepo).toBe("Open a git project to see changes and run Review.");
