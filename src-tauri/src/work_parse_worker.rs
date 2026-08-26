@@ -47,6 +47,8 @@ pub struct ParseRequest {
 pub enum DocKind {
     Pdf,
     Docx,
+    Xlsx,
+    Pptx,
 }
 
 /// 解析响应（子 → 父，stdout 上一行 JSON）。
@@ -69,6 +71,12 @@ pub enum ParsedDoc {
         blocks: Vec<crate::work_blocks::WorkBlock>,
     },
     Pdf {
+        blocks: Vec<crate::work_blocks::WorkBlock>,
+    },
+    Xlsx {
+        blocks: Vec<crate::work_blocks::WorkBlock>,
+    },
+    Pptx {
         blocks: Vec<crate::work_blocks::WorkBlock>,
     },
     /// 仅自测使用，产品路径不产生。
@@ -266,6 +274,28 @@ fn run_request(req: &ParseRequest) -> ParseResponse {
                 },
             }
         }
+        DocKind::Xlsx => match crate::work_office::parse_xlsx(
+            std::path::Path::new(&req.source_path),
+            crate::work_office::OfficeLimits::default(),
+        ) {
+            Ok(blocks) => ParseResponse::Ok {
+                doc: ParsedDoc::Xlsx { blocks },
+            },
+            Err(e) => ParseResponse::Err {
+                reason: e.to_string(),
+            },
+        },
+        DocKind::Pptx => match crate::work_office::parse_pptx(
+            std::path::Path::new(&req.source_path),
+            crate::work_office::OfficeLimits::default(),
+        ) {
+            Ok(blocks) => ParseResponse::Ok {
+                doc: ParsedDoc::Pptx { blocks },
+            },
+            Err(e) => ParseResponse::Err {
+                reason: e.to_string(),
+            },
+        },
     }
 }
 

@@ -42,4 +42,17 @@ describe("surface switcher i18n", () => {
     expect(STRINGS.en.gitNeedRepo).toBe("Open a git project to see changes and run Review.");
     expect(STRINGS.zh.mentionNoFiles).toMatch(/文件/);
   });
+
+  it("Work copy is folder-first, not an import library", () => {
+    expect(STRINGS.zh.workOpenFolder).toBe("打开文件夹");
+    expect(STRINGS.zh.workDeskEmpty).not.toMatch(/导入/);
+    expect(STRINGS.zh.workDeskEmptyHint).not.toMatch(/导入/);
+    expect(STRINGS.en.workDeskEmpty).not.toMatch(/import/i);
+    expect(STRINGS.en.workDeskEmptyHint).not.toMatch(/import/i);
+    expect(STRINGS.zh.mentionNoFiles).toMatch(/文件夹/);
+    expect(STRINGS.zh.mentionNoFiles).not.toMatch(/代码层/);
+    expect(STRINGS.zh.workDeskSubtitle).not.toMatch(/导入/);
+    expect(STRINGS.en.workDeskSubtitle).not.toMatch(/import/i);
+    expect(STRINGS.zh.workFolderEmpty).not.toMatch(/导入/);
+  });
 });

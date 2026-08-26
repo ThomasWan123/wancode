@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { STRINGS } from "../../i18n";
@@ -7,76 +7,173 @@ import { WorkDesk } from "./WorkDesk";
 const t = STRINGS.en;
 
 describe("WorkDesk", () => {
-  it("shows document-desk empty copy, not implementation-speak", () => {
+  it("empty state asks to open a folder, not import a quarantined document", () => {
     render(
-      <WorkDesk docs={[]} selectedId={null} onSelect={vi.fn()} onImport={vi.fn()} t={t} />,
+      <WorkDesk
+        folder=""
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        t={t}
+      />,
     );
-    expect(screen.getByRole("region", { name: t.workDeskTitle })).toBeVisible();
-    expect(screen.getByText(t.workDeskEmpty)).toBeVisible();
+    const region = screen.getByRole("region", { name: t.workDeskTitle });
+    expect(region).toBeVisible();
+    expect(screen.getAllByRole("button", { name: t.workOpenFolder }).length).toBeGreaterThan(0);
+    expect(screen.getByText(t.workDeskEmptyHint)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /import document/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: t.workAddFile })).toBeNull();
     expect(screen.queryByText(/copied read-only into this session's workspace/i)).toBeNull();
+    expect(screen.queryByText(/fingerprint/i)).toBeNull();
+    expect(screen.queryByText(/not a PDF editor/i)).toBeNull();
+    expect(screen.queryByText(/this is not a PDF editor/i)).toBeNull();
   });
 
-  it("lists documents and shows identity preview without faking a PDF editor", async () => {
+  it("open-folder empty state is the hero CTA", async () => {
+    const user = userEvent.setup();
+    const onOpenFolder = vi.fn();
+    render(
+      <WorkDesk
+        folder=""
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onOpenFolder={onOpenFolder}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        t={t}
+      />,
+    );
+    const buttons = screen.getAllByRole("button", { name: t.workOpenFolder });
+    expect(buttons.length).toBeGreaterThan(1);
+    await user.click(buttons[buttons.length - 1]);
+    expect(onOpenFolder).toHaveBeenCalled();
+  });
+
+  it("folder-open empty state is a drop target, still without Import-document", () => {
+    render(
+      <WorkDesk
+        folder="D:/client-pack"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        t={t}
+      />,
+    );
+    expect(screen.getByText("client-pack")).toBeVisible();
+    expect(screen.getByText(t.workFolderEmpty)).toBeVisible();
+    expect(screen.getByRole("button", { name: t.workAddFile })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /import document/i })).toBeNull();
+  });
+
+  it("lists pdf, docx, xlsx, pptx, and images from the opened folder", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(
       <WorkDesk
-        docs={[
-          {
-            import_id: "imp-1",
-            display_name: "brief.pdf",
-            kind: "pdf",
-            source_sha256: "abcdef0123456789",
-          },
+        folder="D:/docs"
+        files={[
+          { path: "brief.pdf", kind: "pdf" },
+          { path: "notes.docx", kind: "docx" },
+          { path: "budget.xlsx", kind: "xlsx" },
+          { path: "deck.pptx", kind: "pptx" },
+          { path: "chart.png", kind: "png" },
         ]}
-        selectedId={null}
+        selectedPath={null}
         onSelect={onSelect}
-        onImport={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
         t={t}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /brief\.pdf/ }));
-    expect(onSelect).toHaveBeenCalledWith("imp-1");
+    expect(screen.getByRole("button", { name: /brief\.pdf/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /notes\.docx/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /budget\.xlsx/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /deck\.pptx/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /chart\.png/ })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /budget\.xlsx/ }));
+    expect(onSelect).toHaveBeenCalledWith("budget.xlsx");
   });
 
-  it("shows fingerprint immediately when import auto-selects the new doc", () => {
+  it("preview shows file identity, not a sha256 fingerprint", () => {
     render(
       <WorkDesk
-        docs={[
-          {
-            import_id: "imp-2",
-            display_name: "notes.docx",
-            kind: "docx",
-            source_sha256: "abcdef0123456789ffff",
-          },
-        ]}
-        selectedId="imp-2"
+        folder="D:/docs"
+        files={[{ path: "notes.docx", kind: "docx" }]}
+        selectedPath="notes.docx"
         onSelect={vi.fn()}
-        onImport={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
         t={t}
       />,
     );
-    expect(screen.getByText(/abcdef012345/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "notes.docx" })).toBeVisible();
+    expect(screen.getByText("DOCX", { selector: ".work-desk-meta" })).toBeVisible();
+    expect(screen.queryByText(/abcdef012345/)).toBeNull();
+    expect(screen.queryByText(/fingerprint/i)).toBeNull();
     expect(screen.queryByText(t.workSelectHint)).toBeNull();
   });
 
-  it("asks the user to pick a doc when the list has items but none is selected", () => {
+  it("shows extractable text when a caller already has it", () => {
     render(
       <WorkDesk
-        docs={[
-          {
-            import_id: "imp-1",
-            display_name: "brief.pdf",
-            kind: "pdf",
-            source_sha256: "abcdef0123456789",
-          },
-        ]}
-        selectedId={null}
+        folder="D:/docs"
+        files={[{ path: "brief.pdf", kind: "pdf" }]}
+        selectedPath="brief.pdf"
+        extractText="Page 1: Q3 revenue"
         onSelect={vi.fn()}
-        onImport={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        t={t}
+      />,
+    );
+    expect(screen.getByText("Page 1: Q3 revenue")).toBeVisible();
+  });
+
+  it("asks the user to pick a file when the list has items but none is selected", () => {
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[{ path: "brief.pdf", kind: "pdf" }]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
         t={t}
       />,
     );
     expect(screen.getByText(t.workSelectHint)).toBeVisible();
+  });
+
+  it("drop with a file path places that file into the folder", () => {
+    const onDropPaths = vi.fn();
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={onDropPaths}
+        t={t}
+      />,
+    );
+    const file = new File(["%PDF"], "brief.pdf", { type: "application/pdf" });
+    Object.defineProperty(file, "path", { value: "C:\\downloads\\brief.pdf" });
+    fireEvent.drop(screen.getByRole("region", { name: t.workDeskTitle }), {
+      dataTransfer: { files: [file] },
+    });
+    expect(onDropPaths).toHaveBeenCalledWith(["C:\\downloads\\brief.pdf"]);
   });
 });

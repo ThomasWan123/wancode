@@ -30,7 +30,7 @@ The desktop client is built with Tauri 2, React, and TypeScript. Its Rust agent 
 |---|---|---|
 | **Chat** | General questions, research, and web-assisted conversations | Uses a private application runtime directory and built-in web tools. Local plugins, disk hooks, MCP servers, LSP servers, plugin skills, plugin commands, and extension-enabled subagents are disabled for the complete session lifetime. |
 | **Code** | Repository work and software development | Keeps the full coding toolchain, workspace access, Git integration, terminal access, hooks, skills, MCP, LSP, plugins, and subagents. |
-| **Work** | Local document understanding | Imports PDF and DOCX files into a read-only staging area, extracts source-addressable blocks in a crash-contained worker, and keeps local extension capabilities disabled by default. |
+| **Work** | Local document understanding | Opens a folder of PDF, DOCX, XLSX, PPTX, and modern image files; copies new files into that folder; snapshots referenced files at send for hash-verified contained parse. Local extension capabilities stay disabled by default. |
 
 Surface identity is bound when a session is created and stored in a fail-closed WanCode sidecar. Restored sessions must resolve to their original surface, and the engine must explicitly confirm that the requested policy was applied before WanCode exposes the session handle.
 
@@ -40,7 +40,7 @@ Cowork remains gated. v0.20 ships its real-engine escape probe and records the c
 
 - **Multi-model support** — Zhipu GLM, DeepSeek, and custom OpenAI-compatible endpoints, with a published [provider compatibility matrix](docs/provider-compatibility.md) generated from CI evidence.
 - **Capability-aware controls** — reasoning effort appears only for models that declare support; project-memory refresh and edit controls are wired to the engine.
-- **Document Work surface** — staged PDF/DOCX import, durable document recovery, verified read-only source identity, fail-closed source paths, bounded worker-process parsing, and citation-ready document context supplied to every Work turn. Image-only PDFs currently require external OCR.
+- **Document Work surface** — folder-first chat about PDF, DOCX, XLSX, PPTX, PNG, JPEG, and WebP; copy into the opened folder, send-time snapshot with verified read-only source identity, fail-closed source paths, bounded worker-process parsing, and citation-ready context on every Work turn that references a file. Images require a vision-capable model, and image-only PDFs currently require external OCR.
 - **Streaming conversations** — Markdown rendering, collapsible reasoning, and tool-call cards.
 - **Approval controls** — ask, allow for the current session, or reject sensitive actions.
 - **Inline diff review** — inspect proposed file changes before they are written.

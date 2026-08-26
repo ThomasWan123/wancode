@@ -13,6 +13,16 @@ import { Home } from "./features/home/Home";
 import { Workbench } from "./features/workbench/Workbench";
 import { PlanDocument } from "./features/plan/PlanDocument";
 import { WorkDesk } from "./features/work/WorkDesk";
+import {
+  referencedWorkSources,
+  sourceIsWorkImage,
+  workDeskFiles,
+  WORK_DOCUMENT_EXTENSIONS,
+} from "./features/work/workFiles";
+import {
+  snapshotWorkSourcesForSend,
+  WorkSnapshotIdentityError,
+} from "./features/work/workSend";
 import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
@@ -260,14 +270,15 @@ function App() {
   // 当前 Work 会话的工作区身份与持久文档清单。清单以后端 manifest 为真源，
   // 每次启动/恢复 Work 会话都重读，React 状态只作当前视图缓存。
   const [workWorkspaceId, setWorkWorkspaceId] = useState<string>("");
-  const [workDocs, setWorkDocs] = useState<
-    { import_id: string; display_name: string; kind: string; source_sha256: string }[]
-  >([]);
+  // Send may create a Work session and continue in the same async turn. React
+  // state is not refreshed inside that closure, so the synchronous ref is the
+  // authoritative identity for the snapshot that must precede agent_prompt.
+  const workWorkspaceIdRef = useRef("");
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
   const surfaceCacheRef = useRef<SurfaceSessionCache>({});
   const preserveTranscriptRef = useRef(false);
-  const [workDocSelected, setWorkDocSelected] = useState<string | null>(null);
+  const [workFileSelected, setWorkFileSelected] = useState<string | null>(null);
   const [model, setModel] = useState("glm-5.2");
   const [models, setModels] = useState<string[]>([]);
   // 结构化下拉选项（v0.18.7-B）：value=catalog key，显示 name+端点。
@@ -569,41 +580,93 @@ function App() {
 
   async function pickFolderAndConnect() {
     setPlusMenu(false);
-    const dir = await openDialog({ directory: true, title: t.pickFolderTitle });
+    const onWork = surfaceRef.current === "work";
+    const dir = await openDialog({
+      directory: true,
+      title: onWork ? t.workPickFolderTitle : t.pickFolderTitle,
+    });
     if (typeof dir === "string" && dir) {
       setWorkspace(dir);
       localStorage.setItem("wancode-workspace", dir);
+      if (onWork) {
+        setWorkFileSelected(null);
+        loadWorkspaceFiles(dir);
+        return;
+      }
       refreshSessions(dir);
       // Auto-open the workspace (start the session) — one action, Claude-style.
       startSession(undefined, dir);
     }
   }
 
-  // 把一份 PDF / DOCX 导入当前 Work 会话的工作区。原件只读复制、
-  // 记完整 sha256(后端 work_import)。成功后 append 到本会话文档列表。
-  async function importWorkDoc() {
-    if (!workWorkspaceId) {
-      setError(lang === "zh" ? "当前不是 Work 会话，无法导入" : "Not a Work session");
+  function loadWorkspaceFiles(ws: string, sessionGuard?: string) {
+    if (!ws) {
+      setFileList([]);
       return;
     }
-    const path = await openDialog({
-      directory: false,
-      title: lang === "zh" ? "选择要导入的文档" : "Pick a document to import",
-      filters: [{ name: "Documents", extensions: ["pdf", "docx"] }],
-    });
-    if (typeof path !== "string" || !path) return;
-    try {
-      const rec = await invoke<{
-        import_id: string;
-        display_name: string;
-        kind: string;
-        source_sha256: string;
-      }>("work_import", { workspaceId: workWorkspaceId, sourcePath: path });
-      setWorkDocs((prev) => [...prev, rec]);
-      setWorkDocSelected(rec.import_id);
-    } catch (e) {
-      setError(String(e));
+    invoke<string[]>("list_workspace_files", { workspace: ws })
+      .then((files) => {
+        if (sessionGuard && sessionIdRef.current !== sessionGuard) return;
+        setFileList(files);
+      })
+      .catch(() => {
+        if (sessionGuard && sessionIdRef.current !== sessionGuard) return;
+        setFileList([]);
+      });
+  }
+
+  const lastDropRef = useRef({ key: "", at: 0 });
+  function placeFilesDeduped(paths: string[]) {
+    const key = paths.join("|");
+    const now = Date.now();
+    if (lastDropRef.current.key === key && now - lastDropRef.current.at < 500) return;
+    lastDropRef.current = { key, at: now };
+    void placeFilesInWorkFolder(paths);
+  }
+  const placeFilesDedupedRef = useRef(placeFilesDeduped);
+  placeFilesDedupedRef.current = placeFilesDeduped;
+
+  // Copy into the opened folder (Claude Code grammar). Parsing is a send-time
+  // kernel: the file lives in the folder until Send snapshots it.
+  async function placeFilesInWorkFolder(sourcePaths: string[]) {
+    const ws = workspaceStateRef.current;
+    if (!ws) {
+      setError(lang === "zh" ? "先打开一个文件夹" : "Open a folder first");
+      return;
     }
+    let lastRel: string | null = null;
+    for (const src of sourcePaths) {
+      try {
+        const rel = await invoke<string>("copy_into_workspace", {
+          workspace: ws,
+          sourcePath: src,
+        });
+        lastRel = rel;
+      } catch (e) {
+        setError(String(e));
+      }
+    }
+    loadWorkspaceFiles(ws);
+    if (lastRel) setWorkFileSelected(lastRel);
+  }
+
+  async function attachFilesToWorkFolder() {
+    const ws = workspaceStateRef.current;
+    if (!ws) {
+      setError(lang === "zh" ? "先打开一个文件夹" : "Open a folder first");
+      return;
+    }
+    const picked = await openDialog({
+      multiple: true,
+      title: t.workAddFile,
+      filters: [{ name: "Documents", extensions: [...WORK_DOCUMENT_EXTENSIONS] }],
+    });
+    const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (paths.length) await placeFilesInWorkFolder(paths.filter((p): p is string => typeof p === "string"));
+  }
+
+  function selectWorkFile(relPath: string) {
+    setWorkFileSelected(relPath);
   }
 
   function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1296,9 +1359,34 @@ function App() {
         }
       })();
     }
+    if (surface === "work" && workspace) loadWorkspaceFiles(workspace);
     // refreshSessions 只写会话/MCP 状态，不会反向修改 workspace。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, surface]);
+
+  useEffect(() => {
+    if (surface !== "work") return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const stop = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "drop" && event.payload.paths?.length) {
+            placeFilesDedupedRef.current(event.payload.paths);
+          }
+        });
+        if (cancelled) stop();
+        else unlisten = stop;
+      } catch {
+        /* unit tests / non-tauri shells have no webview drag API */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [surface]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1690,23 +1778,13 @@ function App() {
         const workId = r.workspace_id ?? "";
         rememberWorkSession(localStorage, r.session_id);
         rememberWorkWorkspace(localStorage, workId);
+        workWorkspaceIdRef.current = workId;
         setWorkWorkspaceId(workId);
         if (!preserve) {
-          setWorkDocs([]);
-          setWorkDocSelected(null);
-        }
-        if (workId) {
-          invoke<
-            { import_id: string; display_name: string; kind: string; source_sha256: string }[]
-          >("work_list_imports", { workspaceId: workId })
-            .then((docs) => {
-              if (sessionIdRef.current === r.session_id) setWorkDocs(docs);
-            })
-            .catch((e) => {
-              if (sessionIdRef.current === r.session_id) setError(String(e));
-            });
+          setWorkFileSelected(null);
         }
       } else {
+        workWorkspaceIdRef.current = "";
         setWorkWorkspaceId("");
       }
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
@@ -1735,13 +1813,7 @@ function App() {
       const codeWorkspace =
         decision.surface === "code" ? (r.cwd || wsPath) : workspaceStateRef.current;
       const loadFiles = (ws: string) => {
-        invoke<string[]>("list_workspace_files", { workspace: ws })
-          .then((files) => {
-            if (sessionIdRef.current === r.session_id) setFileList(files);
-          })
-          .catch(() => {
-            if (sessionIdRef.current === r.session_id) setFileList([]);
-          });
+        loadWorkspaceFiles(ws, r.session_id);
       };
       if (decision.surface === "code") {
         if (codeWorkspace) loadFiles(codeWorkspace);
@@ -1751,8 +1823,11 @@ function App() {
         refreshOtherRecent(wsPath);
         refreshWorkbench();
       } else {
-        if (decision.surface === "chat" && codeWorkspace) loadFiles(codeWorkspace);
-        else setFileList([]);
+        if ((decision.surface === "chat" || decision.surface === "work") && codeWorkspace) {
+          loadFiles(codeWorkspace);
+        } else {
+          setFileList([]);
+        }
         setGitInfo(null);
         setMcpServers([]);
       }
@@ -2118,6 +2193,7 @@ function App() {
     }
     const text = input.trim();
     if (!text && pastedImages.length === 0) return;
+    let snapshotWorkspaceId = workWorkspaceIdRef.current;
     // Typed before the session was ready — spin one up first, then send.
     if (!sessionId) {
       if (!starting) {
@@ -2126,6 +2202,7 @@ function App() {
           if (ws !== workspace) setWorkspace(ws);
           const sid = await startSession(undefined, ws);
           if (!sid) return; // start failed; keep the text so the user can retry
+          snapshotWorkspaceId = workWorkspaceIdRef.current;
         } else {
           return;
         }
@@ -2133,11 +2210,31 @@ function App() {
         return; // a start is already in flight; user can press Enter again
       }
     }
+    const workResolution =
+      surface === "work" && workspace
+        ? referencedWorkSources({
+            text,
+            folder: workspace,
+            files: workDeskFiles(fileList),
+            selectedPath: workFileSelected,
+          })
+        : { sources: [], issue: null };
+    if (workResolution.issue) {
+      setError(
+        workResolution.issue === "ambiguous"
+          ? (lang === "zh" ? "文件引用不唯一，请使用完整相对路径" : "File reference is ambiguous; use its full relative path")
+          : (lang === "zh" ? "找不到引用的文件，请从 @ 列表重新选择" : "Referenced file not found; choose it again from the @ list"),
+      );
+      return;
+    }
+    const workSources = workResolution.sources;
+    const hasWorkImages = workSources.some((path) => sourceIsWorkImage(path));
     const imgs = pastedImages;
     // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
     // Block* 阻断并针对性引导；Warn* 二次确认；未知载荷 fail-closed 阻断。
     // 判定期间置重入护栏：await 窗口内再按 Enter 不得二次发送。
-    if (imgs.length > 0) {
+    // Work folder images use the same gate as pasted images.
+    if (imgs.length > 0 || hasWorkImages) {
       if (imageGateRef.current) return;
       imageGateRef.current = true;
       try {
@@ -2166,6 +2263,23 @@ function App() {
       } finally {
         imageGateRef.current = false;
       }
+    }
+    try {
+      await snapshotWorkSourcesForSend({
+        surface,
+        workspaceId: snapshotWorkspaceId,
+        sourcePaths: workSources,
+        snapshot: async (workspaceId, sourcePaths) => {
+          await invoke("work_snapshot_sources", { workspaceId, sourcePaths });
+        },
+      });
+    } catch (e) {
+      setError(
+        e instanceof WorkSnapshotIdentityError
+          ? (lang === "zh" ? "Work 会话身份尚未就绪，请重试" : "Work session identity is not ready; try again")
+          : String(e),
+      );
+      return;
     }
     setInput("");
     setPastedImages([]);
@@ -2357,7 +2471,7 @@ function App() {
         setSidebarTab("sessions");
       },
     },
-    { id: "open-folder", label: t.sugOpenFolder, disabled: surface !== "code", run: pickFolderAndConnect },
+    { id: "open-folder", label: t.sugOpenFolder, disabled: surface !== "code" && surface !== "work", run: pickFolderAndConnect },
     { id: "workbench", label: t.wbTooltip, hint: "Ctrl+Shift+D", disabled: surface !== "code" || !sessionId, run: toggleWorkbench },
     {
       id: "terminal",
@@ -2522,13 +2636,13 @@ function App() {
             <IconGitBranch />
           </button>
         )}
-        {surface === "work" && sessionId && (
+        {surface === "work" && (
           <button
             className="icon-btn"
-            title={t.workImport}
-            onClick={importWorkDoc}
+            title={t.workOpenFolder}
+            onClick={pickFolderAndConnect}
           >
-            {t.workImport}
+            <IconFolderClosed size={15} />
           </button>
         )}
         <button
@@ -2549,12 +2663,15 @@ function App() {
           <IconSettings />
         </button>
       </header>
-      {surface === "work" && sessionId && (
+      {surface === "work" && (
         <WorkDesk
-          docs={workDocs}
-          selectedId={workDocSelected}
-          onSelect={setWorkDocSelected}
-          onImport={importWorkDoc}
+          folder={workspace}
+          files={workDeskFiles(fileList)}
+          selectedPath={workFileSelected}
+          onSelect={selectWorkFile}
+          onOpenFolder={pickFolderAndConnect}
+          onAddFiles={attachFilesToWorkFolder}
+          onDropPaths={placeFilesDeduped}
           t={t}
         />
       )}
@@ -2663,7 +2780,7 @@ function App() {
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode: persistTranscript }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile: attachFilesToWorkFolder, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode: persistTranscript }} />
         </div>
 
         {surface === "code" && showWorkbench && (

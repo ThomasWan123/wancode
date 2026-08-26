@@ -2704,21 +2704,26 @@ pub async fn agent_prompt(
             h.capability_lease.clone(),
         )
     };
+    let mut images = images.unwrap_or_default();
     let text = if surface_kind == crate::surface::SurfaceKind::Work {
         let workspace_id = work_workspace_id.ok_or("Work 会话缺少 workspace_id")?;
         let app_data = app
             .path()
             .app_data_dir()
             .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
-        tokio::task::spawn_blocking(move || {
-            crate::work_context::build_work_prompt(&app_data, &workspace_id, &text)
+        let context = tokio::task::spawn_blocking(move || {
+            crate::work_context::build_work_context(&app_data, &workspace_id, &text)
         })
         .await
-        .map_err(|e| format!("Work 上下文任务失败: {e}"))??
+        .map_err(|e| format!("Work 上下文任务失败: {e}"))??;
+        images.extend(context.images.into_iter().map(|image| PromptImage {
+            data: image.data,
+            mime: image.mime,
+        }));
+        context.text
     } else {
         text
     };
-    let images = images.unwrap_or_default();
     let evidence = prompt_evidence(
         &text,
         images
