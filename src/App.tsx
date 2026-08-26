@@ -19,6 +19,10 @@ import {
   workDeskFiles,
   WORK_DOCUMENT_EXTENSIONS,
 } from "./features/work/workFiles";
+import {
+  snapshotWorkSourcesForSend,
+  WorkSnapshotIdentityError,
+} from "./features/work/workSend";
 import { CommandPalette } from "./features/palette/CommandPalette";
 import { TasksPanel } from "./features/tasks/TasksPanel";
 import { TerminalPanel } from "./features/terminal/TerminalPanel";
@@ -266,6 +270,10 @@ function App() {
   // 当前 Work 会话的工作区身份与持久文档清单。清单以后端 manifest 为真源，
   // 每次启动/恢复 Work 会话都重读，React 状态只作当前视图缓存。
   const [workWorkspaceId, setWorkWorkspaceId] = useState<string>("");
+  // Send may create a Work session and continue in the same async turn. React
+  // state is not refreshed inside that closure, so the synchronous ref is the
+  // authoritative identity for the snapshot that must precede agent_prompt.
+  const workWorkspaceIdRef = useRef("");
   const surfaceRef = useRef(surface);
   surfaceRef.current = surface;
   const surfaceCacheRef = useRef<SurfaceSessionCache>({});
@@ -581,6 +589,7 @@ function App() {
       setWorkspace(dir);
       localStorage.setItem("wancode-workspace", dir);
       if (onWork) {
+        setWorkFileSelected(null);
         loadWorkspaceFiles(dir);
         return;
       }
@@ -1769,11 +1778,13 @@ function App() {
         const workId = r.workspace_id ?? "";
         rememberWorkSession(localStorage, r.session_id);
         rememberWorkWorkspace(localStorage, workId);
+        workWorkspaceIdRef.current = workId;
         setWorkWorkspaceId(workId);
         if (!preserve) {
           setWorkFileSelected(null);
         }
       } else {
+        workWorkspaceIdRef.current = "";
         setWorkWorkspaceId("");
       }
       // 工作区标签以会话真实 cwd 为准（#83：标签与会话脱节时，git 面板
@@ -2182,6 +2193,7 @@ function App() {
     }
     const text = input.trim();
     if (!text && pastedImages.length === 0) return;
+    let snapshotWorkspaceId = workWorkspaceIdRef.current;
     // Typed before the session was ready — spin one up first, then send.
     if (!sessionId) {
       if (!starting) {
@@ -2190,6 +2202,7 @@ function App() {
           if (ws !== workspace) setWorkspace(ws);
           const sid = await startSession(undefined, ws);
           if (!sid) return; // start failed; keep the text so the user can retry
+          snapshotWorkspaceId = workWorkspaceIdRef.current;
         } else {
           return;
         }
@@ -2197,7 +2210,7 @@ function App() {
         return; // a start is already in flight; user can press Enter again
       }
     }
-    const workSources =
+    const workResolution =
       surface === "work" && workspace
         ? referencedWorkSources({
             text,
@@ -2205,7 +2218,16 @@ function App() {
             files: workDeskFiles(fileList),
             selectedPath: workFileSelected,
           })
-        : [];
+        : { sources: [], issue: null };
+    if (workResolution.issue) {
+      setError(
+        workResolution.issue === "ambiguous"
+          ? (lang === "zh" ? "文件引用不唯一，请使用完整相对路径" : "File reference is ambiguous; use its full relative path")
+          : (lang === "zh" ? "找不到引用的文件，请从 @ 列表重新选择" : "Referenced file not found; choose it again from the @ list"),
+      );
+      return;
+    }
+    const workSources = workResolution.sources;
     const hasWorkImages = workSources.some((path) => sourceIsWorkImage(path));
     const imgs = pastedImages;
     // #127-3 图片有效路径门控（语义由 Rust decide_image_path 锁定）：
@@ -2242,16 +2264,22 @@ function App() {
         imageGateRef.current = false;
       }
     }
-    if (surface === "work" && workWorkspaceId) {
-      try {
-        await invoke("work_snapshot_sources", {
-          workspaceId: workWorkspaceId,
-          sourcePaths: workSources,
-        });
-      } catch (e) {
-        setError(String(e));
-        return;
-      }
+    try {
+      await snapshotWorkSourcesForSend({
+        surface,
+        workspaceId: snapshotWorkspaceId,
+        sourcePaths: workSources,
+        snapshot: async (workspaceId, sourcePaths) => {
+          await invoke("work_snapshot_sources", { workspaceId, sourcePaths });
+        },
+      });
+    } catch (e) {
+      setError(
+        e instanceof WorkSnapshotIdentityError
+          ? (lang === "zh" ? "Work 会话身份尚未就绪，请重试" : "Work session identity is not ready; try again")
+          : String(e),
+      );
+      return;
     }
     setInput("");
     setPastedImages([]);

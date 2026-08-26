@@ -29,7 +29,7 @@ Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are rejected at copy/add and
 1. The opened folder is the source of truth. The send-time snapshot copies referenced files to a fixed safe staging name and makes that copy read-only.
 2. The complete SHA-256 is recorded at snapshot and checked again before the model turn.
 3. Text parsers execute in the existing crash/timeout/output-contained worker.
-4. Office ZIP entries are never extracted to disk. Unsafe names, DOCTYPE, malformed XML, excessive entry count, declared size, XML size, block count, and block length fail closed. Macros in xlsx/pptx stay unexecuted.
+4. Office ZIP entries are never extracted to disk. Workbook/presentation relationships define the only visible sheet/slide parts and their order; orphan or external targets are ignored/rejected. Unsafe names, DOCTYPE, malformed XML, excessive entry count, declared size, XML size, block count, and block length fail closed. Macros in xlsx/pptx stay unexecuted.
 5. Images are not decoded by host code. Their real signatures and byte budgets are checked at copy/add when practical, and again before they become native prompt image blocks.
 6. Extracted text and image metadata remain explicitly marked as untrusted reference data. Document content cannot grant permissions or invoke tools.
 7. Fake image extensions fail at copy/add (and again at snapshot), not only at send.

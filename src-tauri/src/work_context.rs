@@ -17,11 +17,10 @@ use std::path::{Component, Path};
 use sha2::{Digest, Sha256};
 
 use crate::work_blocks::WorkBlock;
-use crate::work_import::validate_image_bytes;
+use crate::work_import::{validate_image_bytes, MAX_WORK_SNAPSHOT_DOCUMENTS};
 use crate::work_parse_worker::{parse_in_worker, DocKind, ParseLimits, ParseRequest, ParsedDoc};
 use crate::work_staging::{manifest_path_under, workspace_dir_under, WorkManifest, WorkspaceId};
 
-const MAX_WORK_DOCUMENTS: usize = 16;
 const MAX_CONTEXT_UTF16: usize = 48 * 1024;
 const MAX_WORK_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TOTAL_WORK_IMAGE_BYTES: usize = 40 * 1024 * 1024;
@@ -71,11 +70,11 @@ pub fn build_work_context(
             images: Vec::new(),
         });
     }
-    if manifest.imports.len() > MAX_WORK_DOCUMENTS {
+    if manifest.imports.len() > MAX_WORK_SNAPSHOT_DOCUMENTS {
         return Err(format!(
             "Work 文档数量 {} 超过单回合上限 {}",
             manifest.imports.len(),
-            MAX_WORK_DOCUMENTS
+            MAX_WORK_SNAPSHOT_DOCUMENTS
         ));
     }
 

@@ -188,17 +188,41 @@ fn main() {
         fixtures.path(),
         "project-orion.xlsx",
         &[
-            ("xl/sharedStrings.xml", r#"<sst><si><t>Budget</t></si></sst>"#),
-            ("xl/worksheets/sheet1.xml", r#"<worksheet><c r="A1" t="s"><v>0</v></c><c r="B1"><v>128400</v></c></worksheet>"#),
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns:r="r"><sheets><sheet name="Budget" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst><si><t>Budget</t></si></sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><c r="A1" t="s"><v>0</v></c><c r="B1"><v>128400</v></c></worksheet>"#,
+            ),
         ],
     );
     let pptx_sample = materialize_office_fixture(
         fixtures.path(),
         "project-orion.pptx",
-        &[(
-            "ppt/slides/slide1.xml",
-            r#"<p:sld xmlns:p="p" xmlns:a="a"><a:t>Project Orion</a:t><a:t>Risk AMBER</a:t></p:sld>"#,
-        )],
+        &[
+            (
+                "ppt/presentation.xml",
+                r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><a:t>Project Orion</a:t><a:t>Risk AMBER</a:t></p:sld>"#,
+            ),
+        ],
     );
 
     let mut pass = 0usize;
@@ -497,7 +521,7 @@ fn main() {
         (
             DocKind::Xlsx,
             &xlsx_sample,
-            "workbook/sheet[1]/cell[B1]",
+            "workbook/sheet[1:\"Budget\"]/cell[B1]",
             "128400",
             "xlsx_end_to_end_through_worker",
         ),
@@ -534,10 +558,11 @@ fn main() {
             .as_ref()
             .map_err(|error| error.to_string())
             .and_then(|_| build_work_prompt(tmp.path(), &ws, "Summarize this file"));
+        let encoded_path = serde_json::to_string(expected_path).expect("serialize block path");
         check(
             &format!("{name}_to_model_context"),
             matches!(&prompt, Ok(text)
-                if text.contains(expected_path)
+                if text.contains(&encoded_path)
                     && text.contains(expected_text)
                     && text.ends_with("Summarize this file")),
             format!("{prompt:?}"),

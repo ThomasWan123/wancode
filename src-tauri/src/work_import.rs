@@ -28,6 +28,8 @@ use crate::work_staging::{
 
 const MAX_DOCUMENT_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+pub const MAX_WORK_SNAPSHOT_DOCUMENTS: usize = 16;
+pub const MAX_WORK_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
@@ -37,7 +39,20 @@ pub enum WorkImportError {
     /// 源文件不存在或不可读。
     SourceUnreadable(String),
     /// 源文件超过进入暂存区前的硬上限。
-    InputTooLarge { bytes: u64, cap: u64 },
+    InputTooLarge {
+        bytes: u64,
+        cap: u64,
+    },
+    /// 单回合来源文件过多。
+    TooManySources {
+        count: usize,
+        cap: usize,
+    },
+    /// 单回合来源文件累计过大。
+    SnapshotTooLarge {
+        bytes: u64,
+        cap: u64,
+    },
     /// 扩展名与文件签名不匹配。
     SignatureMismatch(String),
     /// 暂存/清单层错误。
@@ -57,6 +72,12 @@ impl std::fmt::Display for WorkImportError {
             WorkImportError::SourceUnreadable(s) => write!(f, "源文件不可读: {s}"),
             WorkImportError::InputTooLarge { bytes, cap } => {
                 write!(f, "源文件大小 {bytes} 超过导入上限 {cap}")
+            }
+            WorkImportError::TooManySources { count, cap } => {
+                write!(f, "Work 单回合文件数 {count} 超过上限 {cap}")
+            }
+            WorkImportError::SnapshotTooLarge { bytes, cap } => {
+                write!(f, "Work 单回合文件累计大小 {bytes} 超过上限 {cap}")
             }
             WorkImportError::SignatureMismatch(s) => write!(f, "{s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
@@ -140,10 +161,49 @@ pub fn import_document(
     workspace_id: &WorkspaceId,
     source: &Path,
 ) -> Result<ImportRecord, WorkImportError> {
-    let kind = kind_from_extension(source)?;
+    let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
+    std::fs::create_dir_all(&ws_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
+    let _lock = acquire_workspace_lock(&ws_dir)?;
+    let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
+    let staged = stage_source(&ws_dir, source)?;
+    let result = (|| -> Result<(), WorkImportError> {
+        let mut manifest = read_manifest_or_new(&manifest_path, workspace_id)?;
+        manifest.imports.push(staged.record.clone());
+        manifest.write_atomic(&manifest_path)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        cleanup_import_dir(&staged.import_dir);
+        return Err(error);
+    }
+    Ok(staged.record)
+}
 
-    // 有界读取原件 + 算完整 sha256(纯读,无落盘)。`take(cap + 1)` 也覆盖
-    // metadata/read 之间文件被替换的竞态，避免按攻击者声明尺寸无限分配。
+struct StagedSource {
+    record: ImportRecord,
+    import_dir: PathBuf,
+    byte_len: u64,
+}
+
+fn read_manifest_or_new(
+    manifest_path: &Path,
+    workspace_id: &WorkspaceId,
+) -> Result<WorkManifest, WorkImportError> {
+    if !manifest_path.exists() {
+        return Ok(WorkManifest::new(workspace_id.clone()));
+    }
+    let manifest = WorkManifest::read(manifest_path)?;
+    if &manifest.workspace_id != workspace_id {
+        return Err(WorkImportError::WorkspaceMismatch {
+            requested: workspace_id.as_str().to_string(),
+            found: manifest.workspace_id.as_str().to_string(),
+        });
+    }
+    Ok(manifest)
+}
+
+fn stage_source(ws_dir: &Path, source: &Path) -> Result<StagedSource, WorkImportError> {
+    let kind = kind_from_extension(source)?;
     let cap = import_byte_cap(kind);
     let file = std::fs::File::open(source)
         .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
@@ -158,68 +218,39 @@ pub fn import_document(
         });
     }
     if let Some(mime) = image_mime_for_kind(kind) {
-        validate_image_bytes(mime, &bytes).map_err(|e| {
-            WorkImportError::SignatureMismatch(format!("图片签名校验失败：{e}"))
-        })?;
+        validate_image_bytes(mime, &bytes)
+            .map_err(|e| WorkImportError::SignatureMismatch(format!("图片签名校验失败：{e}")))?;
     }
-    let sha256 = hex_lower(&Sha256::digest(&bytes));
-
-    let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
-    std::fs::create_dir_all(&ws_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
-
-    // 每工作区排他锁:持锁期间的整段事务对并发导入串行。
-    let _lock = acquire_workspace_lock(&ws_dir)?;
 
     let import_id = ImportId::mint();
     let import_dir = ws_dir.join(import_id.as_str());
-    let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
-
-    // 事务体:任一步 Err 都清理 import_dir 并回传原错。
-    let txn = || -> Result<ImportRecord, WorkImportError> {
-        std::fs::create_dir_all(&import_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
+    let result = (|| -> Result<ImportRecord, WorkImportError> {
+        std::fs::create_dir(&import_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
         let file_name = staged_file_name(kind);
         let staged_path = import_dir.join(&file_name);
         std::fs::write(&staged_path, &bytes).map_err(|e| WorkImportError::Io(e.to_string()))?;
         set_read_only(&staged_path).map_err(|e| WorkImportError::Io(e.to_string()))?;
-
-        let display_name = source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("document")
-            .to_string();
-        let record = ImportRecord {
+        Ok(ImportRecord {
             import_id: import_id.clone(),
-            source_sha256: sha256.clone(),
-            display_name,
+            source_sha256: hex_lower(&Sha256::digest(&bytes)),
+            display_name: source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("document")
+                .to_string(),
             staging_rel_path: format!("{}/{}", import_id.as_str(), file_name),
             kind: kind.to_string(),
-        };
-
-        let mut manifest = if manifest_path.exists() {
-            let m = WorkManifest::read(&manifest_path)?; // 损坏/未来版本在此 fail-closed
-                                                         // codex R2-F1:现有清单的 workspace_id 必须**精确等于**请求的 id。
-                                                         // 否则(拷贝/篡改/恢复错位)会把导入错误归属到别的工作区。
-            if &m.workspace_id != workspace_id {
-                return Err(WorkImportError::WorkspaceMismatch {
-                    requested: workspace_id.as_str().to_string(),
-                    found: m.workspace_id.as_str().to_string(),
-                });
-            }
-            m
-        } else {
-            WorkManifest::new(workspace_id.clone())
-        };
-        manifest.imports.push(record.clone());
-        manifest.write_atomic(&manifest_path)?;
-        Ok(record)
-    };
-
-    match txn() {
-        Ok(rec) => Ok(rec),
-        Err(e) => {
-            // 清理新建的导入目录(先清只读,再删),保留原始错误。
+        })
+    })();
+    match result {
+        Ok(record) => Ok(StagedSource {
+            record,
+            import_dir,
+            byte_len: bytes.len() as u64,
+        }),
+        Err(error) => {
             cleanup_import_dir(&import_dir);
-            Err(e)
+            Err(error)
         }
     }
 }
@@ -323,7 +354,10 @@ pub fn work_snapshot_sources(
     replace_work_snapshot(
         &app_data,
         &ws,
-        &source_paths.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
+        &source_paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>(),
     )
     .map_err(|e| e.to_string())
 }
@@ -335,38 +369,98 @@ pub fn replace_work_snapshot(
     workspace_id: &WorkspaceId,
     sources: &[PathBuf],
 ) -> Result<Vec<ImportRecord>, WorkImportError> {
+    validate_snapshot_preflight(sources)?;
     let ws_dir = workspace_dir_under(app_data_dir.to_path_buf(), workspace_id);
     std::fs::create_dir_all(&ws_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
-    let old_ids = {
-        let _lock = acquire_workspace_lock(&ws_dir)?;
-        let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
-        let old_ids = if manifest_path.exists() {
-            let manifest = WorkManifest::read(&manifest_path)?;
-            if &manifest.workspace_id != workspace_id {
-                return Err(WorkImportError::WorkspaceMismatch {
-                    requested: workspace_id.as_str().to_string(),
-                    found: manifest.workspace_id.as_str().to_string(),
+    let _lock = acquire_workspace_lock(&ws_dir)?;
+    let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
+    let old_manifest = read_manifest_or_new(&manifest_path, workspace_id)?;
+    let old_ids = old_manifest
+        .imports
+        .iter()
+        .map(|record| record.import_id.clone())
+        .collect::<Vec<_>>();
+
+    let mut staged = Vec::with_capacity(sources.len());
+    let stage_result = (|| -> Result<(), WorkImportError> {
+        let mut total = 0u64;
+        for source in sources {
+            let next = stage_source(&ws_dir, source)?;
+            total = total
+                .checked_add(next.byte_len)
+                .ok_or(WorkImportError::SnapshotTooLarge {
+                    bytes: u64::MAX,
+                    cap: MAX_WORK_SNAPSHOT_BYTES,
+                })?;
+            if total > MAX_WORK_SNAPSHOT_BYTES {
+                staged.push(next);
+                return Err(WorkImportError::SnapshotTooLarge {
+                    bytes: total,
+                    cap: MAX_WORK_SNAPSHOT_BYTES,
                 });
             }
-            manifest
-                .imports
-                .iter()
-                .map(|r| r.import_id.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        WorkManifest::new(workspace_id.clone()).write_atomic(&manifest_path)?;
-        old_ids
-    };
+            staged.push(next);
+        }
+        let mut manifest = WorkManifest::new(workspace_id.clone());
+        manifest.imports = staged.iter().map(|item| item.record.clone()).collect();
+        manifest.write_atomic(&manifest_path)?;
+        Ok(())
+    })();
+    if let Err(error) = stage_result {
+        for item in &staged {
+            cleanup_import_dir(&item.import_dir);
+        }
+        return Err(error);
+    }
+
+    let records = staged
+        .iter()
+        .map(|item| item.record.clone())
+        .collect::<Vec<_>>();
+    drop(_lock);
     for import_id in old_ids {
         cleanup_import_dir(&ws_dir.join(import_id.as_str()));
     }
-    let mut records = Vec::with_capacity(sources.len());
-    for source in sources {
-        records.push(import_document(app_data_dir, workspace_id, source)?);
-    }
     Ok(records)
+}
+
+fn validate_snapshot_preflight(sources: &[PathBuf]) -> Result<(), WorkImportError> {
+    if sources.len() > MAX_WORK_SNAPSHOT_DOCUMENTS {
+        return Err(WorkImportError::TooManySources {
+            count: sources.len(),
+            cap: MAX_WORK_SNAPSHOT_DOCUMENTS,
+        });
+    }
+    let mut total = 0u64;
+    for source in sources {
+        let kind = kind_from_extension(source)?;
+        let metadata = std::fs::metadata(source)
+            .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+        if !metadata.is_file() {
+            return Err(WorkImportError::SourceUnreadable(format!(
+                "{}: 不是普通文件",
+                source.display()
+            )));
+        }
+        let bytes = metadata.len();
+        let cap = import_byte_cap(kind);
+        if bytes > cap {
+            return Err(WorkImportError::InputTooLarge { bytes, cap });
+        }
+        total = total
+            .checked_add(bytes)
+            .ok_or(WorkImportError::SnapshotTooLarge {
+                bytes: u64::MAX,
+                cap: MAX_WORK_SNAPSHOT_BYTES,
+            })?;
+        if total > MAX_WORK_SNAPSHOT_BYTES {
+            return Err(WorkImportError::SnapshotTooLarge {
+                bytes: total,
+                cap: MAX_WORK_SNAPSHOT_BYTES,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn list_imports(
@@ -570,6 +664,83 @@ mod tests {
         let empty = replace_work_snapshot(&app, &ws, &[]).unwrap();
         assert!(empty.is_empty());
         assert!(list_imports(&app, &ws).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn snapshot_limits_fail_before_changing_the_previous_manifest() {
+        let app = tmp_dir("snapshot-limit-app");
+        let src_dir = tmp_dir("snapshot-limit-src");
+        let ws = WorkspaceId::mint();
+        let previous = write_source(&src_dir, "previous.docx", b"previous");
+        let previous_record = import_document(&app, &ws, &previous).unwrap();
+        let manifest_path = manifest_path_under(app.clone(), &ws);
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
+
+        let sources = (0..=MAX_WORK_SNAPSHOT_DOCUMENTS)
+            .map(|index| write_source(&src_dir, &format!("next-{index}.docx"), b"next"))
+            .collect::<Vec<_>>();
+        let error = replace_work_snapshot(&app, &ws, &sources).unwrap_err();
+        assert!(matches!(error, WorkImportError::TooManySources { .. }));
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+        assert!(
+            workspace_dir_under(app.clone(), &ws)
+                .join(previous_record.import_id.as_str())
+                .is_dir(),
+            "preflight rejection must preserve the previous snapshot"
+        );
+
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn snapshot_total_size_is_rejected_without_reading_sparse_sources() {
+        let src_dir = tmp_dir("snapshot-total-src");
+        let mut sources = Vec::new();
+        for index in 0..3 {
+            let path = src_dir.join(format!("large-{index}.pdf"));
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(50 * 1024 * 1024)
+                .unwrap();
+            sources.push(path);
+        }
+        let error = validate_snapshot_preflight(&sources).unwrap_err();
+        assert!(matches!(error, WorkImportError::SnapshotTooLarge { .. }));
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn failed_replacement_is_atomic_and_leaves_no_new_imports() {
+        let app = tmp_dir("snapshot-atomic-app");
+        let src_dir = tmp_dir("snapshot-atomic-src");
+        let ws = WorkspaceId::mint();
+        let previous = write_source(&src_dir, "previous.docx", b"previous");
+        let previous_record = import_document(&app, &ws, &previous).unwrap();
+        let valid = write_source(&src_dir, "valid.docx", b"valid");
+        let invalid = write_source(&src_dir, "fake.png", b"not-a-png");
+
+        let error = replace_work_snapshot(&app, &ws, &[valid, invalid]).unwrap_err();
+        assert!(matches!(error, WorkImportError::SignatureMismatch(_)));
+        let listed = list_imports(&app, &ws).unwrap();
+        assert_eq!(listed, vec![previous_record.clone()]);
+        let import_dirs = std::fs::read_dir(workspace_dir_under(app.clone(), &ws))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("imp-"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            import_dirs.len(),
+            1,
+            "failed replacement left a staged orphan"
+        );
+        assert_eq!(
+            import_dirs[0].file_name().to_string_lossy(),
+            previous_record.import_id.as_str()
+        );
+
         let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }

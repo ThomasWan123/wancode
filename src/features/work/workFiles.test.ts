@@ -90,7 +90,7 @@ describe("workFiles", () => {
         files,
         selectedPath: "brief.pdf",
       }),
-    ).toEqual(["D:/docs/budget.xlsx"]);
+    ).toEqual({ sources: ["D:/docs/budget.xlsx"], issue: null });
     expect(
       referencedWorkSources({
         text: "What is this?",
@@ -98,7 +98,7 @@ describe("workFiles", () => {
         files,
         selectedPath: "chart.png",
       }),
-    ).toEqual(["D:/docs/chart.png"]);
+    ).toEqual({ sources: ["D:/docs/chart.png"], issue: null });
     expect(
       referencedWorkSources({
         text: "Hello",
@@ -106,6 +106,52 @@ describe("workFiles", () => {
         files,
         selectedPath: null,
       }),
-    ).toEqual([]);
+    ).toEqual({ sources: [], issue: null });
+  });
+
+  it("fails closed for unresolved or ambiguous mentions", () => {
+    const files = [
+      { path: "a/budget.xlsx", kind: "xlsx" as const },
+      { path: "b/budget.xlsx", kind: "xlsx" as const },
+      { path: "brief.pdf", kind: "pdf" as const },
+    ];
+    expect(
+      referencedWorkSources({
+        text: "Use @missing.pdf",
+        folder: "D:/docs",
+        files,
+        selectedPath: "brief.pdf",
+      }),
+    ).toEqual({ sources: [], issue: "unresolved" });
+    expect(
+      referencedWorkSources({
+        text: "Use @budget.xlsx",
+        folder: "D:/docs",
+        files,
+        selectedPath: "brief.pdf",
+      }),
+    ).toEqual({ sources: [], issue: "ambiguous" });
+    expect(
+      referencedWorkSources({
+        text: "Use @a/budget.xlsx and @b/budget.xlsx",
+        folder: "D:/docs",
+        files,
+        selectedPath: null,
+      }),
+    ).toEqual({
+      sources: ["D:/docs/a/budget.xlsx", "D:/docs/b/budget.xlsx"],
+      issue: null,
+    });
+  });
+
+  it("does not reuse a selected path that is absent from the current folder", () => {
+    expect(
+      referencedWorkSources({
+        text: "Summarize the selection",
+        folder: "D:/new-folder",
+        files: [{ path: "new.pdf", kind: "pdf" }],
+        selectedPath: "old.pdf",
+      }),
+    ).toEqual({ sources: [], issue: null });
   });
 });

@@ -19,7 +19,7 @@ pub fn copy_into_workspace_dir(workspace: &Path, source: &Path) -> Result<String
     if !source.is_file() {
         return Err("源文件不存在".into());
     }
-    reject_legacy_or_fake_image(source)?;
+    validate_supported_source(source)?;
     let name = source
         .file_name()
         .ok_or_else(|| "源文件名无效".to_string())?;
@@ -40,17 +40,19 @@ pub fn copy_into_workspace_dir(workspace: &Path, source: &Path) -> Result<String
         }
     }
 
-    let dest = unique_dest(&ws, name);
-    if !dest.starts_with(&ws) {
-        return Err("目标路径逃逸".into());
+    let mut input = std::fs::File::open(source).map_err(|e| format!("源文件不可读: {e}"))?;
+    let (dest, mut output) = create_unique_dest(&ws, name)?;
+    if let Err(error) = std::io::copy(&mut input, &mut output) {
+        drop(output);
+        let _ = std::fs::remove_file(&dest);
+        return Err(format!("复制失败: {error}"));
     }
-    std::fs::copy(source, &dest).map_err(|e| format!("复制失败: {e}"))?;
     dest.strip_prefix(&ws)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .map_err(|_| "目标路径逃逸".into())
 }
 
-fn reject_legacy_or_fake_image(source: &Path) -> Result<(), String> {
+fn validate_supported_source(source: &Path) -> Result<(), String> {
     let ext = source
         .extension()
         .and_then(|e| e.to_str())
@@ -68,38 +70,57 @@ fn reject_legacy_or_fake_image(source: &Path) -> Result<(), String> {
                 "webp" => "image/webp",
                 _ => "image/jpeg",
             };
-            let mut file =
-                std::fs::File::open(source).map_err(|e| format!("源文件不可读: {e}"))?;
+            let mut file = std::fs::File::open(source).map_err(|e| format!("源文件不可读: {e}"))?;
             let mut header = [0u8; 16];
-            let n = file.read(&mut header).map_err(|e| format!("源文件不可读: {e}"))?;
+            let n = file
+                .read(&mut header)
+                .map_err(|e| format!("源文件不可读: {e}"))?;
             validate_image_bytes(mime, &header[..n]).map_err(|e| e.to_string())?;
         }
-        _ => {}
+        "pdf" | "docx" | "xlsx" | "pptx" => {}
+        _ => {
+            return Err(format!(
+                "不支持的文件类型: {ext}（当前支持 PDF / DOCX / XLSX / PPTX / PNG / JPEG / WebP）"
+            ));
+        }
     }
     Ok(())
 }
 
-fn unique_dest(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
-    let path = dir.join(name);
-    if !path.exists() {
-        return path;
-    }
+/// Atomically reserve a destination. `create_new` refuses existing files,
+/// dangling symlinks and reparse points, closing the check-then-copy overwrite
+/// race. Exhaustion is an error; it must never fall back to the original name.
+fn create_unique_dest(
+    dir: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<(PathBuf, std::fs::File), String> {
     let path_name = Path::new(name);
     let stem = path_name.file_stem().unwrap_or(name);
     let ext = path_name.extension();
-    for i in 1..1000 {
-        let mut candidate = OsString::from(stem);
-        candidate.push(format!(" ({i})"));
-        if let Some(ext) = ext {
-            candidate.push(".");
-            candidate.push(ext);
-        }
-        let p = dir.join(&candidate);
-        if !p.exists() {
-            return p;
+    for index in 0..1000 {
+        let candidate = if index == 0 {
+            OsString::from(name)
+        } else {
+            let mut candidate = OsString::from(stem);
+            candidate.push(format!(" ({index})"));
+            if let Some(ext) = ext {
+                candidate.push(".");
+                candidate.push(ext);
+            }
+            candidate
+        };
+        let path = dir.join(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建目标文件失败: {error}")),
         }
     }
-    dir.join(name)
+    Err("同名文件过多，无法安全添加；未覆盖任何现有文件".into())
 }
 
 /// Place a file into the opened workspace folder. Returns the relative path.
@@ -124,7 +145,10 @@ mod tests {
         std::fs::write(&src, b"%PDF").unwrap();
         let rel = copy_into_workspace_dir(dir.path(), &src).unwrap();
         assert_eq!(rel, "brief.pdf");
-        assert_eq!(std::fs::read(dir.path().join("brief.pdf")).unwrap(), b"%PDF");
+        assert_eq!(
+            std::fs::read(dir.path().join("brief.pdf")).unwrap(),
+            b"%PDF"
+        );
     }
 
     #[test]
@@ -202,5 +226,43 @@ mod tests {
         std::fs::write(&ok, b"\x89PNG\r\n\x1a\n").unwrap();
         let rel = copy_into_workspace_dir(dir.path(), &ok).unwrap();
         assert_eq!(rel, "chart.png");
+    }
+
+    #[test]
+    fn collision_exhaustion_never_overwrites_existing_files() {
+        let dir = tmp();
+        std::fs::write(dir.path().join("brief.pdf"), b"original").unwrap();
+        for index in 1..1000 {
+            std::fs::write(
+                dir.path().join(format!("brief ({index}).pdf")),
+                format!("existing-{index}"),
+            )
+            .unwrap();
+        }
+        let src_dir = tmp();
+        let source = src_dir.path().join("brief.pdf");
+        std::fs::write(&source, b"replacement").unwrap();
+
+        let error = copy_into_workspace_dir(dir.path(), &source).unwrap_err();
+        assert!(error.contains("同名文件过多"), "{error}");
+        assert_eq!(
+            std::fs::read(dir.path().join("brief.pdf")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("brief (999).pdf")).unwrap(),
+            b"existing-999"
+        );
+    }
+
+    #[test]
+    fn unsupported_drop_is_rejected_without_mutating_workspace() {
+        let dir = tmp();
+        let src_dir = tmp();
+        let source = src_dir.path().join("payload.exe");
+        std::fs::write(&source, b"MZ").unwrap();
+        let error = copy_into_workspace_dir(dir.path(), &source).unwrap_err();
+        assert!(error.contains("不支持的文件类型"), "{error}");
+        assert!(!dir.path().join("payload.exe").exists());
     }
 }

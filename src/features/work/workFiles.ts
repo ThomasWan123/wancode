@@ -77,12 +77,20 @@ function mentionPresent(text: string, token: string): boolean {
   while (from < text.length) {
     const idx = text.indexOf(token, from);
     if (idx < 0) return false;
+    const before = idx === 0 ? undefined : text[idx - 1];
     const after = text[idx + token.length];
-    if (after === undefined || /\s/.test(after)) return true;
+    if ((before === undefined || /\s/.test(before)) && (after === undefined || /\s/.test(after))) {
+      return true;
+    }
     from = idx + token.length;
   }
   return false;
 }
+
+export type WorkSourceResolution = {
+  sources: string[];
+  issue: "unresolved" | "ambiguous" | null;
+};
 
 /**
  * Folder files that this turn actually uses: @mentions, otherwise the selected
@@ -93,8 +101,25 @@ export function referencedWorkSources(opts: {
   folder: string;
   files: { path: string; kind: WorkDocKind }[];
   selectedPath: string | null;
-}): string[] {
-  if (!opts.folder) return [];
+}): WorkSourceResolution {
+  if (!opts.folder) return { sources: [], issue: null };
+
+  // A basename mention is only safe when it identifies exactly one folder
+  // file. The autocomplete inserts relative paths, but manually typed short
+  // names must still fail closed instead of attaching multiple documents.
+  const byName = new Map<string, { path: string; kind: WorkDocKind }[]>();
+  for (const file of opts.files) {
+    const name = fileBaseName(file.path);
+    const group = byName.get(name) ?? [];
+    group.push(file);
+    byName.set(name, group);
+  }
+  for (const [name, files] of byName) {
+    if (files.length > 1 && mentionPresent(opts.text, `@${name}`)) {
+      return { sources: [], issue: "ambiguous" };
+    }
+  }
+
   const mentioned: string[] = [];
   for (const file of opts.files) {
     const name = fileBaseName(file.path);
@@ -102,11 +127,20 @@ export function referencedWorkSources(opts: {
       mentioned.push(joinWorkspacePath(opts.folder, file.path));
     }
   }
-  if (mentioned.length) return mentioned;
-  if (opts.selectedPath && workDocKind(opts.selectedPath)) {
-    return [joinWorkspacePath(opts.folder, opts.selectedPath)];
+  if (mentioned.length) return { sources: [...new Set(mentioned)], issue: null };
+
+  // An explicit @ that resolves to no current folder file must never fall back
+  // to an unrelated selected card.
+  if (/(^|\s)@/.test(opts.text)) {
+    return { sources: [], issue: "unresolved" };
   }
-  return [];
+  if (opts.selectedPath && opts.files.some((file) => file.path === opts.selectedPath)) {
+    return {
+      sources: [joinWorkspacePath(opts.folder, opts.selectedPath)],
+      issue: null,
+    };
+  }
+  return { sources: [], issue: null };
 }
 
 export function sourceIsWorkImage(path: string): boolean {
