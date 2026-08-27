@@ -3304,42 +3304,76 @@ button.session-item {
   letter-spacing: 0.04em;
 }
 
-/* ── Work folder surface ──────────────────────────────────────── */
+/* ── Work project rail: project context left, conversation main ─ */
 .work-desk {
-  padding: 12px 16px 8px;
-  border-bottom: 1px solid var(--border-soft);
+  width: 280px;
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg1);
+  border-right: 1px solid var(--border-soft);
 }
 .work-desk.drop-active {
   outline: 1px dashed var(--accent);
   outline-offset: -4px;
   background: var(--accent-soft);
 }
+.work-new-session {
+  margin: 12px 12px 8px;
+  width: calc(100% - 24px);
+}
 .work-desk-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.work-project-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.work-project-identity > div {
+  min-width: 0;
 }
 .work-desk-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
   flex-shrink: 0;
 }
-.work-desk-title { font-weight: 700; font-size: 14px; }
-.work-desk-sub { font-size: 12px; color: var(--faint); margin-top: 2px; }
+.work-desk-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  font-size: 13px;
+}
+.work-desk-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 1px;
+}
 .work-desk-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 32px 16px;
+  padding: 28px 16px;
   color: var(--muted);
   text-align: center;
 }
+.work-desk-empty p { margin: 0; }
 .work-desk-dropzone {
+  margin: 10px;
   border: 1px dashed var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg0);
@@ -3351,56 +3385,88 @@ button.session-item {
 .work-desk-cta {
   margin-top: 6px;
 }
-.work-desk-split {
-  display: grid;
-  grid-template-columns: minmax(180px, 32%) 1fr;
-  gap: 12px;
-  min-height: 120px;
+.work-file-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 12px 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  color: var(--faint);
+  background: var(--bg0);
 }
-.work-desk-list {
+.work-file-search:focus-within { border-color: var(--accent); }
+.work-file-search input {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+}
+.work-tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 8px 8px;
+}
+.work-tree {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 220px;
-  overflow-y: auto;
 }
-.work-desk-card {
+.work-tree .work-tree { padding-left: 14px; }
+.work-tree-folder > summary {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+.work-tree-folder > summary::-webkit-details-marker { display: none; }
+.work-tree-folder > summary:hover { color: var(--text); background: var(--bg2); }
+.work-tree-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
+  min-height: 30px;
   text-align: left;
   background: transparent;
   color: var(--text);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 6px;
   font-weight: 500;
+  font-size: 12px;
 }
-.work-desk-card:hover { background: var(--bg2); opacity: 1; }
-.work-desk-card.active {
-  border-color: var(--accent);
+.work-tree-file:hover { background: var(--bg2); opacity: 1; }
+.work-tree-file.active {
+  color: var(--accent);
   background: var(--accent-soft);
 }
-.work-desk-preview {
-  background: var(--bg0);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
-  min-height: 100px;
+.work-tree-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.work-desk-preview h3 { margin: 0 0 6px; font-size: 14px; }
-.work-desk-meta { font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
-.work-desk-preview-hint { font-size: 12.5px; color: var(--faint); line-height: 1.5; }
-.work-desk-extract {
-  margin: 10px 0 0;
-  max-height: 140px;
-  overflow: auto;
-  white-space: pre-wrap;
-  font-size: 12px;
-  color: var(--text);
-  font-family: var(--font-mono);
+.work-tree-file .work-doc-kind {
+  padding: 0 4px;
+  font-size: 9px;
+}
+.work-desk-foot {
+  padding: 8px 12px 11px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--faint);
+  font-size: 10.5px;
 }

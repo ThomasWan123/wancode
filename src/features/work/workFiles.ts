@@ -87,6 +87,13 @@ function mentionPresent(text: string, token: string): boolean {
   return false;
 }
 
+/** Append an exact Work file reference without confusing path prefixes. */
+export function appendWorkMention(text: string, relPath: string): string {
+  const token = `@${relPath}`;
+  if (mentionPresent(text, token)) return text;
+  return `${text}${text && !/\s$/.test(text) ? " " : ""}${token} `;
+}
+
 export type WorkSourceResolution = {
   sources: string[];
   issue: "unresolved" | "ambiguous" | null;

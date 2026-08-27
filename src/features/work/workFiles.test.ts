@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendWorkMention,
   canParseForWorkContext,
   fileBaseName,
   folderBaseName,
@@ -153,5 +154,13 @@ describe("workFiles", () => {
         selectedPath: "old.pdf",
       }),
     ).toEqual({ sources: [], issue: null });
+  });
+
+  it("inserts exact file references once without path-prefix collisions", () => {
+    expect(appendWorkMention("Review", "brief.pdf")).toBe("Review @brief.pdf ");
+    expect(appendWorkMention("Review @brief.pdf ", "brief.pdf")).toBe("Review @brief.pdf ");
+    expect(appendWorkMention("Review @nested/brief.pdf ", "brief.pdf")).toBe(
+      "Review @nested/brief.pdf @brief.pdf ",
+    );
   });
 });

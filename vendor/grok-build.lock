@@ -48,8 +48,8 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=925d777214c66d5eadd12bd77683ecd38a37c37594ed8a38e7b3c3263d851670
-effective_tree_sha256=8cd2642d763203b19591907721a407291b0dae9f378c08acf29408ad3aa68bc5
+cargo_lock_sha256=b6700a995355b7a4b2ca9b740d1a7b475488f3a77da710e6b3b829b19dec4b77
+effective_tree_sha256=df8cb7a7c0625df9469e2d34cfbc4121a7c7e5d1b9e3bfb130a02f18af416b01
 
 # 【harness-kernel delta · v0.21 W3】真实工具执行调度
 #   引擎 commit 变、Cargo.lock/接线/紧急补丁均不变；差异仅为
