@@ -3323,6 +3323,52 @@ button.session-item {
   margin: 12px 12px 8px;
   width: calc(100% - 24px);
 }
+.work-sessions {
+  padding: 0 8px 9px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.work-sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 5px 5px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.work-session-search {
+  width: 100%;
+  margin: 0 0 5px;
+}
+.work-session-list {
+  max-height: 190px;
+  overflow: auto;
+}
+.work-session-item {
+  padding: 7px 8px;
+  min-height: 0;
+}
+.work-session-item .session-meta {
+  font-size: 9.5px;
+}
+.work-session-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+}
+.work-session-action:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
 .work-desk-head {
   display: flex;
   align-items: center;

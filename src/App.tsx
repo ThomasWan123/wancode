@@ -2775,6 +2775,43 @@ function App() {
             onOpenFolder={pickFolderAndConnect}
             onAddFiles={attachFilesToWorkFolder}
             onDropPaths={placeFilesDeduped}
+            sessions={sessions}
+            searchHits={searchHits}
+            sessionSearchQuery={searchQuery}
+            activeSessionId={sessionId}
+            starting={starting}
+            onResumeSession={(resumeId) => void startSession(resumeId)}
+            onSearchSessions={(query) => void runSearch(query)}
+            onRenameSession={async (entry, title) => {
+              try {
+                if (!sessionId) await startSession();
+                await invoke("agent_session_rename", {
+                  sessionId: entry.session_id,
+                  title,
+                  workspace,
+                });
+                await refreshSessions(workspace);
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+            onDeleteSession={async (entry) => {
+              try {
+                if (!sessionId) await startSession();
+                await invoke("agent_session_delete", {
+                  sessionId: entry.session_id,
+                  workspace,
+                });
+                if (entry.session_id === sessionId) {
+                  setSessionId("");
+                  sessionIdRef.current = "";
+                  setItems([]);
+                }
+                await refreshSessions(workspace);
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
             t={t}
           />
         ) : (

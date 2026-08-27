@@ -171,4 +171,71 @@ describe("WorkDesk", () => {
     });
     expect(onDropPaths).toHaveBeenCalledWith(["C:\\downloads\\brief.pdf"]);
   });
+
+  it("keeps current-project sessions resumable and searchable", async () => {
+    const user = userEvent.setup();
+    const onResumeSession = vi.fn();
+    const onSearchSessions = vi.fn();
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        sessions={[{
+          session_id: "work-1",
+          title: "Quarterly analysis",
+          updated_at: "2026-08-27T12:30:00Z",
+          num_messages: 6,
+        }]}
+        onResumeSession={onResumeSession}
+        onSearchSessions={onSearchSessions}
+        t={t}
+      />,
+    );
+    await user.click(screen.getByText("Quarterly analysis"));
+    expect(onResumeSession).toHaveBeenCalledWith("work-1");
+    fireEvent.change(screen.getByRole("textbox", { name: t.searchPlaceholder }), {
+      target: { value: "budget" },
+    });
+    expect(onSearchSessions).toHaveBeenCalledWith("budget");
+  });
+
+  it("keeps current-project sessions renameable and deletable", async () => {
+    const user = userEvent.setup();
+    const onRenameSession = vi.fn();
+    const onDeleteSession = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("Renamed analysis");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const session = {
+      session_id: "work-2",
+      title: "Original analysis",
+      updated_at: "2026-08-27T12:30:00Z",
+      num_messages: 4,
+    };
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        sessions={[session]}
+        onRenameSession={onRenameSession}
+        onDeleteSession={onDeleteSession}
+        t={t}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: `${t.renameSession}: Original analysis` }));
+    expect(onRenameSession).toHaveBeenCalledWith(session, "Renamed analysis");
+    await user.click(screen.getByRole("button", { name: `${t.deleteSession}: Original analysis` }));
+    expect(onDeleteSession).toHaveBeenCalledWith(session);
+  });
 });

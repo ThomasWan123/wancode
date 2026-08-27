@@ -1,12 +1,29 @@
 /* Work is conversation-first: the opened project stays in a compact file tree
    beside the thread instead of taking a permanent preview row above it. */
 import { useMemo, useState, type DragEvent } from "react";
-import { IconFile, IconFolder, IconFolderClosed, IconPlus, IconSearch } from "../../icons";
+import { displaySessionTitle } from "../../i18n";
+import {
+  IconFile,
+  IconFolder,
+  IconFolderClosed,
+  IconPencil,
+  IconPlus,
+  IconSearch,
+  IconTrash,
+} from "../../icons";
 import { fileBaseName, folderBaseName, pathsFromDataTransfer, type WorkDocKind } from "./workFiles";
 
 export type WorkDeskFile = {
   path: string;
   kind: WorkDocKind;
+};
+
+export type WorkDeskSession = {
+  session_id: string;
+  title: string;
+  updated_at: string;
+  num_messages: number;
+  model_id?: string;
 };
 
 type WorkTreeNode = {
@@ -93,6 +110,15 @@ export function WorkDesk(props: {
   onOpenFolder: () => void;
   onAddFiles: () => void;
   onDropPaths: (paths: string[]) => void;
+  sessions?: WorkDeskSession[];
+  searchHits?: WorkDeskSession[] | null;
+  sessionSearchQuery?: string;
+  activeSessionId?: string;
+  starting?: boolean;
+  onResumeSession?: (sessionId: string) => void;
+  onSearchSessions?: (query: string) => void;
+  onRenameSession?: (session: WorkDeskSession, title: string) => void | Promise<void>;
+  onDeleteSession?: (session: WorkDeskSession) => void | Promise<void>;
   t: any;
 }) {
   const {
@@ -104,6 +130,15 @@ export function WorkDesk(props: {
     onOpenFolder,
     onAddFiles,
     onDropPaths,
+    sessions = [],
+    searchHits = null,
+    sessionSearchQuery = "",
+    activeSessionId = "",
+    starting = false,
+    onResumeSession,
+    onSearchSessions,
+    onRenameSession,
+    onDeleteSession,
     t,
   } = props;
   const [dropActive, setDropActive] = useState(false);
@@ -147,6 +182,89 @@ export function WorkDesk(props: {
       <button type="button" className="side-new work-new-session" onClick={onNewSession}>
         <IconPlus size={15} /> {t.sidebarNewSession}
       </button>
+
+      <section className="work-sessions" aria-label={t.sidebarRecent}>
+        <div className="work-sessions-head">
+          <span>{t.sidebarRecent}</span>
+          <IconSearch size={13} />
+        </div>
+        <input
+          className="session-search work-session-search"
+          value={sessionSearchQuery}
+          placeholder={t.searchPlaceholder}
+          aria-label={t.searchPlaceholder}
+          onChange={(event) => onSearchSessions?.(event.currentTarget.value)}
+        />
+        <div className="work-session-list">
+          {searchHits !== null && searchHits.length === 0 ? (
+            <div className="sidebar-empty">{t.searchNoResults}</div>
+          ) : null}
+          {searchHits === null && sessions.length === 0 ? (
+            <div className="sidebar-empty">{t.noSessions}</div>
+          ) : null}
+          {(searchHits ?? sessions).map((session) => (
+            <div
+              key={session.session_id}
+              className={`session-item work-session-item ${session.session_id === activeSessionId ? "active" : ""}`}
+              title={session.session_id}
+              role="button"
+              tabIndex={0}
+              onClick={() => !starting && onResumeSession?.(session.session_id)}
+              onKeyDown={(event) => {
+                if (
+                  event.target === event.currentTarget &&
+                  !starting &&
+                  (event.key === "Enter" || event.key === " ")
+                ) {
+                  event.preventDefault();
+                  onResumeSession?.(session.session_id);
+                }
+              }}
+            >
+              <div className="session-row">
+                <div className="session-title">
+                  {displaySessionTitle(session.title, t.untitledSession)}
+                </div>
+                <div className="session-actions">
+                  <button
+                    type="button"
+                    className="work-session-action"
+                    title={t.renameSession}
+                    aria-label={`${t.renameSession}: ${displaySessionTitle(session.title, t.untitledSession)}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const title = window.prompt(
+                        t.renameSession,
+                        displaySessionTitle(session.title, t.untitledSession),
+                      );
+                      if (title?.trim()) void onRenameSession?.(session, title.trim());
+                    }}
+                  >
+                    <IconPencil size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    className="work-session-action"
+                    title={t.deleteSession}
+                    aria-label={`${t.deleteSession}: ${displaySessionTitle(session.title, t.untitledSession)}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (window.confirm(t.deleteConfirm(displaySessionTitle(session.title, t.untitledSession)))) {
+                        void onDeleteSession?.(session);
+                      }
+                    }}
+                  >
+                    <IconTrash size={12} />
+                  </button>
+                </div>
+              </div>
+              <div className="session-meta">
+                {session.updated_at.slice(0, 16).replace("T", " ")} · {session.num_messages} {t.messagesUnit}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <header className="work-desk-head">
         <div className="work-project-identity" title={folder || t.workDeskEmpty}>
