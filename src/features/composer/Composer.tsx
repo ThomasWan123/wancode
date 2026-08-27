@@ -31,7 +31,7 @@ function asModelSwitchError(err: unknown): ModelSwitchError {
 }
 
 export function Composer(props: Record<string, any>) {
-  const { surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode } = props;
+  const { surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t } = props;
 
   // Non-null while the engine is waiting for the user to disambiguate a model
   // id. The select is rolled back to `previous` so the dropdown never shows a
@@ -321,7 +321,11 @@ export function Composer(props: Record<string, any>) {
               busy
                 ? t.queueHint
                 : sessionId
-                  ? t.composerPlaceholder
+                  ? surface === "chat"
+                    ? t.composerPlaceholderChat
+                    : surface === "work"
+                      ? t.composerPlaceholderWork
+                      : t.composerPlaceholderCode
                   : starting
                     ? t.starting
                     : t.composerHint
@@ -534,19 +538,6 @@ export function Composer(props: Record<string, any>) {
               </span>
             </div>
             <div className="composer-actions">
-              <div className="density-control" role="group" aria-label={t.densityTitle}>
-                {(["compact", "default", "verbose"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={(transcriptMode || "default") === m ? "active" : ""}
-                    title={m === "compact" ? t.densityCompact : m === "verbose" ? t.densityVerbose : t.densityQuiet}
-                    onClick={() => setTranscriptMode?.(m)}
-                  >
-                    {m === "compact" ? t.densityCompact : m === "verbose" ? t.densityVerbose : t.densityQuiet}
-                  </button>
-                ))}
-              </div>
               <div className="mode-wrap">
                 <button
                   className="mode-chip"
