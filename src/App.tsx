@@ -14,6 +14,7 @@ import { Workbench } from "./features/workbench/Workbench";
 import { PlanDocument } from "./features/plan/PlanDocument";
 import { WorkDesk } from "./features/work/WorkDesk";
 import {
+  appendWorkMention,
   referencedWorkSources,
   sourceIsWorkImage,
   workDeskFiles,
@@ -647,7 +648,7 @@ function App() {
       }
     }
     loadWorkspaceFiles(ws);
-    if (lastRel) setWorkFileSelected(lastRel);
+    if (lastRel) selectWorkFile(lastRel);
   }
 
   async function attachFilesToWorkFolder() {
@@ -667,6 +668,8 @@ function App() {
 
   function selectWorkFile(relPath: string) {
     setWorkFileSelected(relPath);
+    setInput((current) => appendWorkMention(current, relPath));
+    queueMicrotask(() => taRef.current?.focus());
   }
 
   function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
@@ -2663,19 +2666,6 @@ function App() {
           <IconSettings />
         </button>
       </header>
-      {surface === "work" && (
-        <WorkDesk
-          folder={workspace}
-          files={workDeskFiles(fileList)}
-          selectedPath={workFileSelected}
-          onSelect={selectWorkFile}
-          onOpenFolder={pickFolderAndConnect}
-          onAddFiles={attachFilesToWorkFolder}
-          onDropPaths={placeFilesDeduped}
-          t={t}
-        />
-      )}
-
       {ctx && sessionId && (
         <div className="ctx-bar" title={`${ctx.used.toLocaleString()} / ${ctx.total.toLocaleString()} tokens`}>
           <div
@@ -2769,7 +2759,64 @@ function App() {
 
 
       <div className="body-row">
-        <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang, onOpenFile: (p: string) => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("file"); void openWbFile(p); } }} />
+        {surface === "work" ? (
+          <WorkDesk
+            folder={workspace}
+            files={workDeskFiles(fileList)}
+            selectedPath={workFileSelected}
+            onSelect={selectWorkFile}
+            onNewSession={() => {
+              setSessionId("");
+              sessionIdRef.current = "";
+              setItems([]);
+              setModelBlock(null);
+              setWorkFileSelected(null);
+            }}
+            onOpenFolder={pickFolderAndConnect}
+            onAddFiles={attachFilesToWorkFolder}
+            onDropPaths={placeFilesDeduped}
+            sessions={sessions}
+            searchHits={searchHits}
+            sessionSearchQuery={searchQuery}
+            activeSessionId={sessionId}
+            starting={starting}
+            onResumeSession={(resumeId) => void startSession(resumeId)}
+            onSearchSessions={(query) => void runSearch(query)}
+            onRenameSession={async (entry, title) => {
+              try {
+                if (!sessionId) await startSession();
+                await invoke("agent_session_rename", {
+                  sessionId: entry.session_id,
+                  title,
+                  workspace,
+                });
+                await refreshSessions(workspace);
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+            onDeleteSession={async (entry) => {
+              try {
+                if (!sessionId) await startSession();
+                await invoke("agent_session_delete", {
+                  sessionId: entry.session_id,
+                  workspace,
+                });
+                if (entry.session_id === sessionId) {
+                  setSessionId("");
+                  sessionIdRef.current = "";
+                  setItems([]);
+                }
+                await refreshSessions(workspace);
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+            t={t}
+          />
+        ) : (
+          <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang, onOpenFile: (p: string) => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("file"); void openWbFile(p); } }} />
+        )}
 
         <div className="main-col">
       <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t, planPending: !!planApproval }} />

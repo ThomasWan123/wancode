@@ -14,6 +14,7 @@ describe("WorkDesk", () => {
         files={[]}
         selectedPath={null}
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
@@ -41,6 +42,7 @@ describe("WorkDesk", () => {
         files={[]}
         selectedPath={null}
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={onOpenFolder}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
@@ -60,6 +62,7 @@ describe("WorkDesk", () => {
         files={[]}
         selectedPath={null}
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
@@ -87,6 +90,7 @@ describe("WorkDesk", () => {
         ]}
         selectedPath={null}
         onSelect={onSelect}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
@@ -102,57 +106,47 @@ describe("WorkDesk", () => {
     expect(onSelect).toHaveBeenCalledWith("budget.xlsx");
   });
 
-  it("preview shows file identity, not a sha256 fingerprint", () => {
+  it("renders nested folders in the project rail without a permanent preview pane", () => {
     render(
       <WorkDesk
         folder="D:/docs"
-        files={[{ path: "notes.docx", kind: "docx" }]}
-        selectedPath="notes.docx"
+        files={[{ path: "finance/notes.docx", kind: "docx" }]}
+        selectedPath="finance/notes.docx"
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
         t={t}
       />,
     );
-    expect(screen.getByRole("heading", { name: "notes.docx" })).toBeVisible();
-    expect(screen.getByText("DOCX", { selector: ".work-desk-meta" })).toBeVisible();
-    expect(screen.queryByText(/abcdef012345/)).toBeNull();
-    expect(screen.queryByText(/fingerprint/i)).toBeNull();
-    expect(screen.queryByText(t.workSelectHint)).toBeNull();
+    expect(screen.getByText("finance")).toBeVisible();
+    expect(screen.getByRole("button", { name: "finance/notes.docx" })).toHaveClass("active");
+    expect(document.querySelector(".work-desk-preview")).toBeNull();
   });
 
-  it("shows extractable text when a caller already has it", () => {
+  it("filters project files without changing the underlying file count", async () => {
+    const user = userEvent.setup();
     render(
       <WorkDesk
         folder="D:/docs"
-        files={[{ path: "brief.pdf", kind: "pdf" }]}
-        selectedPath="brief.pdf"
-        extractText="Page 1: Q3 revenue"
-        onSelect={vi.fn()}
-        onOpenFolder={vi.fn()}
-        onAddFiles={vi.fn()}
-        onDropPaths={vi.fn()}
-        t={t}
-      />,
-    );
-    expect(screen.getByText("Page 1: Q3 revenue")).toBeVisible();
-  });
-
-  it("asks the user to pick a file when the list has items but none is selected", () => {
-    render(
-      <WorkDesk
-        folder="D:/docs"
-        files={[{ path: "brief.pdf", kind: "pdf" }]}
+        files={[
+          { path: "brief.pdf", kind: "pdf" },
+          { path: "finance/budget.xlsx", kind: "xlsx" },
+        ]}
         selectedPath={null}
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={vi.fn()}
         t={t}
       />,
     );
-    expect(screen.getByText(t.workSelectHint)).toBeVisible();
+    await user.type(screen.getByRole("textbox", { name: t.workSearchFiles }), "budget");
+    expect(screen.queryByRole("button", { name: "brief.pdf" })).toBeNull();
+    expect(screen.getByRole("button", { name: "finance/budget.xlsx" })).toBeVisible();
+    expect(document.querySelector(".work-desk-foot")).toHaveTextContent(t.workFilesCount(2));
   });
 
   it("drop with a file path places that file into the folder", () => {
@@ -163,6 +157,7 @@ describe("WorkDesk", () => {
         files={[]}
         selectedPath={null}
         onSelect={vi.fn()}
+        onNewSession={vi.fn()}
         onOpenFolder={vi.fn()}
         onAddFiles={vi.fn()}
         onDropPaths={onDropPaths}
@@ -175,5 +170,72 @@ describe("WorkDesk", () => {
       dataTransfer: { files: [file] },
     });
     expect(onDropPaths).toHaveBeenCalledWith(["C:\\downloads\\brief.pdf"]);
+  });
+
+  it("keeps current-project sessions resumable and searchable", async () => {
+    const user = userEvent.setup();
+    const onResumeSession = vi.fn();
+    const onSearchSessions = vi.fn();
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        sessions={[{
+          session_id: "work-1",
+          title: "Quarterly analysis",
+          updated_at: "2026-08-27T12:30:00Z",
+          num_messages: 6,
+        }]}
+        onResumeSession={onResumeSession}
+        onSearchSessions={onSearchSessions}
+        t={t}
+      />,
+    );
+    await user.click(screen.getByText("Quarterly analysis"));
+    expect(onResumeSession).toHaveBeenCalledWith("work-1");
+    fireEvent.change(screen.getByRole("textbox", { name: t.searchPlaceholder }), {
+      target: { value: "budget" },
+    });
+    expect(onSearchSessions).toHaveBeenCalledWith("budget");
+  });
+
+  it("keeps current-project sessions renameable and deletable", async () => {
+    const user = userEvent.setup();
+    const onRenameSession = vi.fn();
+    const onDeleteSession = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("Renamed analysis");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const session = {
+      session_id: "work-2",
+      title: "Original analysis",
+      updated_at: "2026-08-27T12:30:00Z",
+      num_messages: 4,
+    };
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        sessions={[session]}
+        onRenameSession={onRenameSession}
+        onDeleteSession={onDeleteSession}
+        t={t}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: `${t.renameSession}: Original analysis` }));
+    expect(onRenameSession).toHaveBeenCalledWith(session, "Renamed analysis");
+    await user.click(screen.getByRole("button", { name: `${t.deleteSession}: Original analysis` }));
+    expect(onDeleteSession).toHaveBeenCalledWith(session);
   });
 });
