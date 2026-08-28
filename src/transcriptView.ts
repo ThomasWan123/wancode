@@ -34,4 +34,3 @@ export function loadTranscriptView(storage: Pick<Storage, "getItem">): Transcrip
       ?? storage.getItem(LEGACY_TRANSCRIPT_VIEW_STORAGE_KEY),
   );
 }
-

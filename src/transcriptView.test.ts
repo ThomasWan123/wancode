@@ -32,4 +32,3 @@ describe("transcript view preference", () => {
     expect(loadTranscriptView({ getItem: (key) => values.get(key) ?? null })).toBe("minimal");
   });
 });
-

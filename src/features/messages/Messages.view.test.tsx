@@ -66,6 +66,8 @@ describe("message display preference", () => {
     expect(screen.getByRole("menuitemradio", { name: /Minimal/i })).toHaveFocus();
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menuitemradio", { name: /Standard/i })).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(screen.getByRole("menuitemradio", { name: /Minimal/i })).toHaveFocus();
     await user.keyboard("{End}");
     expect(screen.getByRole("menuitemradio", { name: /Debug/i })).toHaveFocus();
     await user.keyboard("{Escape}");
