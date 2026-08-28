@@ -1217,7 +1217,10 @@ async fn start_inner_with_intent_and_workspace(
                 tokio::select! {
                     _ = pump_cancel.cancelled() => break,
                     msg = acp_rx.recv() => {
-                        let Some(msg) = msg else { break };
+                        let Some(msg) = msg else {
+                            on_engine_channel_closed(&app, &pump_cancel).await;
+                            break;
+                        };
                         handle_acp_message(&app, msg).await;
                     }
                 }
@@ -1876,6 +1879,165 @@ mod post_start_refresh_tests {
     }
 }
 
+#[cfg(test)]
+mod map_acp_send_error_tests {
+    use super::{acp, map_acp_send_error};
+    use xai_acp_lib::{AcpAgentMessage, acp_send};
+    fn ext_request() -> acp::ExtRequest {
+        acp::ExtRequest::new(
+            "x.ai/git/worktree/list",
+            serde_json::value::to_raw_value(&serde_json::json!({}))
+                .unwrap()
+                .into(),
+        )
+    }
+    // 正例：receiver 先 drop（引擎线程已退出）→ send_failed。
+    // 输入不用手造错误，而是走真实 acp_send 失败路径——与线上弹窗同源。
+    #[tokio::test]
+    async fn send_failure_gets_engine_dead_prefix() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
+        drop(rx);
+        let err = acp_send(ext_request(), &tx).await.unwrap_err();
+        let mapped = map_acp_send_error(&err);
+        assert!(
+            mapped.starts_with("ENGINE_DEAD: "),
+            "channel failure must carry the structured prefix, got: {mapped}"
+        );
+        assert!(
+            mapped.contains("channel closed"),
+            "raw diagnostics must survive the mapping, got: {mapped}"
+        );
+    }
+    // 负例 1：普通内部错误（无 data 判别符）必须原样透传——前缀只属于
+    // 引擎死亡，不属于一切错误。
+    #[test]
+    fn plain_internal_error_passes_through_untouched() {
+        let err = xai_acp_lib::acp_internal_error("boom");
+        let mapped = map_acp_send_error(&err);
+        assert!(!mapped.contains("ENGINE_DEAD"), "got: {mapped}");
+        assert!(mapped.contains("boom"), "got: {mapped}");
+        assert_eq!(mapped, err.to_string());
+    }
+    // 负例 2：带**其它** data 的错误不算通道死亡——证明触发条件是
+    // xaiAcpChannelFailure 判别符本身，不是「有 data 就前缀」。
+    #[test]
+    fn foreign_error_data_is_not_treated_as_channel_failure() {
+        let err = xai_acp_lib::acp_internal_error("invalid session id")
+            .data(serde_json::json!({ "requestId": "abc" }));
+        let mapped = map_acp_send_error(&err);
+        assert!(!mapped.contains("ENGINE_DEAD"), "got: {mapped}");
+        assert_eq!(mapped, err.to_string());
+    }
+}
+#[cfg(test)]
+mod clear_dead_handle_tests {
+    use super::{
+        AgentHandle, AgentState, clear_dead_handle, issue_session_capability_lease,
+        provider_profile_for_catalog_key,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    async fn state_with_handle(cancel: CancellationToken) -> (AgentState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let capability_lease = Arc::new(
+            issue_session_capability_lease(
+                "s1",
+                crate::surface::SurfaceKind::Code,
+                dir.path(),
+                None,
+                Some("deepseek:chat"),
+                &[],
+            )
+            .unwrap(),
+        );
+        let (tx, _rx): (super::AcpAgentTx, _) = tokio::sync::mpsc::unbounded_channel();
+        let state = AgentState::default();
+        *state.handle.lock().await = Some(AgentHandle {
+            acp_tx: tx,
+            session_id: super::acp::SessionId::new("s1"),
+            cancel,
+            cwd: dir.path().to_path_buf(),
+            surface_kind: crate::surface::SurfaceKind::Code,
+            work_workspace_id: None,
+            provider_catalog_key: Some("deepseek:chat".into()),
+            provider_profile: provider_profile_for_catalog_key(Some("deepseek:chat")).unwrap(),
+            capability_lease,
+        });
+        (state, dir)
+    }
+    // 正方向：未取消（= 引擎意外死亡）→ handle 被摘除并返回身份。
+    #[tokio::test]
+    async fn unexpected_death_clears_handle_and_reports_identity() {
+        let (state, _dir) = state_with_handle(CancellationToken::new()).await;
+        let (sid, cwd) = clear_dead_handle(&state, &CancellationToken::new())
+            .await
+            .expect("unexpected death must report identity");
+        assert_eq!(sid, "s1");
+        assert!(!cwd.is_empty());
+        assert!(
+            state.handle.lock().await.is_none(),
+            "dead engine's handle must not survive"
+        );
+    }
+    // 反方向：正常拆除（token 已取消）绝不能摘 handle——旧泵的退出路径，
+    // 误摘会把用户正在切换的新会话拆掉。
+    #[tokio::test]
+    async fn teardown_cancelled_token_leaves_handle_untouched() {
+        let cancel = CancellationToken::new();
+        let (state, _dir) = state_with_handle(cancel.clone()).await;
+        cancel.cancel();
+        assert!(
+            clear_dead_handle(&state, &cancel).await.is_none(),
+            "teardown must not report engine death"
+        );
+        assert!(
+            state.handle.lock().await.is_some(),
+            "handle must survive normal teardown classification"
+        );
+    }
+    // 反方向的并发窗口：旧泵已开始清理、但仍在等待 handle 锁时，会话切换
+    // 取消旧 token。取消判定必须发生在取得锁之后，否则旧泵会误摘仍存活的
+    // handle。current_thread + yield 让清理任务确定先运行并阻塞在锁上。
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_while_waiting_for_handle_lock_preserves_live_handle() {
+        let cancel = CancellationToken::new();
+        let (state, _dir) = state_with_handle(cancel.clone()).await;
+        let state = Arc::new(state);
+        let mut held = state.handle.lock().await;
+        let cleanup_state = state.clone();
+        let cleanup_cancel = cancel.clone();
+        let cleanup = tokio::spawn(async move {
+            clear_dead_handle(&cleanup_state, &cleanup_cancel).await
+        });
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        // Simulate the session switch installing a replacement while it owns
+        // the mutex. The waiting old pump must observe cancellation only after
+        // this guard is released, and must leave the replacement untouched.
+        held.as_mut().unwrap().cancel = CancellationToken::new();
+        drop(held);
+
+        assert!(
+            cleanup.await.unwrap().is_none(),
+            "a pump cancelled during lock contention is normal teardown"
+        );
+        assert!(
+            state.handle.lock().await.is_some(),
+            "the old pump must not remove the replacement handle after cancellation"
+        );
+    }
+    // 启动窗口：handle 尚未装上时死亡 → 无事可做，不 panic。
+    #[tokio::test]
+    async fn death_before_handle_install_is_a_noop() {
+        let state = AgentState::default();
+        assert!(
+            clear_dead_handle(&state, &CancellationToken::new())
+                .await
+                .is_none()
+        );
+    }
+}
 fn acp_tool_category(kind: acp::ToolKind) -> String {
     let wire = serde_json::to_value(kind)
         .ok()
@@ -2326,6 +2488,64 @@ mod execution_ledger_projection_tests {
             &records[2].event,
             ExecutionEventKind::ToolFailed { .. }
         ));
+    }
+}
+/// 事件泵 `recv()` 返回 None：引擎 drop 了它的 client 通道 = 引擎线程退出。
+///
+/// 此前这里只是静默 break——handle 仍指向死引擎，之后每个 ext 调用
+/// （worktree_list 等自动刷新）都以
+/// `unable to send 'ext_method' request, channel closed` 弹给用户。
+/// 现在 fail-fast：摘掉 handle + 广播 `agent://engine-dead`，前端换成
+/// 一条可理解的「引擎已退出」提示。
+///
+/// 状态操作收在 [`clear_dead_handle`]（可直接单测）；本函数只补日志与事件。
+async fn on_engine_channel_closed(app: &AppHandle, pump_cancel: &CancellationToken) {
+    let state: State<'_, AgentState> = app.state();
+    let Some((session_id, cwd)) = clear_dead_handle(&state, pump_cancel).await else {
+        return;
+    };
+    tracing::error!(
+        session_id,
+        cwd,
+        "engine channel closed without teardown; handle cleared"
+    );
+    let _ = app.emit(
+        "agent://engine-dead",
+        serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+    );
+}
+/// 引擎通道关闭后的 handle 处置（pump 观察到 recv → None 时调用）。
+///
+/// 定性：pump token 已取消 = **正常拆除**（agent_start 换会话、启动失败
+/// 路径都会先 cancel 再摘 handle），引擎随之退出是预期，不算死亡，handle
+/// 保持不动。未取消 = 意外退出 → 摘掉 handle。取消检查必须在持有 handle
+/// 锁时完成：否则会话切换可能在「检查 token」与「取得锁」之间安装新 handle，
+/// 随后旧泵会误摘新会话。
+///
+/// 返回被摘除会话的 (session_id, cwd) 供事件广播；无事可做（正常拆除 /
+/// 启动窗口内死亡且 handle 尚未装上——那条路 agent_start 自己的 acp_send
+/// 会拿到同族错误并回报）返回 None。
+async fn clear_dead_handle(
+    state: &AgentState,
+    pump_cancel: &CancellationToken,
+) -> Option<(String, String)> {
+    let mut handle = state.handle.lock().await;
+    if pump_cancel.is_cancelled() {
+        return None;
+    }
+    handle
+        .take()
+        .map(|h| (h.session_id.0.to_string(), h.cwd.to_string_lossy().into_owned()))
+}
+/// `acp::Error` → 用户可见错误串。通道断开（send/recv 对端已亡 = 引擎线程
+/// 退出）时加结构化前缀 `ENGINE_DEAD`，前端据此展示「引擎已退出」而不是
+/// channel 天书。判别用 `xai_acp_lib::acp_channel_failure`（错误 data 上的
+/// 类型化判别符），不做子串匹配。纯函数，见 map_acp_send_error_tests。
+pub(crate) fn map_acp_send_error(err: &acp::Error) -> String {
+    if xai_acp_lib::acp_channel_failure(err).is_some() {
+        format!("ENGINE_DEAD: {err}")
+    } else {
+        err.to_string()
     }
 }
 
@@ -2923,12 +3143,21 @@ pub async fn agent_prompt(
         .and_then(|_| execution_ledger.append(ledger_context, terminal_event));
     state.active_turns.lock().await.remove(&session_id_string);
     let payload = match (&result, &usage_validation_error) {
-        (_, Some(error)) => serde_json::json!({ "ok": false, "error": error }),
+        (_, Some(error)) => serde_json::json!({
+            "ok": false,
+            "sessionId": session_id_string,
+            "error": error,
+        }),
         (Ok(resp), None) => serde_json::json!({
             "ok": true,
+            "sessionId": session_id_string,
             "stopReason": serde_json::to_value(resp.stop_reason).unwrap_or(serde_json::Value::Null),
         }),
-        (Err(e), None) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        (Err(e), None) => serde_json::json!({
+            "ok": false,
+            "sessionId": session_id_string,
+            "error": map_acp_send_error(e),
+        }),
     };
     let _ = app.emit("agent://turn-end", payload);
     terminal_ledger_result
@@ -2936,7 +3165,7 @@ pub async fn agent_prompt(
     if let Some(error) = usage_validation_error {
         return Err(error);
     }
-    result.map(|_| ()).map_err(|e| e.to_string())
+    result.map(|_| ()).map_err(|e| map_acp_send_error(&e))
 }
 
 /// Answer a pending permission request. `option_id = None` cancels/denies.
@@ -3193,7 +3422,7 @@ pub(crate) async fn ext_call(
     let resp: acp::ExtResponse =
         acp_send(acp::ExtRequest::new(method.to_string(), raw.into()), &acp_tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| map_acp_send_error(&e))?;
     let mut response: serde_json::Value =
         serde_json::from_str(resp.0.get()).map_err(|e| e.to_string())?;
     if let Some((lease, lease_session_id)) = terminal_binding.as_ref() {
@@ -3321,7 +3550,7 @@ pub(crate) async fn ext_notify(
         &acp_tx,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| map_acp_send_error(&e))?;
     Ok(())
 }
 
@@ -3684,5 +3913,5 @@ pub async fn agent_cancel(state: State<'_, AgentState>) -> Result<(), String> {
     acp_send(acp::CancelNotification::new(session_id), &acp_tx)
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| map_acp_send_error(&e))
 }
