@@ -220,6 +220,23 @@ describe("模型阻塞的 UI 状态机", () => {
 });
 
 describe("composer send / popup / @", () => {
+  it("does not render transcript display controls inside the composer", () => {
+    const { container } = renderComposer({ modelBlock: null, surface: "chat" });
+
+    expect(container.querySelector(".density-control")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Compact|Quiet|Verbose/i })).toBeNull();
+  });
+
+  it.each([
+    ["chat", t.composerPlaceholderChat],
+    ["code", t.composerPlaceholderCode],
+    ["work", t.composerPlaceholderWork],
+  ])("uses the %s-specific task prompt", (surface, placeholder) => {
+    renderComposer({ modelBlock: null, surface });
+
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", placeholder);
+  });
+
   it("Enter with an empty popup still sends", async () => {
     const user = userEvent.setup();
     const send = vi.fn();

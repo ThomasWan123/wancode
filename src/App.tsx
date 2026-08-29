@@ -64,6 +64,12 @@ import {
 } from "./workSessionPersistence";
 import { workPromptForDisplay } from "./workPromptDisplay";
 import {
+  loadTranscriptView,
+  TRANSCRIPT_VIEW_ORDER,
+  TRANSCRIPT_VIEW_STORAGE_KEY,
+  type TranscriptView,
+} from "./transcriptView";
+import {
   restoreSurfaceSession,
   snapshotSurfaceSession,
   type SurfaceSessionCache,
@@ -438,18 +444,19 @@ function App() {
   const [previewLive, setPreviewLive] = useState<string | null>(null);
   const [prBusy, setPrBusy] = useState(false);
   const [prStatus, setPrStatus] = useState<any>(null);
-  // Transcript 三档：compact（藏思考/工具细节）| default | verbose（全展开）
-  const [transcriptMode, setTranscriptMode] = useState<string>(
-    () => localStorage.getItem("wancode-transcript") ?? "default",
+  // 消息显示只控制可见细节，不改变模型、权限、回答风格或上下文。
+  // 新命名避开 Compact（上下文压缩）和 Quiet（回答风格）的歧义。
+  const [transcriptView, setTranscriptView] = useState<TranscriptView>(
+    () => loadTranscriptView(localStorage),
   );
-  function cycleTranscript() {
-    const order = ["default", "compact", "verbose"];
-    const next = order[(order.indexOf(transcriptMode) + 1) % order.length];
-    persistTranscript(next);
+  function cycleTranscriptView() {
+    const current = TRANSCRIPT_VIEW_ORDER.indexOf(transcriptView);
+    const next = TRANSCRIPT_VIEW_ORDER[(current + 1) % TRANSCRIPT_VIEW_ORDER.length];
+    persistTranscriptView(next);
   }
-  function persistTranscript(next: string) {
-    setTranscriptMode(next);
-    localStorage.setItem("wancode-transcript", next);
+  function persistTranscriptView(next: TranscriptView) {
+    setTranscriptView(next);
+    localStorage.setItem(TRANSCRIPT_VIEW_STORAGE_KEY, next);
   }
   // v0.14 命令面板（Ctrl+K）。动作每次渲染重组进 ref，全局键监听只挂一次。
   const [showPalette, setShowPalette] = useState(false);
@@ -2522,7 +2529,7 @@ function App() {
       },
     },
     { id: "theme", label: t.paletteTheme, run: () => setTheme((th) => (th === "dark" ? "light" : "dark")) },
-    { id: "transcript", label: t.paletteTranscript(transcriptMode), run: cycleTranscript },
+    { id: "transcript", label: t.paletteTranscript(transcriptView), run: cycleTranscriptView },
   ];
 
   return (
@@ -2823,11 +2830,11 @@ function App() {
 
       <PlanDocument {...{ planApproval, planFeedback, setPlanFeedback, respondPlan, t }} />
 
-      <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("diff"); } }} />
+      <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptView, setTranscriptView: persistTranscriptView, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("diff"); } }} />
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 
-      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile: attachFilesToWorkFolder, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t, transcriptMode, setTranscriptMode: persistTranscript }} />
+      <Composer {...{ surface, MODE_ORDER, acceptPopup, busy, currentEffort, draftRef, editingQueueId, effortOptions, fileInputRef, histIdxRef, historyRef, input, lang, model, modeMenu, modeMeta, modelBlock, modelBlockOpen, setModelBlock, setModelBlockOpen, modelOptions, models, onAttachWorkFile: attachFilesToWorkFolder, onComposerChange, onEffortChange, onModelSwitched, onPaste, onPickImages, pastedImages, permMode, pickFolderAndConnect, plusMenu, popup, popupItems, queue, refreshMcpConfig, send, sendInterject, sessionId, setEditingQueueId, setError, setInput, setItems, setMode, setModeMenu, setModel, setPastedImages, setPlusMenu, setPopup, setSettingsTab, setShowSettings, setShowTerminal, starting, taRef, workspace, t }} />
         </div>
 
         {surface === "code" && showWorkbench && (

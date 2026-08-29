@@ -1,10 +1,11 @@
 /* v0.13 拆分：消息流渲染（用户/助手/思考/提示/工具卡片 + 内联审批 + 全局审批条）。
    P0: quiet transcript by default (collapsed outcome chips), review gate instead of naive DiffView,
    thinking as one-line duration stub, SVG icons replace emoji. */
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { IconCheck, IconCopy, IconGitBranch, IconShield } from "../../icons";
+import { IconCheck, IconChevron, IconCopy, IconGitBranch, IconShield } from "../../icons";
+import type { TranscriptView } from "../../transcriptView";
 
 function escapeHtml(code: string): string {
   return code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -89,13 +90,112 @@ function ReviewChip({ diffs, onReview, t }: { diffs: any[]; onReview: () => void
 }
 
 export function Messages(props: Record<string, any>) {
-  const { bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptMode, workspace, t, onOpenWorkbench } = props;
-  const compact = transcriptMode === "compact";
-  const verbose = transcriptMode === "verbose";
-  const quiet = transcriptMode === "default" || !transcriptMode;
+  const { bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptView, setTranscriptView, workspace, t, onOpenWorkbench } = props;
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const viewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const viewMenuRef = useRef<HTMLDivElement | null>(null);
+  const view: TranscriptView = transcriptView ?? "standard";
+  const minimal = view === "minimal";
+  const debug = view === "debug";
+  const standard = view === "standard";
+  const viewLabel = view === "minimal"
+    ? t.transcriptViewMinimal
+    : view === "debug"
+      ? t.transcriptViewDebug
+      : t.transcriptViewStandard;
+  useEffect(() => {
+    if (!viewMenuOpen) return;
+    const firstItem = viewMenuRef.current?.querySelector<HTMLButtonElement>("[role='menuitemradio']");
+    firstItem?.focus();
+  }, [viewMenuOpen]);
+
+  function handleViewMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']"),
+    );
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = (current + 1) % items.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Escape") {
+      event.preventDefault();
+      setViewMenuOpen(false);
+      requestAnimationFrame(() => viewTriggerRef.current?.focus());
+      return;
+    } else return;
+    event.preventDefault();
+    items[next]?.focus();
+  }
   return (
     <>
       <section className="messages" style={items.length === 0 && !busy ? { display: "none" } : undefined}>
+        <div className="transcript-toolbar">
+          <div className="transcript-view-wrap">
+            <button
+              ref={viewTriggerRef}
+              type="button"
+              className="transcript-view-button"
+              aria-haspopup="menu"
+              aria-expanded={viewMenuOpen}
+              title={t.transcriptViewHint}
+              onClick={() => setViewMenuOpen((open) => !open)}
+            >
+              {t.transcriptViewTitle}: {viewLabel} <IconChevron size={12} />
+            </button>
+            {viewMenuOpen && (
+              <>
+                <button
+                  type="button"
+                  className="transcript-view-backdrop"
+                  aria-label={t.close}
+                  onClick={() => setViewMenuOpen(false)}
+                />
+                <div
+                  ref={viewMenuRef}
+                  className="transcript-view-menu"
+                  role="menu"
+                  aria-label={t.transcriptViewTitle}
+                  onKeyDown={handleViewMenuKeyDown}
+                >
+                  <div className="transcript-view-menu-head">
+                    <strong>{t.transcriptViewTitle}</strong>
+                    <span>{t.transcriptViewHint}</span>
+                  </div>
+                  {(["minimal", "standard", "debug"] as const).map((option) => {
+                    const label = option === "minimal"
+                      ? t.transcriptViewMinimal
+                      : option === "debug"
+                        ? t.transcriptViewDebug
+                        : t.transcriptViewStandard;
+                    const description = option === "minimal"
+                      ? t.transcriptViewMinimalDesc
+                      : option === "debug"
+                        ? t.transcriptViewDebugDesc
+                        : t.transcriptViewStandardDesc;
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={view === option}
+                        className={view === option ? "active" : ""}
+                        onClick={() => {
+                          setTranscriptView?.(option);
+                          setViewMenuOpen(false);
+                        }}
+                      >
+                        <span>{label}</span>
+                        <small>{description}</small>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
         {items.map((it: any, i: any) => {
           if (it.kind === "user")
             return (
@@ -153,13 +253,13 @@ export function Messages(props: Record<string, any>) {
               </div>
             );
           if (it.kind === "thought") {
-            if (compact) return null;
-            const isQuietCollapsed = quiet && !openThoughts.has(i);
+            if (minimal) return null;
+            const isStandardCollapsed = standard && !openThoughts.has(i);
             return (
               <details
                 key={i}
                 className="msg thought"
-                open={verbose || openThoughts.has(i)}
+                open={debug || openThoughts.has(i)}
                 onToggle={(e) => {
                   const isOpen = (e.currentTarget as HTMLDetailsElement).open;
                   setOpenThoughts((prev: any) => {
@@ -170,7 +270,7 @@ export function Messages(props: Record<string, any>) {
                   });
                 }}
               >
-                <summary>{isQuietCollapsed ? t.thinkingNow : t.thinking}</summary>
+                <summary>{isStandardCollapsed ? t.thinkingNow : t.thinking}</summary>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
               </details>
             );
@@ -196,11 +296,11 @@ export function Messages(props: Record<string, any>) {
                 <span className="tool-title">{it.call.title ?? it.call.kind ?? t.toolCall}</span>
               </div>
               {/* P0-4: Review gate — show summary chip instead of full naive diff */}
-              {hasDiffs && !compact && (
+              {hasDiffs && !minimal && (
                 <ReviewChip diffs={it.call.diffs} onReview={() => onOpenWorkbench?.()} t={t} />
               )}
-              {!compact && it.call.output && (
-                <details className="tool-result" open={verbose}>
+              {!minimal && it.call.output && (
+                <details className="tool-result" open={debug}>
                   <summary>
                     <span className="elbow" aria-hidden>&#x23BF;</span>
                     {t.output}
