@@ -1245,12 +1245,21 @@ async fn start_inner_with_intent_and_workspace(
         if let Some(meta) = session_meta.clone() {
             req = req.meta(Some(meta));
         }
-        let resp: acp::LoadSessionResponse = acp_send(
-            req,
-            &acp_tx,
-        )
-        .await
-        .map_err(|e| anyhow!("恢复会话失败: {e}"))?;
+        let resp: acp::LoadSessionResponse =
+            match bounded_acp_request(acp_send(req, &acp_tx), SESSION_OPEN_TIMEOUT).await {
+                BoundedAcpOutcome::Completed(resp) => resp,
+                BoundedAcpOutcome::Failed(error) => {
+                    cancel.cancel();
+                    return Err(anyhow!("恢复会话失败: {error}"));
+                }
+                BoundedAcpOutcome::TimedOut => {
+                    cancel.cancel();
+                    return Err(anyhow!(
+                        "SESSION_START_TIMEOUT: 引擎在 {} 秒内未完成会话恢复，请重试",
+                        SESSION_OPEN_TIMEOUT.as_secs()
+                    ));
+                }
+            };
         model_block = resp
             .meta
             .as_ref()
@@ -1269,12 +1278,21 @@ async fn start_inner_with_intent_and_workspace(
         if let Some(meta) = session_meta {
             req = req.meta(Some(meta));
         }
-        let resp: acp::NewSessionResponse = acp_send(
-            req,
-            &acp_tx,
-        )
-        .await
-        .map_err(|e| anyhow!("创建会话失败: {e}"))?;
+        let resp: acp::NewSessionResponse =
+            match bounded_acp_request(acp_send(req, &acp_tx), SESSION_OPEN_TIMEOUT).await {
+                BoundedAcpOutcome::Completed(resp) => resp,
+                BoundedAcpOutcome::Failed(error) => {
+                    cancel.cancel();
+                    return Err(anyhow!("创建会话失败: {error}"));
+                }
+                BoundedAcpOutcome::TimedOut => {
+                    cancel.cancel();
+                    return Err(anyhow!(
+                        "SESSION_START_TIMEOUT: 引擎在 {} 秒内未完成会话创建，请重试",
+                        SESSION_OPEN_TIMEOUT.as_secs()
+                    ));
+                }
+            };
         if surface_requires_local_extension_isolation(surface_kind)
             && !local_extensions_policy_applied(resp.meta.as_ref())
         {
@@ -2969,6 +2987,72 @@ fn bind_ext_session_params(method: &str, params: &mut serde_json::Value, session
     } else {
         obj.entry("sessionId").or_insert(sid.clone());
         obj.entry("session_id").or_insert(sid);
+    }
+}
+
+/// An ACP session open is an external actor boundary: the engine can create
+/// its session and then fail to deliver the final response. Never let that
+/// leave the desktop permanently disabled behind `Starting...`.
+const SESSION_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedAcpOutcome<T> {
+    Completed(T),
+    Failed(String),
+    TimedOut,
+}
+
+async fn bounded_acp_request<F, T, E>(
+    future: F,
+    timeout: std::time::Duration,
+) -> BoundedAcpOutcome<T>
+where
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(value)) => BoundedAcpOutcome::Completed(value),
+        Ok(Err(error)) => BoundedAcpOutcome::Failed(error.to_string()),
+        Err(_) => BoundedAcpOutcome::TimedOut,
+    }
+}
+
+#[cfg(test)]
+mod bounded_acp_request_tests {
+    use super::{bounded_acp_request, BoundedAcpOutcome};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn pending_session_open_is_bounded_instead_of_hanging_forever() {
+        let outcome = bounded_acp_request(
+            std::future::pending::<Result<(), &'static str>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(outcome, BoundedAcpOutcome::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn successful_session_open_keeps_its_response() {
+        let outcome = bounded_acp_request(
+            std::future::ready::<Result<&'static str, &'static str>>(Ok("session")),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(outcome, BoundedAcpOutcome::Completed("session"));
+    }
+
+    #[tokio::test]
+    async fn failed_session_open_keeps_the_engine_error() {
+        let outcome = bounded_acp_request(
+            std::future::ready::<Result<(), &'static str>>(Err("engine closed")),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            BoundedAcpOutcome::Failed("engine closed".to_string())
+        );
     }
 }
 
