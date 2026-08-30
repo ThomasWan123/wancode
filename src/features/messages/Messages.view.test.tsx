@@ -20,27 +20,32 @@ const items = [
   },
 ];
 
-function Harness({ initial = "standard" }: { initial?: TranscriptView }) {
+function Harness({ initial = "standard", initialItems = items }: { initial?: TranscriptView; initialItems?: any[] }) {
   const [view, setView] = useState<TranscriptView>(initial);
+  const [visibleItems, setVisibleItems] = useState(initialItems);
   return (
-    <Messages
-      bottomRef={{ current: null }}
-      busy={false}
-      copiedIdx={null}
-      copyMessage={vi.fn()}
-      error={null}
-      forkFrom={vi.fn()}
-      items={items}
-      openThoughts={new Set<number>()}
-      permission={null}
-      respondPermission={vi.fn()}
-      setOpenThoughts={vi.fn()}
-      transcriptView={view}
-      setTranscriptView={setView}
-      workspace="D:/project"
-      t={STRINGS.en}
-      onOpenWorkbench={vi.fn()}
-    />
+    <>
+      <button type="button" onClick={() => setVisibleItems([])}>clear-items</button>
+      <button type="button" onClick={() => setVisibleItems(items)}>restore-items</button>
+      <Messages
+        bottomRef={{ current: null }}
+        busy={false}
+        copiedIdx={null}
+        copyMessage={vi.fn()}
+        error={null}
+        forkFrom={vi.fn()}
+        items={visibleItems}
+        openThoughts={new Set<number>()}
+        permission={null}
+        respondPermission={vi.fn()}
+        setOpenThoughts={vi.fn()}
+        transcriptView={view}
+        setTranscriptView={setView}
+        workspace="D:/project"
+        t={STRINGS.en}
+        onOpenWorkbench={vi.fn()}
+      />
+    </>
   );
 }
 
@@ -63,14 +68,45 @@ describe("message display preference", () => {
 
     const trigger = screen.getByRole("button", { name: /View: Standard/i });
     await user.click(trigger);
-    expect(screen.getByRole("menuitemradio", { name: /Minimal/i })).toHaveFocus();
-    await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menuitemradio", { name: /Standard/i })).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menuitemradio", { name: /Debug/i })).toHaveFocus();
     await user.keyboard("{Home}");
     expect(screen.getByRole("menuitemradio", { name: /Minimal/i })).toHaveFocus();
     await user.keyboard("{End}");
     expect(screen.getByRole("menuitemradio", { name: /Debug/i })).toHaveFocus();
     await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("keeps the display control reachable on an idle empty transcript", () => {
+    const { container } = render(<Harness initialItems={[]} />);
+
+    expect(screen.getByRole("button", { name: /View: Standard/i })).toBeInTheDocument();
+    expect(container.querySelector(".messages-empty")).toBeInTheDocument();
+  });
+
+  it("opens the menu with focus on the checked display option", async () => {
+    const user = userEvent.setup();
+    render(<Harness initial="debug" />);
+
+    await user.click(screen.getByRole("button", { name: /View: Debug/i }));
+    expect(screen.getByRole("menuitemradio", { name: /Debug/i })).toHaveFocus();
+    expect(screen.getByRole("menuitemradio", { name: /Debug/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("closes an open display menu when the transcript is cleared", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: /View: Standard/i }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "clear-items" }));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "restore-items" }));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 

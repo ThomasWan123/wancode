@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
 import { resolveCrashRecovery } from "./crashRecovery";
 import { createRefreshGuard, createRosterCoordinator } from "./sessionRoster";
+import { buildSuggestions } from "./homeSuggestions";
 import { invoke } from "@tauri-apps/api/core";
 import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
@@ -222,9 +223,7 @@ function autoApproveOption(
   }
 }
 
-// 首页建议：从**真实工作区**推导，而不是写死一串示例。
-// 之前固定的 "读取 notes.md…" 在多数项目里指向并不存在的文件。
-// 引擎的 ChangeType 是 create/edit/delete/... —— 映射成 git 用户熟悉的字母。
+// Engine ChangeType names mapped to the compact letters shown in the UI.
 const CHANGE_LETTER: Record<string, string> = {
   create: "A",
   edit: "M",
@@ -239,30 +238,6 @@ function changeLetter(t: unknown): string {
 }
 
 const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-
-function buildSuggestions(
-  files: string[],
-  git: any,
-  t: any,
-): { label: string; prompt: string }[] {
-  const out: { label: string; prompt: string }[] = [];
-  const lower = files.map((f) => f.toLowerCase());
-  const hasReadme = lower.some((f) => f === "readme.md" || f.endsWith("/readme.md"));
-  const hasTests = lower.some(
-    (f) => /(^|\/)(tests?|__tests__|spec)\//.test(f) || /\.(test|spec)\.[a-z]+$/.test(f),
-  );
-  const dirty = git?.isRepo ? (git.files?.length ?? 0) : 0;
-
-  if (dirty > 0) {
-    out.push({ label: t.sugReviewChanges, prompt: t.sugReviewChangesP });
-    out.push({ label: t.sugCommitMsg, prompt: t.sugCommitMsgP });
-  }
-  if (hasReadme) out.push({ label: t.sugSummarize, prompt: t.sugSummarizeP });
-  if (hasTests) out.push({ label: t.sugRunTests, prompt: t.sugRunTestsP });
-  out.push({ label: t.sugExplainStruct, prompt: t.sugExplainStructP });
-  out.push({ label: t.sugFindBugs, prompt: t.sugFindBugsP });
-  return out.slice(0, 4);
-}
 
 // ── 组件 ─────────────────────────────────────────────────────────
 
@@ -2826,7 +2801,7 @@ function App() {
         )}
 
         <div className="main-col">
-      <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t, planPending: !!planApproval }} />
+      <Home {...{ buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, surface, taRef, t, planPending: !!planApproval }} />
 
       <PlanDocument {...{ planApproval, planFeedback, setPlanFeedback, respondPlan, t }} />
 

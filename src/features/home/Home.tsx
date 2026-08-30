@@ -5,7 +5,7 @@ import { IconClipboard, IconGitBranch } from "../../icons";
 import { displaySessionTitle } from "../../i18n";
 
 export function Home(props: Record<string, any>) {
-  const { buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, taRef, t, planPending } = props;
+  const { buildSuggestions, baseName, fileList, gitInfo, items, busy, onComposerChange, otherRecent, planSteps, sessionId, setInput, startSession, surface, taRef, t, planPending } = props;
   return (
     <>
       {items.length === 0 && !busy && !planPending && (
@@ -13,11 +13,11 @@ export function Home(props: Record<string, any>) {
           <div className="empty-logo"><img src="/app-icon.png" alt="" /></div>
           <div className="empty-title">{t.appTagline}</div>
 
-          {/* 建议来自当前工作区（有改动就先建议审查改动，有 README 才建议总结…）
-              工作区信息不在这里重复 —— 左栏底部和输入框上方已经显示。 */}
+          {/* Suggestions follow the active surface. Code derives repository
+              actions; Chat and Work use conversational/document language. */}
           {sessionId && (
             <div className="chips">
-              {buildSuggestions(fileList, gitInfo, t).map((s: any) => (
+              {buildSuggestions(fileList, gitInfo, t, surface).map((s: any) => (
                 <button
                   key={s.label}
                   className="chip"

@@ -320,15 +320,13 @@ export function Composer(props: Record<string, any>) {
             placeholder={
               busy
                 ? t.queueHint
-                : sessionId
-                  ? surface === "chat"
+                : starting
+                  ? t.starting
+                  : surface === "chat"
                     ? t.composerPlaceholderChat
                     : surface === "work"
                       ? t.composerPlaceholderWork
                       : t.composerPlaceholderCode
-                  : starting
-                    ? t.starting
-                    : t.composerHint
             }
             rows={2}
           />
