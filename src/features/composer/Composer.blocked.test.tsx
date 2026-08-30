@@ -237,6 +237,14 @@ describe("composer send / popup / @", () => {
     expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", placeholder);
   });
 
+  it.each(["chat", "code", "work"])(
+    "falls back to the generic hint on %s before a session exists",
+    (surface) => {
+      renderComposer({ modelBlock: null, surface, sessionId: "", starting: false });
+      expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", t.composerHint);
+    },
+  );
+
   it("Enter with an empty popup still sends", async () => {
     const user = userEvent.setup();
     const send = vi.fn();
