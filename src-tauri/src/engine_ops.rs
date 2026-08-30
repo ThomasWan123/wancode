@@ -786,18 +786,39 @@ pub async fn list_workspace_files(workspace: String) -> Result<Vec<String>, Stri
 }
 
 /// Full-text search over stored sessions (`x.ai/session/search`).
+fn trusted_session_cwd(live_cwd: String, _ui_workspace: String) -> String {
+    live_cwd
+}
+
+#[cfg(test)]
+mod session_action_cwd_tests {
+    use super::trusted_session_cwd;
+
+    #[test]
+    fn visible_work_folder_cannot_override_the_live_session_store() {
+        assert_eq!(
+            trusted_session_cwd(
+                "C:/app/work/ws-real".to_string(),
+                "D:/fixture".to_string(),
+            ),
+            "C:/app/work/ws-real"
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn agent_session_search(
     state: State<'_, AgentState>,
     query: String,
     workspace: String,
 ) -> Result<serde_json::Value, String> {
+    let cwd = trusted_session_cwd(state.live_session_cwd().await?, workspace);
     ext_call(
         &state,
         "x.ai/session/search",
         serde_json::json!({
             "query": query,
-            "cwd": workspace,
+            "cwd": cwd,
             "limit": 30,
             "includeContent": true,
         }),
@@ -813,10 +834,11 @@ pub async fn agent_session_rename(
     title: String,
     workspace: String,
 ) -> Result<serde_json::Value, String> {
+    let cwd = trusted_session_cwd(state.live_session_cwd().await?, workspace);
     ext_call(
         &state,
         "x.ai/session/rename",
-        serde_json::json!({ "sessionId": session_id, "title": title, "cwd": workspace }),
+        serde_json::json!({ "sessionId": session_id, "title": title, "cwd": cwd }),
     )
     .await
 }
@@ -828,10 +850,11 @@ pub async fn agent_session_delete(
     session_id: String,
     workspace: String,
 ) -> Result<serde_json::Value, String> {
+    let cwd = trusted_session_cwd(state.live_session_cwd().await?, workspace);
     ext_call(
         &state,
         "x.ai/session/delete",
-        serde_json::json!({ "sessionId": session_id, "cwd": workspace }),
+        serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
     )
     .await
 }

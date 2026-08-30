@@ -55,6 +55,7 @@ import {
 } from "./icons";
 import "./App.css";
 import { createLatestStartCoordinator } from "./startCoordinator";
+import { createSessionLifecycle } from "./sessionLifecycle";
 import {
   forgetWorkSession,
   forgetWorkWorkspace,
@@ -277,6 +278,9 @@ function App() {
   effortOptionsRef.current = effortOptions;
   const [currentEffort, setCurrentEffort] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState("");
+  // The runtime cwd belongs to the live engine session. In Work, `workspace`
+  // is the user's source folder and must never be used as the session-store cwd.
+  const sessionRuntimeCwdRef = useRef("");
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -1109,8 +1113,7 @@ function App() {
       return;
     }
     try {
-      if (!sessionId) await startSession();
-      const r = await invoke<any>("agent_session_search", { query: q.trim(), workspace });
+      const r = await sessionLifecycle().search(q.trim()) as any;
       const hits = r?.result?.results ?? r?.results ?? [];
       setSearchHits(
         hits.map((h: any) => ({
@@ -1289,6 +1292,33 @@ function App() {
     } catch {
       /* workspace may not exist yet */
     }
+  }
+
+  function clearActiveSession() {
+    if (surfaceRef.current === "work") {
+      // Keep the durable document workspace, but never restore a session that
+      // the user just deleted.
+      forgetWorkSession(localStorage);
+    }
+    setSessionId("");
+    sessionIdRef.current = "";
+    sessionRuntimeCwdRef.current = "";
+    setItems([]);
+    setModelBlock(null);
+  }
+
+  function sessionLifecycle() {
+    return createSessionLifecycle({
+      getActiveSessionId: () => sessionIdRef.current,
+      getRuntimeWorkspace: () => sessionRuntimeCwdRef.current,
+      getDisplayWorkspace: () => workspaceStateRef.current,
+      getSurface: () => surfaceRef.current,
+      getWorkWorkspaceId: () => workWorkspaceIdRef.current,
+      startSession,
+      invoke: (command, args) => invoke(command, args),
+      refreshSessions,
+      clearActiveSession,
+    });
   }
 
   // 所有会话列表刷新（Chat 入口 effect 与 sessions/changed 监听）统一经生产
@@ -1703,6 +1733,7 @@ function App() {
       setItems([]);
       setSessionId("");
       sessionIdRef.current = "";
+      sessionRuntimeCwdRef.current = "";
       // 阻塞状态属于某一个具体会话。清在这里而不是拿到响应后——启动失败时
       // 界面已经空了，却还挂着上一个会话的"请选择模型"，是自相矛盾的状态。
       setModelBlock(null);
@@ -1756,6 +1787,7 @@ function App() {
       }
       setSessionId(r.session_id);
       sessionIdRef.current = r.session_id;
+      sessionRuntimeCwdRef.current = r.cwd || wsPath;
       setSurface(decision.surface);
       localStorage.setItem("wancode-surface", decision.surface);
       // W2-fe-b:Work 会话捕获其工作区身份;换会话重置本会话文档累积。
@@ -2748,11 +2780,7 @@ function App() {
             selectedPath={workFileSelected}
             onSelect={selectWorkFile}
             onNewSession={() => {
-              setSessionId("");
-              sessionIdRef.current = "";
-              setItems([]);
-              setModelBlock(null);
-              setWorkFileSelected(null);
+              void sessionLifecycle().newWorkSession().catch((err) => setError(String(err)));
             }}
             onOpenFolder={pickFolderAndConnect}
             onAddFiles={attachFilesToWorkFolder}
@@ -2766,30 +2794,14 @@ function App() {
             onSearchSessions={(query) => void runSearch(query)}
             onRenameSession={async (entry, title) => {
               try {
-                if (!sessionId) await startSession();
-                await invoke("agent_session_rename", {
-                  sessionId: entry.session_id,
-                  title,
-                  workspace,
-                });
-                await refreshSessions(workspace);
+                await sessionLifecycle().rename(entry, title);
               } catch (err) {
                 setError(String(err));
               }
             }}
             onDeleteSession={async (entry) => {
               try {
-                if (!sessionId) await startSession();
-                await invoke("agent_session_delete", {
-                  sessionId: entry.session_id,
-                  workspace,
-                });
-                if (entry.session_id === sessionId) {
-                  setSessionId("");
-                  sessionIdRef.current = "";
-                  setItems([]);
-                }
-                await refreshSessions(workspace);
+                await sessionLifecycle().remove(entry);
               } catch (err) {
                 setError(String(err));
               }
@@ -2797,7 +2809,7 @@ function App() {
             t={t}
           />
         ) : (
-          <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang, onOpenFile: (p: string) => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("file"); void openWbFile(p); } }} />
+          <Sidebar {...{ surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, input, knownWorkspaces, mcpLive, mcpServers, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, skills, startSession, starting, workspace, wsMenu, t, lang, renameSession: (entry: SessionEntry, title: string) => sessionLifecycle().rename(entry, title), deleteSession: (entry: SessionEntry) => sessionLifecycle().remove(entry), onOpenFile: (p: string) => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("file"); void openWbFile(p); } }} />
         )}
 
         <div className="main-col">

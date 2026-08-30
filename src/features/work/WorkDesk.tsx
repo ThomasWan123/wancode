@@ -179,7 +179,7 @@ export function WorkDesk(props: {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <button type="button" className="side-new work-new-session" onClick={onNewSession}>
+      <button type="button" className="side-new work-new-session" onClick={onNewSession} disabled={starting}>
         <IconPlus size={15} /> {t.sidebarNewSession}
       </button>
 
@@ -229,6 +229,7 @@ export function WorkDesk(props: {
                   <button
                     type="button"
                     className="work-session-action"
+                    disabled={starting}
                     title={t.renameSession}
                     aria-label={`${t.renameSession}: ${displaySessionTitle(session.title, t.untitledSession)}`}
                     onClick={(event) => {
@@ -245,6 +246,7 @@ export function WorkDesk(props: {
                   <button
                     type="button"
                     className="work-session-action"
+                    disabled={starting}
                     title={t.deleteSession}
                     aria-label={`${t.deleteSession}: ${displaySessionTitle(session.title, t.untitledSession)}`}
                     onClick={(event) => {

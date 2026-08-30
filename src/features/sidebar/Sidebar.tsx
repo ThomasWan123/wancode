@@ -1,6 +1,5 @@
 /* v0.13 拆分：左侧栏（导航/最近会话/文件树/搜索/工作区切换）。步 A 透传。
    红线：工作区标签以会话真实 cwd 为准（#83），不要自行从 localStorage 推导。 */
-import { invoke } from "@tauri-apps/api/core";
 import { displaySessionTitle } from "../../i18n";
 import { activateOnKeyboard } from "../../accessibility";
 import { liveMcpBadgeCount } from "./mcpBadge";
@@ -10,7 +9,7 @@ import {
 } from "../../icons";
 
 export function Sidebar(props: Record<string, any>) {
-  const { surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t } = props;
+  const { surface, sessionIdRef, TreeView, buildTree, fileList, gitInfo, grepHits, grepQuery, grepping, knownWorkspaces, mcpLive, pickFolderAndConnect, refreshMcpConfig, refreshMcpLive, refreshSessions, refreshSkills, refreshWorkspaces, runGrep, runSearch, searchHits, searchQuery, sessionId, sessions, setError, setGrepHits, setGrepQuery, setInput, setItems, setSessionId, setSettingsTab, setShowSearch, setShowSettings, setSidebarTab, setWorkspace, setWsMenu, showSearch, sidebarTab, startSession, starting, workspace, wsMenu, t, renameSession, deleteSession } = props;
   if (surface === "chat") {
     return (
       <aside className="sidebar">
@@ -218,19 +217,14 @@ export function Sidebar(props: Record<string, any>) {
                       title={t.renameSession}
                       onClick={async (e) => {
                         e.stopPropagation();
+                        if (starting) return;
                         const title = window.prompt(
                           t.renameSession,
                           displaySessionTitle(s.title, t.untitledSession),
                         );
                         if (!title?.trim()) return;
                         try {
-                          if (!sessionId) await startSession();
-                          await invoke("agent_session_rename", {
-                            sessionId: s.session_id,
-                            title: title.trim(),
-                            workspace,
-                          });
-                          refreshSessions(workspace);
+                          await renameSession(s, title.trim());
                         } catch (err) {
                           setError(String(err));
                         }
@@ -242,23 +236,14 @@ export function Sidebar(props: Record<string, any>) {
                       title={t.deleteSession}
                       onClick={async (e) => {
                         e.stopPropagation();
+                        if (starting) return;
                         if (
                           !window.confirm(
                             t.deleteConfirm(displaySessionTitle(s.title, t.untitledSession)),
                           )
                         ) return;
                         try {
-                          if (!sessionId) await startSession();
-                          await invoke("agent_session_delete", {
-                            sessionId: s.session_id,
-                            workspace,
-                          });
-                          if (s.session_id === sessionId) {
-                            setSessionId("");
-                            sessionIdRef.current = "";
-                            setItems([]);
-                          }
-                          refreshSessions(workspace);
+                          await deleteSession(s);
                         } catch (err) {
                           setError(String(err));
                         }

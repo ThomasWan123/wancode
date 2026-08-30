@@ -238,4 +238,57 @@ describe("WorkDesk", () => {
     await user.click(screen.getByRole("button", { name: `${t.deleteSession}: Original analysis` }));
     expect(onDeleteSession).toHaveBeenCalledWith(session);
   });
+
+  it("blocks a second New session click while the first engine session is starting", async () => {
+    const onNewSession = vi.fn();
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={onNewSession}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        starting
+        t={t}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: t.sidebarNewSession });
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(onNewSession).not.toHaveBeenCalled();
+  });
+
+  it("blocks rename and delete while a surface resume is replacing the live engine handle", async () => {
+    const onRenameSession = vi.fn();
+    const onDeleteSession = vi.fn();
+    render(
+      <WorkDesk
+        folder="D:/docs"
+        files={[]}
+        selectedPath={null}
+        onSelect={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onAddFiles={vi.fn()}
+        onDropPaths={vi.fn()}
+        sessions={[{
+          session_id: "work-1",
+          title: "Analysis",
+          updated_at: "2026-08-30T12:00:00Z",
+          num_messages: 1,
+        }]}
+        onRenameSession={onRenameSession}
+        onDeleteSession={onDeleteSession}
+        starting
+        t={t}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: `${t.renameSession}: Analysis` })).toBeDisabled();
+    expect(screen.getByRole("button", { name: `${t.deleteSession}: Analysis` })).toBeDisabled();
+  });
 });
