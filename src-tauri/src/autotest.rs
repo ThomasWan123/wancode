@@ -119,6 +119,42 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             .unwrap_or(false);
         check!("S7-work-binding", binding_ok, format!("{bound:?}"));
 
+        // ②b 重度使用者事故回归：Work 左栏展示的是用户 source folder，
+        // 会话真实 cwd 则是内部暂存目录。故意把错误的展示目录传到命令边界，
+        // 后端仍必须以 live handle cwd 重命名当前会话；同时请求只能携带一个
+        // target session identity，不能混入另一份 live alias。
+        let mut rename_result = Ok(serde_json::Value::Null);
+        let mut renamed_title = String::new();
+        for i in 0..12 {
+            renamed_title = format!("S7 heavy-user rename {i:02}");
+            rename_result = crate::engine_ops::agent_session_rename(
+                app.state::<AgentState>(),
+                r.session_id.clone(),
+                renamed_title.clone(),
+                workspace.clone(),
+            )
+            .await;
+            if rename_result.is_err() {
+                break;
+            }
+        }
+        let renamed_in_true_roster = crate::agent::agent_list_sessions(r.cwd.clone())
+            .await
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry.session_id == r.session_id && entry.title == renamed_title
+                })
+            })
+            .unwrap_or(false);
+        check!(
+            "S7-work-rename-wrong-ui-cwd",
+            rename_result.is_ok() && renamed_in_true_roster,
+            format!(
+                "writes=12 rename={rename_result:?} final_title={renamed_title:?} true_cwd={} ui_workspace={} listed={renamed_in_true_roster}",
+                r.cwd, workspace
+            )
+        );
+
         // ③ 经 work_import 命令边界导入（用**从 binding 读回**的 id）。
         // 夹具放在**调用方项目之外**的独立目录：既模拟「用户从任意位置选
         // 文件」，也让「Work 不碰调用方项目」这条能被真正断言（codex R2-F1：
@@ -214,10 +250,44 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             .and_then(|v| v.get("result").and_then(|r| r.get("servers")).or_else(|| v.get("servers")))
             .and_then(|s| s.as_array())
             .map(|a| a.is_empty());
+        // The capability broker is allowed to enforce Work's zero-MCP contract
+        // before the engine returns a list.  Both an empty list and the exact
+        // fail-closed broker result prove that no configured MCP is exposed.
+        let mcp_blocked = mcp_live
+            .as_ref()
+            .err()
+            .map(|error| {
+                error.starts_with("CAPABILITY_EXTENSION_BLOCKED: x.ai/mcp/list:")
+                    && error.contains("tool is denied: other")
+            })
+            .unwrap_or(false);
         check!(
             "S7-work-live-session-zero-mcp",
-            mcp_empty == Some(true),
-            format!("servers_empty={mcp_empty:?} raw={mcp_live:?}")
+            mcp_empty == Some(true) || mcp_blocked,
+            format!(
+                "servers_empty={mcp_empty:?} broker_blocked={mcp_blocked} raw={mcp_live:?}"
+            )
+        );
+
+        // ⑥b 删除也走同一条 target-id + trusted-cwd 生产路径。仍故意传错
+        // UI folder；删除成功后从真实 Work cwd 重读 roster，目标必须消失。
+        let delete_result = crate::engine_ops::agent_session_delete(
+            app.state::<AgentState>(),
+            r.session_id.clone(),
+            workspace.clone(),
+        )
+        .await;
+        let deleted_from_true_roster = crate::agent::agent_list_sessions(r.cwd.clone())
+            .await
+            .map(|entries| !entries.iter().any(|entry| entry.session_id == r.session_id))
+            .unwrap_or(false);
+        check!(
+            "S7-work-delete-wrong-ui-cwd",
+            delete_result.is_ok() && deleted_from_true_roster,
+            format!(
+                "delete={delete_result:?} true_cwd={} ui_workspace={} absent={deleted_from_true_roster}",
+                r.cwd, workspace
+            )
         );
 
 

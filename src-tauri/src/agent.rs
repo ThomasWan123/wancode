@@ -207,6 +207,14 @@ pub struct AgentState {
 }
 
 impl AgentState {
+    /// The cwd owned by the live engine handle. UI folders are presentation
+    /// state (especially in Work) and must not select the session store.
+    pub(crate) async fn live_session_cwd(&self) -> Result<String, String> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().ok_or("会话未启动")?;
+        Ok(handle.cwd.to_string_lossy().into_owned())
+    }
+
     fn execution_ledger(&self, app: &AppHandle) -> Result<Arc<ExecutionLedger>, String> {
         self.execution_ledger
             .get_or_init(|| {
@@ -2932,6 +2940,61 @@ pub async fn agent_permission_respond(
 
 /// Call an `x.ai/*` ACP extension method against the live session and
 /// return the raw JSON response.
+fn bind_ext_session_params(method: &str, params: &mut serde_json::Value, session_id: &str) {
+    let Some(obj) = params.as_object_mut() else {
+        return;
+    };
+    // Target-session operations already carry the selected stored session in
+    // `sessionId`. Adding the live handle again as `session_id` makes the
+    // request ambiguous and can rename/delete the wrong identity (or report
+    // the selected session as missing).
+    if matches!(method, "x.ai/session/rename" | "x.ai/session/delete")
+        && obj.contains_key("sessionId")
+    {
+        return;
+    }
+    // 引擎里同级方法的命名并不统一：mcp/list 用 camelCase 的 sessionId，
+    // 而 mcp/toggle / toggle_tool / auth_trigger 用 snake_case 的
+    // session_id。两个都塞进去——没有 deny_unknown_fields，多余的键会被
+    // 忽略，但少一个就是静默的 missing field 失败。
+    //
+    // 例外：参数结构体上带 #[serde(alias)] 的方法，两个键会映射到同一
+    // 字段，serde 直接报 duplicate field。目前引擎里只有 rewind/*
+    // （snake 为主名）和 debug/*（camel 为主名）用 alias——这两族只塞一个。
+    let sid = serde_json::Value::String(session_id.to_string());
+    if method.starts_with("x.ai/rewind") {
+        obj.entry("session_id").or_insert(sid);
+    } else if method.starts_with("x.ai/debug") {
+        obj.entry("sessionId").or_insert(sid);
+    } else {
+        obj.entry("sessionId").or_insert(sid.clone());
+        obj.entry("session_id").or_insert(sid);
+    }
+}
+
+#[cfg(test)]
+mod ext_session_param_tests {
+    use super::bind_ext_session_params;
+
+    #[test]
+    fn target_session_methods_keep_only_the_explicit_selected_identity() {
+        for method in ["x.ai/session/rename", "x.ai/session/delete"] {
+            let mut params = serde_json::json!({ "sessionId": "stored-target" });
+            bind_ext_session_params(method, &mut params, "live-handle");
+            assert_eq!(params["sessionId"], "stored-target");
+            assert!(params.get("session_id").is_none());
+        }
+    }
+
+    #[test]
+    fn ordinary_extension_calls_still_receive_the_live_identity() {
+        let mut params = serde_json::json!({});
+        bind_ext_session_params("x.ai/session/search", &mut params, "live-handle");
+        assert_eq!(params["sessionId"], "live-handle");
+        assert_eq!(params["session_id"], "live-handle");
+    }
+}
+
 pub(crate) async fn ext_call(
     state: &State<'_, AgentState>,
     method: &str,
@@ -2942,25 +3005,7 @@ pub(crate) async fn ext_call(
         let h = guard.as_ref().ok_or("会话未启动")?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
-    if let Some(obj) = params.as_object_mut() {
-        // 引擎里同级方法的命名并不统一：mcp/list 用 camelCase 的 sessionId，
-        // 而 mcp/toggle / toggle_tool / auth_trigger 用 snake_case 的
-        // session_id。两个都塞进去——没有 deny_unknown_fields，多余的键会被
-        // 忽略，但少一个就是静默的 missing field 失败。
-        //
-        // 例外：参数结构体上带 #[serde(alias)] 的方法，两个键会映射到同一
-        // 字段，serde 直接报 duplicate field。目前引擎里只有 rewind/*
-        // （snake 为主名）和 debug/*（camel 为主名）用 alias——这两族只塞一个。
-        let sid = serde_json::Value::String(session_id.0.to_string());
-        if method.starts_with("x.ai/rewind") {
-            obj.entry("session_id").or_insert(sid);
-        } else if method.starts_with("x.ai/debug") {
-            obj.entry("sessionId").or_insert(sid);
-        } else {
-            obj.entry("sessionId").or_insert(sid.clone());
-            obj.entry("session_id").or_insert(sid);
-        }
-    }
+    bind_ext_session_params(method, &mut params, session_id.0.as_ref());
     // #83：git/*（worktree 除外）一律显式带 gitRoot。引擎在会话目录不是
     // 仓库时会静默回退到 workspace-hub 根——嵌入式场景那是本应用自己的
     // 仓库。客户端解析不出仓库就本地拒绝，绝不触发那个回退。
