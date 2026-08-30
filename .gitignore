@@ -29,3 +29,8 @@ blog-demo/
 
 # PDFium 原生二进制按 vendor/pdfium.lock 在构建期取回并校验（来源政策 2），不入库
 vendor/pdfium-runtime/
+
+# Updater manifests are generated into the release bundle and published as
+# GitHub Release assets. Root snapshots are stale by construction.
+/latest.json
+/latest-gh-proxy.json

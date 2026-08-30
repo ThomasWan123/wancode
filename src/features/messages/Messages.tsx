@@ -105,9 +105,16 @@ export function Messages(props: Record<string, any>) {
       : t.transcriptViewStandard;
   useEffect(() => {
     if (!viewMenuOpen) return;
+    const selectedItem = viewMenuRef.current?.querySelector<HTMLButtonElement>(
+      "[role='menuitemradio'][aria-checked='true']",
+    );
     const firstItem = viewMenuRef.current?.querySelector<HTMLButtonElement>("[role='menuitemradio']");
-    firstItem?.focus();
+    (selectedItem ?? firstItem)?.focus();
   }, [viewMenuOpen]);
+
+  useEffect(() => {
+    if (items.length === 0 && !busy) setViewMenuOpen(false);
+  }, [items.length, busy]);
 
   function handleViewMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const items = Array.from(
@@ -130,7 +137,7 @@ export function Messages(props: Record<string, any>) {
   }
   return (
     <>
-      <section className="messages" style={items.length === 0 && !busy ? { display: "none" } : undefined}>
+      <section className={`messages${items.length === 0 && !busy ? " messages-empty" : ""}`}>
         <div className="transcript-toolbar">
           <div className="transcript-view-wrap">
             <button

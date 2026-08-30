@@ -864,6 +864,15 @@ button.session-item {
   gap: 14px;
 }
 
+/* Keep transcript display preferences reachable before the first message.
+   Only the empty message list collapses; Home keeps the remaining space. */
+.messages.messages-empty {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: visible;
+  padding: 8px 10% 0;
+}
+
 .msg {
   max-width: 88%;
   padding: 2px 0;

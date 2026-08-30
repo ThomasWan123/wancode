@@ -237,6 +237,30 @@ describe("composer send / popup / @", () => {
     expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", placeholder);
   });
 
+  it.each([
+    ["chat", t.composerPlaceholderChat],
+    ["code", t.composerPlaceholderCode],
+    ["work", t.composerPlaceholderWork],
+  ])("uses the %s-specific task prompt before a session exists", (surface, placeholder) => {
+    renderComposer({ modelBlock: null, surface, sessionId: "", starting: false });
+
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", placeholder);
+  });
+
+  it("keeps busy and starting hints above surface-specific prompts", () => {
+    const { rerender, props } = renderComposer({
+      modelBlock: null,
+      surface: "work",
+      sessionId: "",
+      busy: true,
+      starting: true,
+    });
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", t.queueHint);
+
+    rerender(<Composer {...props} busy={false} starting />);
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", t.starting);
+  });
+
   it("Enter with an empty popup still sends", async () => {
     const user = userEvent.setup();
     const send = vi.fn();
