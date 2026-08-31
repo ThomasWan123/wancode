@@ -1280,6 +1280,7 @@ function App() {
   const replayCapRef = useRef<number | null>(null);
   const replaySuppressRef = useRef(false);
   const execIdsRef = useRef<Set<string>>(new Set());
+  const primaryTurnGenerationRef = useRef(0);
   const rosterGuardRef = useRef(createRefreshGuard());
 
   async function refreshSessions(ws: string) {
@@ -1300,6 +1301,7 @@ function App() {
   }
 
   function clearActiveSession() {
+    primaryTurnGenerationRef.current += 1;
     if (surfaceRef.current === "work") {
       // Keep the durable document workspace, but never restore a session that
       // the user just deleted.
@@ -1670,12 +1672,8 @@ function App() {
     );
 
     unsubs.push(
-      listen<any>("agent://turn-end", (e) => {
-        setBusy(false);
+      listen<any>("agent://turn-end", () => {
         refreshTasks();
-        if (e.payload && e.payload.ok === false) {
-          setError(String(e.payload.error ?? "Unknown error"));
-        }
         refreshCtx();
       }),
     );
@@ -1734,12 +1732,13 @@ function App() {
     setError("");
     const preserve = preserveTranscriptRef.current;
     preserveTranscriptRef.current = false;
+    // Every session open invalidates completion callbacks owned by the prior
+    // engine handle. Transcript preservation does not preserve turn ownership.
+    primaryTurnGenerationRef.current += 1;
+    setBusy(false);
     if (preserve) {
       replaySuppressRef.current = true;
     } else {
-      // Busy belongs to the old session. A new/resumed identity must never
-      // inherit an interjection-only composer from the previous surface.
-      setBusy(false);
       setItems([]);
       setSessionId("");
       sessionIdRef.current = "";
@@ -2192,7 +2191,11 @@ function App() {
     replayCapRef.current = null;
     replaySuppressRef.current = false;
     const queueing = busy;
+    let primaryGeneration: number | null = null;
     if (!queueing) {
+      const generation = primaryTurnGenerationRef.current + 1;
+      primaryTurnGenerationRef.current = generation;
+      primaryGeneration = generation;
       setOpenThoughts(new Set()); // 新回合：收起上一轮展开过的思考
       lastSentRef.current = t;
       setPlanSteps([]);
@@ -2211,6 +2214,7 @@ function App() {
     } else {
       observePrimaryTurn(
         request,
+        () => primaryTurnGenerationRef.current === primaryGeneration,
         (e) => setError(String(e)),
         () => setBusy(false),
       );
