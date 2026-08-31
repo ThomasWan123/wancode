@@ -186,6 +186,14 @@ body {
   box-shadow: 0 0 0 1px var(--border);
 }
 
+/* WebView2 can preserve the native button palette across a runtime theme
+   change.  Pin the selected states to the dark tokens with higher specificity
+   so they cannot fall back to the global white primary-button style. */
+:root:not([data-theme="light"]) .surface-switch button.active {
+  background: #303030;
+  color: #ececec;
+}
+
 .topbar input,
 .topbar select {
   background: var(--bg2);
@@ -712,6 +720,12 @@ button.session-item {
 .session-item.active {
   background: var(--bg3);
   border-color: var(--border);
+}
+
+:root:not([data-theme="light"]) button.session-item.active,
+:root:not([data-theme="light"]) .session-item.active {
+  background: #303030;
+  color: #ececec;
 }
 
 .session-row {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   engineCannotShareSessionAcrossSurfaces,
+  autoStartOwnsSurface,
   restoreSurfaceSession,
   snapshotSurfaceSession,
+  uncachedSwitchStartsImmediately,
   type SurfaceSessionCache,
 } from "./surfaceSession";
 
@@ -41,5 +43,17 @@ describe("surface session cache", () => {
       workWorkspaceId: "",
     });
     expect(restoreSurfaceSession(cache, "code")).toBeNull();
+  });
+
+  it("keeps Work on its single persisted-resume owner", () => {
+    expect(autoStartOwnsSurface("chat")).toBe(true);
+    expect(autoStartOwnsSurface("code")).toBe(true);
+    expect(autoStartOwnsSurface("work")).toBe(false);
+  });
+
+  it("replaces the live handle immediately for uncached Chat and Code switches", () => {
+    expect(uncachedSwitchStartsImmediately("chat")).toBe(true);
+    expect(uncachedSwitchStartsImmediately("code")).toBe(true);
+    expect(uncachedSwitchStartsImmediately("work")).toBe(false);
   });
 });

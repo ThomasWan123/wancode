@@ -55,6 +55,7 @@ import {
 } from "./icons";
 import "./App.css";
 import { createLatestStartCoordinator } from "./startCoordinator";
+import { observePrimaryTurn } from "./turnLifecycle";
 import { createSessionLifecycle } from "./sessionLifecycle";
 import {
   forgetWorkSession,
@@ -72,9 +73,11 @@ import {
   type TranscriptView,
 } from "./transcriptView";
 import {
+  autoStartOwnsSurface,
   restoreSurfaceSession,
   snapshotSurfaceSession,
   type SurfaceSessionCache,
+  uncachedSwitchStartsImmediately,
 } from "./surfaceSession";
 
 type SessionEntry = {
@@ -560,7 +563,9 @@ function App() {
         }
         if (ws) setWorkspace(ws);
       }
-      if (ws) startSession(undefined, ws);
+      // Work has a persisted workspace/session resume effect below. Starting it
+      // here as well creates a second, serial 15-second fallback chain.
+      if (ws && autoStartOwnsSurface(surfaceRef.current)) startSession(undefined, ws);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1303,6 +1308,8 @@ function App() {
     setSessionId("");
     sessionIdRef.current = "";
     sessionRuntimeCwdRef.current = "";
+    setBusy(false);
+    setStarting(false);
     setItems([]);
     setModelBlock(null);
   }
@@ -1730,6 +1737,9 @@ function App() {
     if (preserve) {
       replaySuppressRef.current = true;
     } else {
+      // Busy belongs to the old session. A new/resumed identity must never
+      // inherit an interjection-only composer from the previous surface.
+      setBusy(false);
       setItems([]);
       setSessionId("");
       sessionIdRef.current = "";
@@ -1742,6 +1752,11 @@ function App() {
       setGitInfo(null);
       setWbFiles(null);
       setReviewResult(null);
+      setBgTasks([]);
+      setSubagents([]);
+      setWorktrees([]);
+      setSchedTasks({});
+      setMcpLive([]);
     }
     gitViewEpochRef.current += 1;
     try {
@@ -2187,13 +2202,19 @@ function App() {
     }
     // 新发的 prompt 立刻进历史（引擎那份是启动时快照）
     if (t) historyRef.current = [t, ...historyRef.current.filter((h) => h !== t)];
-    invoke("agent_prompt", {
+    const request = invoke("agent_prompt", {
       text: t,
       images: imgs.length ? imgs.map((i) => ({ data: i.data, mime: i.mime })) : null,
-    }).catch((e) => {
-      setError(String(e));
-      if (!queueing) setBusy(false);
     });
+    if (queueing) {
+      request.catch((e) => setError(String(e)));
+    } else {
+      observePrimaryTurn(
+        request,
+        (e) => setError(String(e)),
+        () => setBusy(false),
+      );
+    }
   }
 
   async function send() {
@@ -2566,6 +2587,7 @@ function App() {
                     },
                   );
                   const cached = restoreSurfaceSession(surfaceCacheRef.current, next);
+                  surfaceRef.current = next;
                   setSurface(next);
                   localStorage.setItem("wancode-surface", next);
                   if (cached?.sessionId) {
@@ -2586,9 +2608,16 @@ function App() {
                     setShowGit(false);
                     setShowTerminal(false);
                     setSidebarTab("sessions");
+                    if (uncachedSwitchStartsImmediately(next)) {
+                      void startSession(
+                        undefined,
+                        next === "code" ? workspace || undefined : undefined,
+                      );
+                    }
                   }
                   return;
                 }
+                surfaceRef.current = next;
                 setSurface(next);
                 localStorage.setItem("wancode-surface", next);
               }}
