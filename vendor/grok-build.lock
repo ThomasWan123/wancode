@@ -27,7 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=9e9adb62d3251c5cdafbbfe4dcc17ea83b411910
-migration_audit_mode=version-only
+migration_audit_mode=security-upgrade-delta
 declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
@@ -48,8 +48,8 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=d4bcd4c6e88fa85a3051a825eb3082d04f547e644813d634523f772e06606cf8
-effective_tree_sha256=e58c5690bc83a63b93dfd7d364bed88bc5aa0b7ecfca0f322ecf569305986b83
+cargo_lock_sha256=13d667db3047a5b759ed19ef2cf9e4b46e808d9fb76c69a39efe83ff653f0ebb
+effective_tree_sha256=af1a80124bd286fd35b3402a6a069807a4c96031dddede62d643eea238787aea
 
 # 【harness-kernel delta · v0.21 W3】真实工具执行调度
 #   引擎 commit 变、Cargo.lock/接线/紧急补丁均不变；差异仅为
@@ -77,10 +77,10 @@ effective_tree_sha256=e58c5690bc83a63b93dfd7d364bed88bc5aa0b7ecfca0f322ecf569305
 #   pdf_oxide 0.3.74 顺带把 quick-xml 0.39.4 挤出了 Windows 解析。
 #   quick-xml 升 0.41 是**破坏性 API 变更**（GeneralRef 事件拆分、
 #   BytesText::unescape 移除），产品侧适配与回归见 src-tauri/src/work_docx.rs ⑥。
-declared_security_upgrades=crossbeam-epoch 0.9.18->0.9.20 RUSTSEC-2026-0204,h2 0.4.15->0.4.17 RUSTSEC-2026-0258,webbrowser 1.0.6->1.2.4 RUSTSEC-2026-0257,quick-xml 0.37.5->0.41.0 RUSTSEC-2026-0194+RUSTSEC-2026-0195,plist 1.8.0->1.10.0 collateral,pdf_oxide 0.3.46->0.3.74 collateral,taffy 0.10.1->0.12.2 collateral
+declared_security_upgrades=rtrb 0.3.2->0.3.5 RUSTSEC-2026-0274
 #
 # declared_upgrade_additions：上述升级带进来的新 package（含既有包名多出的新
 #   版本）。S7 另行强制：不得新增 *-sys **包名**（既有 -sys 包多一个版本不算，
 #   jni-sys 0.4.1 就是这种情况——webbrowser 1.2.4 的 Android 目标链，
 #   不进 Windows 二进制）。
-declared_upgrade_additions=atoi_simd 0.18.1,debug_unsafe 0.1.4,fast-float2 0.2.4,hayro-jpeg2000 0.4.0,jni 0.22.4,jni-macros 0.22.4,jni-sys 0.4.1,jni-sys-macros 0.4.1,office_oxide 0.1.8,phf 0.14.0,phf_generator 0.14.0,phf_macros 0.14.0,phf_shared 0.14.0,simd_cesu8 1.2.0,typed-path 0.12.3,weezl 0.2.1,zip 8.6.0
+declared_upgrade_additions=
