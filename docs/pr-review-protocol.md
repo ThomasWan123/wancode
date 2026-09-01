@@ -15,12 +15,36 @@ write directly. The user steps back from bus to arbiter.
 
 | Actor | Role | Writes |
 |---|---|---|
-| **CC** (Claude Code) | Implementer. Opens Draft PRs, responds to findings, pushes fixes. | Branches, commits, PR body, comments prefixed `[cc]` |
-| **Codex** | Reviewer. Reviews every Draft PR labeled `needs-codex-review`. | PR review comments prefixed `[codex]` |
+**Current default (set by the user on 2026-09-01): Codex implements, CC reviews.**
+This reverses the original assignment; the rules below are role-based and apply
+unchanged either way.
+
+| Actor | Role (current default) | Writes |
+|---|---|---|
+| **Codex** | Implementer. Opens Draft PRs, responds to findings, pushes fixes. | Branches, commits, PR body, comments prefixed `[codex]` |
+| **CC** (Claude Code) | Reviewer. Reviews every Draft PR labeled `needs-codex-review`. | PR review comments prefixed `[cc]` |
 | **User** | Arbiter. Intervenes only at the authorization points below. | Merge/release approvals, deadlock rulings |
 
-Roles may swap per-PR (Codex implements, CC reviews) — the opening comment states
-who holds which role for that PR. The same rules apply either way.
+**The comment prefix always identifies the actor, never the role.** Both agents
+post through the same GitHub account, so the prefix is the *only* way a later
+reader can tell who wrote a line. `[cc]` is always Claude Code and `[codex]` is
+always Codex, whichever seat they hold. A review round therefore opens with
+`<actor-prefix> Reviewed head: <sha>` — under the current default that is
+`[cc] Reviewed head: <sha>`.
+
+**The four label names are historical.** `needs-codex-review` / `codex-accepted` /
+`codex-blocked` denote the **reviewer seat**, not Codex specifically. They were
+left unrenamed on purpose: no automation reads them (verified — no reference in
+`.github/` or `scripts/`), and renaming would rewrite the meaning of every past
+PR's label history for no functional gain.
+
+Roles may still swap per-PR — the opening comment states who holds which role
+for that PR when it differs from the default above.
+
+**A merge executor cannot be that change's reviewer.** Whoever pushed the merge
+button has a stake in the outcome; an independent verdict must come from the
+other agent. This is not about which seat is assigned — it is about not being
+both the actor and the auditor of the same act.
 
 Both agents operate through the same GitHub account, so GitHub's formal
 Approve/Request-changes cannot distinguish them and self-approval is blocked.
@@ -30,11 +54,15 @@ which are authoritative under this protocol.
 ## Flow
 
 1. **Implementer** opens a **Draft PR** using the PR template (evidence table
-   mandatory), adds label `needs-codex-review`, and posts `[cc] READY FOR REVIEW`
-   when CI is green (or explains why review should start before green).
+   mandatory), adds label `needs-codex-review`, and posts
+   `<implementer-prefix> READY FOR REVIEW` when CI is green (or explains why
+   review should start before green). Under the current default that is
+   `[codex] READY FOR REVIEW`.
 2. **Reviewer** posts one complete review comment per round:
-   - First line is exactly `[codex] Reviewed head: <sha>` — role prefix, then
-     the reviewed head SHA. The verdict binds to that SHA and to nothing else.
+   - First line is exactly `<reviewer-prefix> Reviewed head: <sha>` — the
+     **actor's** prefix, then the reviewed head SHA. Under the current default
+     that is `[cc] Reviewed head: <sha>`. The verdict binds to that SHA and to
+     nothing else.
    - Findings numbered and severity-tagged **P0 / P1 / P2**.
    - Each finding names file/line or test, states the failure scenario, and where
      possible how to verify.
@@ -52,10 +80,11 @@ which are authoritative under this protocol.
    (verify-then-agree — never adopt a finding unchecked; both agents have been
    wrong). Replies per-finding: `confirmed + fix` / `refuted + evidence` /
    `needs-user`. Pushes fixes, updates the evidence table, re-posts
-   `[cc] READY FOR REVIEW`.
+   `<implementer-prefix> READY FOR REVIEW`.
 4. Repeat. On `VERDICT: ACCEPT`, reviewer swaps the label to `codex-accepted`;
-   implementer flips the PR to Ready and posts `[cc] REQUESTING MERGE AUTHORIZATION`
-   with the final evidence summary and the accepted head SHA.
+   implementer flips the PR to Ready and posts
+   `<implementer-prefix> REQUESTING MERGE AUTHORIZATION` with the final evidence
+   summary and the accepted head SHA.
 5. **User** authorizes merge (a PR comment `批准合并` / `approve merge`, or via
    chat). Implementer merges (squash by default), deletes the branch.
 
