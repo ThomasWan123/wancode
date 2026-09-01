@@ -1162,9 +1162,21 @@ async fn start_inner_with_intent_and_workspace(
             .as_object()
             .cloned(),
         );
-    let init_resp: acp::InitializeResponse = acp_send(init_req, &acp_tx)
-        .await
-        .map_err(|e| anyhow!("ACP initialize 失败: {e}"))?;
+    let init_resp: acp::InitializeResponse =
+        match bounded_acp_request(acp_send(init_req, &acp_tx), SESSION_HANDSHAKE_TIMEOUT).await {
+            BoundedAcpOutcome::Completed(resp) => resp,
+            BoundedAcpOutcome::Failed(error) => {
+                cancel.cancel();
+                return Err(anyhow!("ACP initialize 失败: {error}"));
+            }
+            BoundedAcpOutcome::TimedOut => {
+                cancel.cancel();
+                return Err(anyhow!(
+                    "SESSION_HANDSHAKE_TIMEOUT: ACP initialize 在 {} 秒内未完成，请重试",
+                    SESSION_HANDSHAKE_TIMEOUT.as_secs()
+                ));
+            }
+        };
 
     // ── Authenticate (non-interactive methods only) ─────────────────
     let method_id = init_resp
@@ -1173,13 +1185,25 @@ async fn start_inner_with_intent_and_workspace(
         .find(|m| !AuthMethodKind::from_id(m.id()).needs_interactive_login())
         .map(|m| m.id().clone())
         .context("没有可用的非交互认证方式（请在 ~/.grok/config.toml 配置模型 API Key）")?;
-    let _: acp::AuthenticateResponse = acp_send(
+    let auth_request = acp_send(
         acp::AuthenticateRequest::new(method_id)
             .meta(serde_json::json!({"headless": true}).as_object().cloned()),
         &acp_tx,
-    )
-    .await
-    .map_err(|e| anyhow!("认证失败: {e}"))?;
+    );
+    match bounded_acp_request(auth_request, SESSION_HANDSHAKE_TIMEOUT).await {
+        BoundedAcpOutcome::Completed(_response) => {}
+        BoundedAcpOutcome::Failed(error) => {
+            cancel.cancel();
+            return Err(anyhow!("认证失败: {error}"));
+        }
+        BoundedAcpOutcome::TimedOut => {
+            cancel.cancel();
+            return Err(anyhow!(
+                "SESSION_HANDSHAKE_TIMEOUT: 认证在 {} 秒内未完成，请重试",
+                SESSION_HANDSHAKE_TIMEOUT.as_secs()
+            ));
+        }
+    }
 
     // ── Event pump: ACP notifications → Tauri events ───────────────
     // Must start BEFORE the session opens: resuming a session replays
@@ -2977,10 +3001,10 @@ fn bind_ext_session_params(method: &str, params: &mut serde_json::Value, session
     // 忽略，但少一个就是静默的 missing field 失败。
     //
     // 例外：参数结构体上带 #[serde(alias)] 的方法，两个键会映射到同一
-    // 字段，serde 直接报 duplicate field。目前引擎里只有 rewind/*
-    // （snake 为主名）和 debug/*（camel 为主名）用 alias——这两族只塞一个。
+    // 字段，serde 直接报 duplicate field。目前 rewind/* 与 compact
+    // 使用 snake 主名，debug/* 使用 camel 主名——这些方法只塞一个。
     let sid = serde_json::Value::String(session_id.to_string());
-    if method.starts_with("x.ai/rewind") {
+    if method.starts_with("x.ai/rewind") || method == "x.ai/compact_conversation" {
         obj.entry("session_id").or_insert(sid);
     } else if method.starts_with("x.ai/debug") {
         obj.entry("sessionId").or_insert(sid);
@@ -2994,6 +3018,7 @@ fn bind_ext_session_params(method: &str, params: &mut serde_json::Value, session
 /// its session and then fail to deliver the final response. Never let that
 /// leave the desktop permanently disabled behind `Starting...`.
 const SESSION_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const SESSION_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
 enum BoundedAcpOutcome<T> {
@@ -3068,6 +3093,14 @@ mod ext_session_param_tests {
             assert_eq!(params["sessionId"], "stored-target");
             assert!(params.get("session_id").is_none());
         }
+    }
+
+    #[test]
+    fn compact_uses_one_canonical_session_field() {
+        let mut params = serde_json::json!({ "userContext": null });
+        bind_ext_session_params("x.ai/compact_conversation", &mut params, "live-handle");
+        assert_eq!(params["session_id"], "live-handle");
+        assert!(params.get("sessionId").is_none());
     }
 
     #[test]

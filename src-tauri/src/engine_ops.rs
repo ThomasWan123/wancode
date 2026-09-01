@@ -9,6 +9,10 @@ use xai_acp_lib::acp_send;
 
 use crate::agent::{ext_call, ext_notify, ext_ok, AgentState};
 
+fn session_fork_workspace(live_cwd: &std::path::Path, _display_workspace: &str) -> PathBuf {
+    live_cwd.to_path_buf()
+}
+
 // ── P2.3 MCP 配置引擎化 ────────────────────────────────────────────
 // upsert/delete 的字段是 snake_case（server_name）；config 由引擎侧
 // McpServerConfig flatten，直接把表单对象平铺进 params。
@@ -469,14 +473,19 @@ pub async fn session_fork(
     workspace: String,
     target_prompt_index: Option<usize>,
 ) -> Result<String, String> {
-    let source = {
+    let (source, live_cwd) = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+        let handle = guard.as_ref().ok_or("会话未启动")?;
+        (handle.session_id.0.to_string(), handle.cwd.clone())
     };
+    // The visible Work folder and Chat's last Code folder are presentation
+    // state, not the engine session store. Fork must operate beside the live
+    // session or the engine looks for history under a path that never owned it.
+    let fork_cwd = session_fork_workspace(&live_cwd, &workspace);
     let mut params = serde_json::json!({
         "sourceSessionId": source,
-        "sourceCwd": workspace,
-        "newCwd": workspace,
+        "sourceCwd": fork_cwd,
+        "newCwd": fork_cwd,
     });
     if let Some(i) = target_prompt_index {
         params["targetPromptIndex"] = serde_json::json!(i);
@@ -788,6 +797,18 @@ pub async fn list_workspace_files(workspace: String) -> Result<Vec<String>, Stri
 /// Full-text search over stored sessions (`x.ai/session/search`).
 fn trusted_session_cwd(live_cwd: String, _ui_workspace: String) -> String {
     live_cwd
+}
+
+#[cfg(test)]
+mod session_fork_tests {
+    use super::session_fork_workspace;
+
+    #[test]
+    fn fork_uses_live_session_cwd_not_the_display_folder() {
+        let live = std::path::Path::new(r"C:\Users\test\.grok\chat-runtime");
+        let selected = session_fork_workspace(live, r"D:\Project-Orion");
+        assert_eq!(selected, live);
+    }
 }
 
 #[cfg(test)]

@@ -36,3 +36,15 @@ export function restoreSurfaceSession(
 export function engineCannotShareSessionAcrossSurfaces(): true {
   return true;
 }
+
+/** Work owns a persisted workspace-resume flow in App's surface effect. */
+export function autoStartOwnsSurface(surface: SurfaceKind): boolean {
+  return surface !== "work";
+}
+
+/** Chat and Code have no separate resume effect, so an uncached switch must
+ * immediately replace the backend handle instead of leaving the old surface's
+ * lease active behind an empty UI. */
+export function uncachedSwitchStartsImmediately(surface: SurfaceKind): boolean {
+  return surface === "chat" || surface === "code";
+}
