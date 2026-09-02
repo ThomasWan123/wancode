@@ -12,6 +12,10 @@ before opening or reviewing any PR. Summary:
   not Codex specifically.
 - Whoever executes a merge cannot be that change's reviewer — an independent
   verdict must come from the other agent.
+- **`AGENTS.md` and `CLAUDE.md` are mirrors and must be edited together.** Codex
+  reads `AGENTS.md`; Claude Code reads `CLAUDE.md`. Updating only one leaves the
+  two agents acting on contradictory instructions — this exact drift produced a
+  P1 on the very PR that introduced the role swap.
 - Review rounds open with exactly `<reviewer-prefix> Reviewed head: <sha>`
   (currently `[cc] Reviewed head: <sha>`); the verdict
   binds to that SHA. Final `VERDICT: ACCEPT` requires all required checks green
