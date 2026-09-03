@@ -23,6 +23,10 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      # 两个 agent 读取不同入口；只改一个会让实现方与审核方依据相反规则行事。
+      # 脚本同时跑 CRLF/LF 正对照与正文漂移负对照，先证明门能真失败。
+      - name: Agent 指令镜像门（全文，换行归一）
+        run: node scripts/test-agent-instruction-mirrors.mjs
       - run: npm ci
       - run: npx tsc --noEmit
       # 阻塞载荷的解析必须 fail-closed：读不懂 ≠ 没有阻塞。
