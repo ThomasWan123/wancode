@@ -3,6 +3,8 @@ import {
   decideBackendSurface,
   parseSurface,
   resolveActiveSurface,
+  runWorkspaceReadIfAllowed,
+  surfaceCanReadWorkspace,
   surfaceLabel,
   surfaceNeedsWorkspace,
   surfaceSwitchRequiresNewSession,
@@ -40,6 +42,31 @@ describe("surface navigation contract", () => {
     expect(surfaceNeedsWorkspace("work")).toBe(true);
     expect(surfaceNeedsWorkspace("chat")).toBe(false);
     expect(surfaceNeedsWorkspace("code")).toBe(false);
+  });
+
+  // read 类能力镜像(agent.rs surface_visible_tools):Chat 零文件面没有
+  // read;Code 全量;Work 只读。git/worktree 等 read 类宿主扩展据此决定
+  // 是否发起调用——Chat 层发起必被 CAPABILITY_EXTENSION_BLOCKED 拒绝。
+  it("read-capability mirror: Chat has no read, Code/Work do", () => {
+    expect(surfaceCanReadWorkspace("chat")).toBe(false);
+    expect(surfaceCanReadWorkspace("code")).toBe(true);
+    expect(surfaceCanReadWorkspace("work")).toBe(true);
+  });
+
+  it("does not invoke read extensions in Chat and still invokes them in Code/Work", async () => {
+    const calls: string[] = [];
+    const invokeRead = async (surface: "chat" | "code" | "work") =>
+      runWorkspaceReadIfAllowed(surface, async () => {
+        calls.push("worktree_list");
+        return { worktrees: [] };
+      });
+
+    expect(await invokeRead("chat")).toEqual({ invoked: false });
+    expect(calls).toEqual([]);
+
+    expect(await invokeRead("code")).toEqual({ invoked: true, value: { worktrees: [] } });
+    expect(await invokeRead("work")).toEqual({ invoked: true, value: { worktrees: [] } });
+    expect(calls).toEqual(["worktree_list", "worktree_list"]);
   });
 
   // 激活门(W2-fe-a R1 引入,W2-fe-b 起 Work 已接线放行)。门的形状随

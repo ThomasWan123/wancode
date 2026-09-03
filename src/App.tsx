@@ -43,12 +43,14 @@ import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   decideBackendSurface,
   resolveActiveSurface,
+  runWorkspaceReadIfAllowed,
+  surfaceCanReadWorkspace,
   surfaceLabel,
   surfaceSwitchRequiresNewSession,
   type SurfaceKind,
 } from "./surface";
 import { detectComposerPopup, popupIsVisible, type ComposerPopup } from "./features/composer/composerPopup";
-import { isNotGitRepoError } from "./features/git/gitStatus";
+import { isCapabilityDeniedError, isNotGitRepoError } from "./features/git/gitStatus";
 import {
   IconSettings, IconSun, IconMoon, IconRewind, IconGitBranch,
   IconTerminal, IconFile, IconFolderClosed, IconColumns,
@@ -889,13 +891,23 @@ function App() {
     }
     const epoch = gitViewEpochRef.current;
     try {
-      const r = await invoke<any>("git_status_ext");
+      const attempt = await runWorkspaceReadIfAllowed(
+        surfaceRef.current,
+        () => invoke<any>("git_status_ext"),
+      );
+      if (!attempt.invoked) return;
+      const r = attempt.value;
       if (epoch !== gitViewEpochRef.current) return;
       // 引擎统一包成 { result: T | null, error? }。失败时 result 为 null ——
       // 必须区分"引擎报错"和"这不是 git 仓库"，否则会把故障伪装成正常状态。
       if (r?.error) {
         if (isNotGitRepoError(r.error)) {
           setGitInfo({ isRepo: false });
+          return;
+        }
+        if (isCapabilityDeniedError(r.error)) {
+          setGitInfo(null);
+          setError(t.wtNeedsCodeSurface);
           return;
         }
         setGitInfo(null);
@@ -940,7 +952,7 @@ function App() {
         return;
       }
       setGitInfo(null);
-      setError(t.gitReadFailed);
+      setError(isCapabilityDeniedError(e) ? t.wtNeedsCodeSurface : t.gitReadFailed);
     }
   }
 
@@ -1042,7 +1054,12 @@ function App() {
     const epoch = gitViewEpochRef.current;
     setWbLoading(true);
     try {
-      const r = await invoke<any>("git_diffs", { paths: null, includePatch: true });
+      const attempt = await runWorkspaceReadIfAllowed(
+        surfaceRef.current,
+        () => invoke<any>("git_diffs", { paths: null, includePatch: true }),
+      );
+      if (!attempt.invoked) return;
+      const r = attempt.value;
       if (epoch !== gitViewEpochRef.current) return;
       if (r?.error) {
         setWbFiles(null);
@@ -1050,7 +1067,7 @@ function App() {
           setGitInfo((prev: any) => prev?.isRepo === true ? prev : { isRepo: false });
           return;
         }
-        setError(t.gitReadFailed);
+        setError(isCapabilityDeniedError(r.error) ? t.wtNeedsCodeSurface : t.gitReadFailed);
         return;
       }
       const env = r?.result ?? r;
@@ -1068,7 +1085,7 @@ function App() {
         setGitInfo((prev: any) => prev?.isRepo === true ? prev : { isRepo: false });
         return;
       }
-      setError(t.gitReadFailed);
+      setError(isCapabilityDeniedError(e) ? t.wtNeedsCodeSurface : t.gitReadFailed);
     } finally {
       if (epoch === gitViewEpochRef.current) setWbLoading(false);
     }
@@ -1582,6 +1599,7 @@ function App() {
         }
         // P2.10 通知监听：能力对应的刷新函数已存在，直接挂接
         if (m === "x.ai/git_head_changed" || m === "x.ai/gitHeadChanged") {
+          if (!surfaceCanReadWorkspace(surfaceRef.current)) return;
           refreshGit();
           if (showWorkbenchRef.current) refreshWorkbench();
           return;
@@ -1987,8 +2005,18 @@ function App() {
   // ── worktree 并行 Agent ────────────────────────────────────────
   async function refreshWorktrees() {
     if (!sessionIdRef.current) return;
+    // Chat 层租约没有 read 类能力(零文件面,见 surfaceCanReadWorkspace)——
+    // git/worktree 扩展会被 CAPABILITY_EXTENSION_BLOCKED 拒绝。Git/任务
+    // 面板在这些层本就不渲染,但命令面板与 agent://ext 事件仍会触发本
+    // 函数;直接不发起调用,而不是把策略拒绝当红色错误甩给用户。
+    // 用 surfaceRef 而非闭包里的 surface:事件回调持的是挂载期闭包。
     try {
-      const r = await invoke<any>("worktree_list");
+      const attempt = await runWorkspaceReadIfAllowed(
+        surfaceRef.current,
+        () => invoke<any>("worktree_list"),
+      );
+      if (!attempt.invoked) return;
+      const r = attempt.value;
       const arr = Array.isArray(r) ? r : (r?.worktrees ?? r?.data ?? []);
       setWorktrees(
         (Array.isArray(arr) ? arr : [])
@@ -2000,7 +2028,9 @@ function App() {
           .filter((w: any) => w.path),
       );
     } catch (e) {
-      setError(`worktree: ${String(e)}`);
+      // 纵深防御:若仍被能力租约拒绝(如层恢复后的租约错位),给出可行动
+      // 的指引而不是裸抛引擎错误码。
+      setError(isCapabilityDeniedError(e) ? t.wtNeedsCodeSurface : `worktree: ${String(e)}`);
     }
   }
 
@@ -2535,7 +2565,10 @@ function App() {
     {
       id: "tasks",
       label: t.tasksTitle,
-      disabled: !sessionId,
+      // 任务中心(含 worktree 区)只在 Code 层渲染,与其余 git/terminal/
+      // workbench 入口同一把门:Chat/Work 层禁用,避免在无 read/execute
+      // 租约的会话上触发引擎扩展被策略拒绝。
+      disabled: surface !== "code" || !sessionId,
       run: () => {
         refreshTasks();
         setShowTasks(true);
