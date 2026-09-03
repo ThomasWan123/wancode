@@ -13,8 +13,6 @@ write directly. The user steps back from bus to arbiter.
 
 ## Roles
 
-| Actor | Role | Writes |
-|---|---|---|
 **Current default (set by the user on 2026-09-01): Codex implements, CC reviews.**
 This reverses the original assignment; the rules below are role-based and apply
 unchanged either way.
