@@ -15,6 +15,22 @@ export type ModelOption = {
 /** C2：强度菜单的一项（引擎 sessionConfig 的 mode 条目 / catalog 条目）。 */
 export type EffortChoice = { id: string; value: string; label: string };
 
+/**
+ * Cold-start compatibility default for installations whose config predates
+ * newer presets. This id must remain resolvable without forcing an existing
+ * user to rerun quick setup; new presets are selected after the catalog loads.
+ */
+export const SAFE_INITIAL_MODEL_ID = "glm-5.2";
+
+/** Model picker fallback used only when both live model sources are absent. */
+export const FALLBACK_MODEL_IDS = [
+  "glm-5.2",
+  "glm-5-turbo",
+  "glm-4-flash",
+  "deepseek-chat",
+  "deepseek-reasoner",
+] as const;
+
 /** Tauri 侧是 snake_case（serde 默认），边界处收窄并统一命名。 */
 export function parseModelOptions(raw: unknown): ModelOption[] {
   if (!Array.isArray(raw)) return [];

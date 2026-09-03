@@ -165,12 +165,16 @@ pub(crate) async fn provider_quick_setup_impl(
         // 会 401，反之亦然。这正是小白最容易配错的地方，所以分成两张卡。
         "glm-coding" => (
             "https://open.bigmodel.cn/api/coding/paas/v4",
-            vec![("glm-coding", "GLM Coding Plan", "glm-5.2")],
+            // GLM-5.3 已全量上线 Coding Plan（2026-08-14，官方发布说明）；
+            // 5.3 强制思考（thinking 仅 enabled），本应用 chat_completions
+            // 通道只发 reasoning_effort（low/high/max 官方支持），不发
+            // thinking.type=disabled——预设有害组合不存在。
+            vec![("glm-coding", "GLM Coding Plan", "glm-5.3")],
         ),
         "glm-open" => (
             "https://open.bigmodel.cn/api/paas/v4",
             vec![
-                ("glm", "智谱 GLM-5.2", "glm-5.2"),
+                ("glm", "智谱 GLM-5.3", "glm-5.3"),
                 ("glm-air", "智谱 GLM-5-Air", "glm-5-air"),
             ],
         ),

@@ -4,11 +4,21 @@ import { describe, expect, it } from "vitest";
 import {
   effortStateForModel,
   effortIdForValue,
+  FALLBACK_MODEL_IDS,
   LEGACY_EFFORTS,
   parseCurrentEffort,
   parseEffortChoices,
   parseModelOptions,
+  SAFE_INITIAL_MODEL_ID,
 } from "./modelOption";
+
+describe("model bootstrap compatibility", () => {
+  it("keeps the cold-start default and degraded picker on legacy-safe ids", () => {
+    expect(SAFE_INITIAL_MODEL_ID).toBe("glm-5.2");
+    expect(FALLBACK_MODEL_IDS).toContain("glm-4-flash");
+    expect(FALLBACK_MODEL_IDS).not.toContain("glm-5.3");
+  });
+});
 
 describe("parseModelOptions", () => {
   it("接受 Tauri 侧真实的 snake_case 形状", () => {
