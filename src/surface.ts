@@ -44,6 +44,34 @@ export function surfaceNeedsWorkspace(kind: SurfaceKind): boolean {
   return kind === "work";
 }
 
+/** 该层的会话租约是否含 read 类能力。对齐后端 agent.rs 的
+ *  surface_visible_tools:Chat 层「零文件面」只有 search/think/fetch,
+ *  没有 read;Code 全量,Work 只读。宿主发起的 read 类扩展调用
+ *  (x.ai/git/status、x.ai/git/worktree/list 等)在无 read 的层上会被
+ *  能力租约拒绝(CAPABILITY_EXTENSION_BLOCKED)——前端应据此在这些层上
+ *  不发起调用,而不是把策略拒绝当错误甩给用户。 */
+export function surfaceCanReadWorkspace(kind: SurfaceKind): boolean {
+  return kind === "code" || kind === "work";
+}
+
+export type WorkspaceReadAttempt<T> =
+  | { invoked: false }
+  | { invoked: true; value: T };
+
+/**
+ * Run one host-side read-class extension only when the active surface lease
+ * permits workspace reads. Keeping the invocation inside this helper makes
+ * the zero-call property testable; a boolean mirror alone cannot prove that a
+ * caller actually obeys it.
+ */
+export async function runWorkspaceReadIfAllowed<T>(
+  kind: SurfaceKind,
+  read: () => Promise<T>,
+): Promise<WorkspaceReadAttempt<T>> {
+  if (!surfaceCanReadWorkspace(kind)) return { invoked: false };
+  return { invoked: true, value: await read() };
+}
+
 /** Localized top-bar label. Default language is zh (聊天 / 代码 / 工作). */
 export function surfaceLabel(
   kind: SurfaceKind,

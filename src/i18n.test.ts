@@ -43,6 +43,11 @@ describe("surface switcher i18n", () => {
     expect(STRINGS.zh.mentionNoFiles).toMatch(/文件/);
   });
 
+  it("worktree capability denial points at the Code surface in both locales", () => {
+    expect(STRINGS.zh.wtNeedsCodeSurface).toMatch(/代码/);
+    expect(STRINGS.en.wtNeedsCodeSurface).toMatch(/Code surface/);
+  });
+
   it("Work copy is folder-first, not an import library", () => {
     expect(STRINGS.zh.workOpenFolder).toBe("打开文件夹");
     expect(STRINGS.zh.workDeskEmpty).not.toMatch(/导入/);

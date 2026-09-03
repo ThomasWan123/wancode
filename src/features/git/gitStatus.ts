@@ -18,6 +18,19 @@ export function isNotGitRepoError(err: unknown): boolean {
   return /不是\s*git\s*仓库/i.test(s) || /not a git (repo|repository)/i.test(s);
 }
 
+/**
+ * Capability-lease denials for read-class git extensions: the live session's
+ * surface lease has no `read` tool (Chat is zero-file-surface), so the host
+ * ext call is rejected with
+ * "CAPABILITY_EXTENSION_BLOCKED: x.ai/git/…: tool is denied: read."
+ * (and the fs/path variant CAPABILITY_PATH_BLOCKED). Callers should show the
+ * localized "switch to Code" hint instead of the raw engine error. This is
+ * policy working as designed — not an engine failure.
+ */
+export function isCapabilityDeniedError(err: unknown): boolean {
+  return /CAPABILITY_(EXTENSION|PATH)_BLOCKED/.test(gitErrorText(err));
+}
+
 /** Diffs envelope: null data = not a repo; files[] = repo (possibly clean). */
 export function parseGitDiffsFiles(payload: unknown): unknown[] | null | undefined {
   const r = payload as Record<string, unknown> | null | undefined;
