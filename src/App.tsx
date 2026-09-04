@@ -36,7 +36,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { parseModelBlock, type ModelBlock } from "./modelBlock";
-import { effortIdForValue, effortStateForModel, parseCurrentEffort, parseEffortChoices, parseModelOptions, type EffortChoice, type ModelOption } from "./modelOption";
+import { effortIdForValue, effortStateForModel, parseCurrentEffort, parseEffortChoices, parseModelOptions, SAFE_INITIAL_MODEL_ID, type EffortChoice, type ModelOption } from "./modelOption";
 import { imageGateAction, parseFileIssue, parseImageDecision } from "./caps";
 import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
@@ -267,7 +267,7 @@ function App() {
   const surfaceCacheRef = useRef<SurfaceSessionCache>({});
   const preserveTranscriptRef = useRef(false);
   const [workFileSelected, setWorkFileSelected] = useState<string | null>(null);
-  const [model, setModel] = useState("glm-5.2");
+  const [model, setModel] = useState(SAFE_INITIAL_MODEL_ID);
   const [models, setModels] = useState<string[]>([]);
   // 结构化下拉选项（v0.18.7-B）：value=catalog key，显示 name+端点。
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);

@@ -292,6 +292,17 @@ fn built_in_caps(slug: &str, provider: Provider) -> CapOverrides {
             tool_use: None,
             reasoning: None,
         },
+        // GLM-5.3-Flash：GLM-5 系列首个原生多模态模型（官方 VLM 文档，
+        // docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash）。视觉输入
+        // （image_url 内容块）与 Function Calling 为官方能力支持列表明示；
+        // thinking.type 仅支持 enabled → reasoning 支持。agent 主链路
+        // dogfooding 未跑 → 其余维度不扩写。
+        (Provider::Zhipu, "glm-5.3-flash") => CapOverrides {
+            text: Some(true),
+            vision_input: Some(true),
+            tool_use: Some(true),
+            reasoning: Some(true),
+        },
         // Coding Plan / 开放平台文本编码系列：dogfooding 全程 tool calling；
         // 图片输入被端点拒绝（v0.18.1 修视觉路由的起因，实证）。
         (Provider::Zhipu, "glm-5.2" | "glm-5-turbo" | "glm-4-flash") => CapOverrides {
@@ -299,6 +310,16 @@ fn built_in_caps(slug: &str, provider: Provider) -> CapOverrides {
             tool_use: Some(true),
             vision_input: Some(false),
             reasoning: None,
+        },
+        // GLM-5.3（2026-08-14 发布，Coding Plan 全量）：官方文档明示
+        // "仅支持处理文本模态信息"（vision=false）、Function Calling 支持、
+        // 思考始终启用（thinking.type 仅 enabled，reasoning_effort
+        // low/high/max）。dogfooding 未跑，故只写官方文档明示项。
+        (Provider::Zhipu, "glm-5.3") => CapOverrides {
+            text: Some(true),
+            tool_use: Some(true),
+            vision_input: Some(false),
+            reasoning: Some(true),
         },
         // 2026-07-29 smoke 6/6；官方明确非视觉、非 reasoner。
         (Provider::DeepSeek, "deepseek-chat") => CapOverrides {
@@ -436,6 +457,45 @@ mod tests {
         let caps = resolve_caps("glm-4v-flash", ZHIPU_OPEN, &CapOverrides::default());
         assert_eq!(caps.vision_input.state, CapState::Supported);
         assert_eq!(caps.vision_input.source, CapSource::BuiltIn);
+    }
+
+    /// GLM-5.3（2026-08 发布）：官方文档明示的项进内置表——仅文本
+    /// （vision=false）、tool calling、思考恒开。5.2 保持不动。
+    /// 两个官方端点（开放平台 / Coding Plan 专属）同 host，都命中内置表。
+    #[test]
+    fn glm_5_3_built_in_matches_official_docs() {
+        for endpoint in [ZHIPU_OPEN, ZHIPU_CODING] {
+            let caps = resolve_caps("glm-5.3", endpoint, &CapOverrides::default());
+            assert_eq!(caps.text.state, CapState::Supported);
+            assert_eq!(caps.tool_use.state, CapState::Supported);
+            assert_eq!(caps.vision_input.state, CapState::Unsupported);
+            assert_eq!(caps.reasoning.state, CapState::Supported);
+            for c in [caps.text, caps.tool_use, caps.vision_input, caps.reasoning] {
+                assert_eq!(c.source, CapSource::BuiltIn);
+            }
+        }
+        // 同名 slug 撞陌生端点不得借表（与 ③ 同判）。
+        let stranger = resolve_caps("glm-5.3", "https://example.com/v1", &CapOverrides::default());
+        assert_eq!(stranger.vision_input.state, CapState::Unknown);
+    }
+
+    /// GLM-5.3-Flash：GLM-5 系列首个原生多模态——vision/tool_use/reasoning
+    /// 均为官方 VLM 文档明示，全 Supported。
+    #[test]
+    fn glm_5_3_flash_is_native_multimodal() {
+        let caps = resolve_caps("glm-5.3-flash", ZHIPU_OPEN, &CapOverrides::default());
+        assert_eq!(caps.text.state, CapState::Supported);
+        assert_eq!(caps.vision_input.state, CapState::Supported);
+        assert_eq!(caps.tool_use.state, CapState::Supported);
+        assert_eq!(caps.reasoning.state, CapState::Supported);
+        // 用户显式覆盖仍更权威（① 的契约对新条目同样成立）。
+        let ov = CapOverrides {
+            vision_input: Some(false),
+            ..Default::default()
+        };
+        let denied = resolve_caps("glm-5.3-flash", ZHIPU_OPEN, &ov);
+        assert_eq!(denied.vision_input.state, CapState::Unsupported);
+        assert_eq!(denied.vision_input.source, CapSource::Config);
     }
 
     /// ③：未知模型保持 unknown——不虚标、不默认支持；

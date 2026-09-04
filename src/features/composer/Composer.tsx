@@ -6,6 +6,7 @@ import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { activateOnKeyboard } from "../../accessibility";
 import { assertNever, type AmbiguousCandidate, type ModelBlock } from "../../modelBlock";
+import { FALLBACK_MODEL_IDS } from "../../modelOption";
 import {
   IconArrowUp, IconCheck, IconChevron, IconClipboard, IconFile, IconFolder,
   IconGitBranch, IconPlus, IconShield, IconStop, IconTerminal, IconX,
@@ -429,7 +430,7 @@ export function Composer(props: Record<string, any>) {
                   const known = new Set(structured.map((o: { id: string }) => o.id));
                   const bare = (models.length || structured.length
                     ? models
-                    : ["glm-5.2", "glm-5-turbo", "glm-4-flash", "deepseek-chat", "deepseek-reasoner"]
+                    : FALLBACK_MODEL_IDS
                   )
                     .filter((m: string) => !known.has(m))
                     .map((m: string) => ({ id: m, name: m, endpointLabel: "" }));
