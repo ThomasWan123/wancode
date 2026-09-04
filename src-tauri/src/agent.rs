@@ -1932,8 +1932,8 @@ mod map_acp_send_error_tests {
 #[cfg(test)]
 mod clear_dead_handle_tests {
     use super::{
-        AgentHandle, AgentState, clear_dead_handle, issue_session_capability_lease,
-        provider_profile_for_catalog_key,
+        AgentHandle, AgentState, PendingPermission, ResourceKind, clear_dead_handle,
+        issue_session_capability_lease, provider_profile_for_catalog_key,
     };
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -1969,11 +1969,13 @@ mod clear_dead_handle_tests {
     #[tokio::test]
     async fn unexpected_death_clears_handle_and_reports_identity() {
         let (state, _dir) = state_with_handle(CancellationToken::new()).await;
-        let (sid, cwd) = clear_dead_handle(&state, &CancellationToken::new())
+        let (sid, cwd, released) = clear_dead_handle(&state, &CancellationToken::new())
             .await
+            .unwrap()
             .expect("unexpected death must report identity");
         assert_eq!(sid, "s1");
         assert!(!cwd.is_empty());
+        assert_eq!(released, 0);
         assert!(
             state.handle.lock().await.is_none(),
             "dead engine's handle must not survive"
@@ -1987,7 +1989,7 @@ mod clear_dead_handle_tests {
         let (state, _dir) = state_with_handle(cancel.clone()).await;
         cancel.cancel();
         assert!(
-            clear_dead_handle(&state, &cancel).await.is_none(),
+            clear_dead_handle(&state, &cancel).await.unwrap().is_none(),
             "teardown must not report engine death"
         );
         assert!(
@@ -2019,7 +2021,7 @@ mod clear_dead_handle_tests {
         drop(held);
 
         assert!(
-            cleanup.await.unwrap().is_none(),
+            cleanup.await.unwrap().unwrap().is_none(),
             "a pump cancelled during lock contention is normal teardown"
         );
         assert!(
@@ -2034,7 +2036,75 @@ mod clear_dead_handle_tests {
         assert!(
             clear_dead_handle(&state, &CancellationToken::new())
                 .await
+                .unwrap()
                 .is_none()
+        );
+    }
+
+    // Recovery contract: clearing a dead engine must release every capability
+    // binding owned by its lease. Otherwise a restarted session cannot claim
+    // the same terminal/worktree/MCP/job identity until the app is restarted.
+    #[tokio::test]
+    async fn engine_death_releases_resource_for_a_new_lease() {
+        let (state, dir) = state_with_handle(CancellationToken::new()).await;
+        let old_lease = state
+            .handle
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .capability_lease
+            .clone();
+        state
+            .resource_registry
+            .register(&old_lease, ResourceKind::Terminal, "terminal-reused")
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert("s1".into(), "turn-before-death".into());
+        let (permission_tx, permission_rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.lock().await.insert(
+            7,
+            PendingPermission {
+                sender: permission_tx,
+                session_id: "s1".into(),
+                lease_id: old_lease.lease_id.clone(),
+                call_id: "call-before-death".into(),
+                action_fingerprint: "fingerprint-before-death".into(),
+                option_ids: std::collections::BTreeSet::new(),
+            },
+        );
+
+        let (_, _, released) = clear_dead_handle(&state, &CancellationToken::new())
+            .await
+            .unwrap()
+            .expect("unexpected death must clear the live handle");
+        assert_eq!(released, 1);
+        assert_eq!(permission_rx.await.unwrap(), None);
+        assert!(state.active_turns.lock().await.get("s1").is_none());
+        assert!(state.pending_permissions.lock().await.is_empty());
+
+        let replacement = issue_session_capability_lease(
+            "s2",
+            crate::surface::SurfaceKind::Code,
+            dir.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            state
+                .resource_registry
+                .register(
+                    &replacement,
+                    ResourceKind::Terminal,
+                    "terminal-reused"
+                )
+                .is_ok(),
+            "a replacement lease must be able to reclaim the released resource id"
         );
     }
 }
@@ -2501,12 +2571,18 @@ mod execution_ledger_projection_tests {
 /// 状态操作收在 [`clear_dead_handle`]（可直接单测）；本函数只补日志与事件。
 async fn on_engine_channel_closed(app: &AppHandle, pump_cancel: &CancellationToken) {
     let state: State<'_, AgentState> = app.state();
-    let Some((session_id, cwd)) = clear_dead_handle(&state, pump_cancel).await else {
-        return;
+    let (session_id, cwd, released_resources) = match clear_dead_handle(&state, pump_cancel).await {
+        Ok(Some(cleanup)) => cleanup,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(error, "engine channel closed but cleanup failed");
+            return;
+        }
     };
     tracing::error!(
         session_id,
         cwd,
+        released_resources,
         "engine channel closed without teardown; handle cleared"
     );
     let _ = app.emit(
@@ -2522,20 +2598,56 @@ async fn on_engine_channel_closed(app: &AppHandle, pump_cancel: &CancellationTok
 /// 锁时完成：否则会话切换可能在「检查 token」与「取得锁」之间安装新 handle，
 /// 随后旧泵会误摘新会话。
 ///
-/// 返回被摘除会话的 (session_id, cwd) 供事件广播；无事可做（正常拆除 /
-/// 启动窗口内死亡且 handle 尚未装上——那条路 agent_start 自己的 acp_send
-/// 会拿到同族错误并回报）返回 None。
+/// 摘除前同步释放旧租约拥有的资源；否则下次启动因 handle 已不存在而跳过
+/// 正常拆除路径，同一资源身份会永久报 `RESOURCE_OWNERSHIP_BLOCKED`。返回
+/// 被摘除会话的 (session_id, cwd, released_resource_count) 供事件广播与日志；
+/// 无事可做（正常拆除 / 启动窗口内死亡且 handle 尚未装上——那条路
+/// agent_start 自己的 acp_send 会拿到同族错误并回报）返回 None。
 async fn clear_dead_handle(
     state: &AgentState,
     pump_cancel: &CancellationToken,
-) -> Option<(String, String)> {
+) -> Result<Option<(String, String, usize)>, String> {
     let mut handle = state.handle.lock().await;
     if pump_cancel.is_cancelled() {
-        return None;
+        return Ok(None);
     }
-    handle
-        .take()
-        .map(|h| (h.session_id.0.to_string(), h.cwd.to_string_lossy().into_owned()))
+    let Some(live) = handle.as_ref() else {
+        return Ok(None);
+    };
+    let session_id = live.session_id.0.to_string();
+    let released_resources = state
+        .resource_registry
+        .release_all(&live.capability_lease)
+        .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))?
+        .len();
+    state.active_turns.lock().await.remove(&session_id);
+    let cancelled_permissions = {
+        let mut pending = state.pending_permissions.lock().await;
+        let ids = pending
+            .iter()
+            .filter(|(_, permission)| permission.session_id == session_id)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    // Keep the handle mutex until all session-owned state is detached. A
+    // concurrent restart can only install its replacement after this point,
+    // so cleanup for a reused session id cannot erase the new session's turn
+    // or permission state.
+    let dead = handle.take().expect("live handle checked above");
+    drop(handle);
+
+    for permission in cancelled_permissions {
+        let _ = permission.sender.send(None);
+    }
+
+    Ok(Some((
+        session_id,
+        dead.cwd.to_string_lossy().into_owned(),
+        released_resources,
+    )))
 }
 /// `acp::Error` → 用户可见错误串。通道断开（send/recv 对端已亡 = 引擎线程
 /// 退出）时加结构化前缀 `ENGINE_DEAD`，前端据此展示「引擎已退出」而不是
