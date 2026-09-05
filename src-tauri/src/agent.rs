@@ -1902,6 +1902,7 @@ mod surface_launchable_tests {
         }
         // These are match prefixes/metadata namespaces, not callable methods.
         for prefix in [
+            "x.ai/",
             "x.ai/fs/",
             "x.ai/git/",
             "x.ai/git/worktree",
