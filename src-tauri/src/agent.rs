@@ -211,7 +211,7 @@ impl AgentState {
     /// state (especially in Work) and must not select the session store.
     pub(crate) async fn live_session_cwd(&self) -> Result<String, String> {
         let guard = self.handle.lock().await;
-        let handle = guard.as_ref().ok_or("会话未启动")?;
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         Ok(handle.cwd.to_string_lossy().into_owned())
     }
 
@@ -252,7 +252,7 @@ impl AgentState {
     ) -> Result<EventContext, String> {
         let (surface_kind, provider_catalog_key, agent_id) = {
             let guard = self.handle.lock().await;
-            let handle = guard.as_ref().ok_or("会话未启动")?;
+            let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
             if handle.session_id.0.as_ref() != session_id {
                 return Err("ACP event session does not own the live handle".to_string());
             }
@@ -316,7 +316,7 @@ impl AgentState {
         session_id: &str,
     ) -> Result<Arc<CapabilityLease>, String> {
         let guard = self.handle.lock().await;
-        let handle = guard.as_ref().ok_or("会话未启动")?;
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         if handle.session_id.0.as_ref() != session_id {
             return Err("ACP resource session does not own the live handle".to_string());
         }
@@ -623,6 +623,56 @@ fn surface_visible_tools(
         .collect()
 }
 
+#[cfg(test)]
+mod surface_visible_tools_tests {
+    use super::{surface_visible_tools, ToolRisk};
+    use crate::surface::SurfaceKind::{Chat, Code, Cowork, Work};
+    use std::collections::BTreeMap;
+
+    fn tools(entries: &[(&str, ToolRisk)]) -> BTreeMap<String, ToolRisk> {
+        entries
+            .iter()
+            .map(|(name, risk)| ((*name).to_owned(), *risk))
+            .collect()
+    }
+
+    #[test]
+    fn backend_surface_tool_contract_matches_the_frontend_mirror() {
+        assert_eq!(
+            surface_visible_tools(Chat),
+            tools(&[
+                ("search", ToolRisk::ReadOnly),
+                ("think", ToolRisk::ReadOnly),
+                ("fetch", ToolRisk::Network),
+            ])
+        );
+        assert_eq!(
+            surface_visible_tools(Code),
+            tools(&[
+                ("read", ToolRisk::ReadOnly),
+                ("search", ToolRisk::ReadOnly),
+                ("think", ToolRisk::ReadOnly),
+                ("fetch", ToolRisk::Network),
+                ("edit", ToolRisk::WorkspaceWrite),
+                ("delete", ToolRisk::WorkspaceWrite),
+                ("move", ToolRisk::WorkspaceWrite),
+                ("execute", ToolRisk::Process),
+                ("switch_mode", ToolRisk::Privileged),
+                ("other", ToolRisk::Privileged),
+            ])
+        );
+        assert_eq!(
+            surface_visible_tools(Work),
+            tools(&[
+                ("read", ToolRisk::ReadOnly),
+                ("search", ToolRisk::ReadOnly),
+                ("think", ToolRisk::ReadOnly),
+            ])
+        );
+        assert_eq!(surface_visible_tools(Cowork), BTreeMap::new());
+    }
+}
+
 /// Capability required by a host-initiated ACP extension. These commands can
 /// reach the same engine resources as model tools, so a hidden Settings/Git/
 /// Terminal entry point must not bypass the live Surface lease.
@@ -686,6 +736,8 @@ pub(crate) fn provider_profile_for_catalog_key(
     ProviderProfile::safe_default(key, infer_family(key))
         .map_err(|error| format!("PROVIDER_PROFILE_BLOCKED: {error}"))
 }
+
+pub(crate) const SESSION_NOT_STARTED_ERROR: &str = "SESSION_NOT_STARTED: 会话未启动";
 
 fn ensure_execution_integrity(diagnostics: &LedgerDiagnostics) -> Result<(), String> {
     if diagnostics.duplicate_event_ids.is_empty() {
@@ -981,7 +1033,7 @@ async fn start_inner_with_intent_and_workspace(
     // 先拆掉旧会话。此前旧 handle 一直留到函数末尾才被替换——本次启动
     // 半路失败时它就成了僵尸：前端以为没会话/换了工作区，ext 调用却仍
     // 注入旧 sessionId，git 面板显示的是**另一个仓库**的改动（#83，
-    // 在那个状态下 stash/丢弃会打错目标）。失败宁可「会话未启动」。
+    // 在那个状态下 stash/丢弃会打错目标）。失败宁可 `SESSION_NOT_STARTED:`。
     if let Some(old) = state.handle.lock().await.take() {
         old.cancel.cancel();
         let pending = std::mem::take(&mut *state.pending_permissions.lock().await);
@@ -1969,13 +2021,12 @@ mod clear_dead_handle_tests {
     #[tokio::test]
     async fn unexpected_death_clears_handle_and_reports_identity() {
         let (state, _dir) = state_with_handle(CancellationToken::new()).await;
-        let (sid, cwd, released) = clear_dead_handle(&state, &CancellationToken::new())
+        let cleanup = clear_dead_handle(&state, &CancellationToken::new())
             .await
-            .unwrap()
             .expect("unexpected death must report identity");
-        assert_eq!(sid, "s1");
-        assert!(!cwd.is_empty());
-        assert_eq!(released, 0);
+        assert_eq!(cleanup.session_id, "s1");
+        assert!(!cleanup.cwd.is_empty());
+        assert_eq!(cleanup.released_resources.unwrap(), 0);
         assert!(
             state.handle.lock().await.is_none(),
             "dead engine's handle must not survive"
@@ -1989,7 +2040,7 @@ mod clear_dead_handle_tests {
         let (state, _dir) = state_with_handle(cancel.clone()).await;
         cancel.cancel();
         assert!(
-            clear_dead_handle(&state, &cancel).await.unwrap().is_none(),
+            clear_dead_handle(&state, &cancel).await.is_none(),
             "teardown must not report engine death"
         );
         assert!(
@@ -2021,7 +2072,7 @@ mod clear_dead_handle_tests {
         drop(held);
 
         assert!(
-            cleanup.await.unwrap().unwrap().is_none(),
+            cleanup.await.unwrap().is_none(),
             "a pump cancelled during lock contention is normal teardown"
         );
         assert!(
@@ -2036,7 +2087,6 @@ mod clear_dead_handle_tests {
         assert!(
             clear_dead_handle(&state, &CancellationToken::new())
                 .await
-                .unwrap()
                 .is_none()
         );
     }
@@ -2077,11 +2127,10 @@ mod clear_dead_handle_tests {
             },
         );
 
-        let (_, _, released) = clear_dead_handle(&state, &CancellationToken::new())
+        let cleanup = clear_dead_handle(&state, &CancellationToken::new())
             .await
-            .unwrap()
             .expect("unexpected death must clear the live handle");
-        assert_eq!(released, 1);
+        assert_eq!(cleanup.released_resources.unwrap(), 1);
         assert_eq!(permission_rx.await.unwrap(), None);
         assert!(state.active_turns.lock().await.get("s1").is_none());
         assert!(state.pending_permissions.lock().await.is_empty());
@@ -2105,6 +2154,38 @@ mod clear_dead_handle_tests {
                 )
                 .is_ok(),
             "a replacement lease must be able to reclaim the released resource id"
+        );
+    }
+
+    // Recovery visibility must not depend on capability-registry bookkeeping.
+    // An invalid lease gives release_all a deterministic failure without
+    // poisoning a process-global mutex: cleanup must still detach the dead
+    // handle and return the identity needed for agent://engine-dead.
+    #[tokio::test]
+    async fn resource_release_failure_still_clears_handle_and_reports_identity() {
+        let (state, _dir) = state_with_handle(CancellationToken::new()).await;
+        {
+            let mut handle = state.handle.lock().await;
+            let live = handle.as_mut().unwrap();
+            let mut invalid_lease = (*live.capability_lease).clone();
+            invalid_lease.schema_version = 0;
+            live.capability_lease = Arc::new(invalid_lease);
+        }
+
+        let cleanup = clear_dead_handle(&state, &CancellationToken::new())
+            .await
+            .expect("bookkeeping failure must not suppress engine-dead identity");
+        assert_eq!(cleanup.session_id, "s1");
+        assert!(!cleanup.cwd.is_empty());
+        assert!(
+            cleanup
+                .released_resources
+                .unwrap_err()
+                .starts_with("RESOURCE_RELEASE_FAILED:"),
+        );
+        assert!(
+            state.handle.lock().await.is_none(),
+            "dead handle must be removed even when resource release fails"
         );
     }
 }
@@ -2571,24 +2652,33 @@ mod execution_ledger_projection_tests {
 /// 状态操作收在 [`clear_dead_handle`]（可直接单测）；本函数只补日志与事件。
 async fn on_engine_channel_closed(app: &AppHandle, pump_cancel: &CancellationToken) {
     let state: State<'_, AgentState> = app.state();
-    let (session_id, cwd, released_resources) = match clear_dead_handle(&state, pump_cancel).await {
-        Ok(Some(cleanup)) => cleanup,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::error!(error, "engine channel closed but cleanup failed");
-            return;
+    let Some(cleanup) = clear_dead_handle(&state, pump_cancel).await else {
+        return;
+    };
+    let released_resources = match cleanup.released_resources {
+        Ok(count) => count,
+        Err(ref error) => {
+            tracing::error!(error, "engine channel closed; resource release bookkeeping failed");
+            0
         }
     };
     tracing::error!(
-        session_id,
-        cwd,
+        session_id = cleanup.session_id,
+        cwd = cleanup.cwd,
         released_resources,
         "engine channel closed without teardown; handle cleared"
     );
     let _ = app.emit(
         "agent://engine-dead",
-        serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+        serde_json::json!({ "sessionId": cleanup.session_id, "cwd": cleanup.cwd }),
     );
+}
+
+#[derive(Debug)]
+struct DeadHandleCleanup {
+    session_id: String,
+    cwd: String,
+    released_resources: Result<usize, String>,
 }
 /// 引擎通道关闭后的 handle 处置（pump 观察到 recv → None 时调用）。
 ///
@@ -2598,28 +2688,27 @@ async fn on_engine_channel_closed(app: &AppHandle, pump_cancel: &CancellationTok
 /// 锁时完成：否则会话切换可能在「检查 token」与「取得锁」之间安装新 handle，
 /// 随后旧泵会误摘新会话。
 ///
-/// 摘除前同步释放旧租约拥有的资源；否则下次启动因 handle 已不存在而跳过
-/// 正常拆除路径，同一资源身份会永久报 `RESOURCE_OWNERSHIP_BLOCKED`。返回
-/// 被摘除会话的 (session_id, cwd, released_resource_count) 供事件广播与日志；
+/// 摘除前尝试释放旧租约拥有的资源；否则下次启动因 handle 已不存在而跳过
+/// 正常拆除路径，同一资源身份会永久报 `RESOURCE_OWNERSHIP_BLOCKED`。记账失败
+/// 会随清理结果返回用于日志，但不能阻断摘 handle 或 `agent://engine-dead`。
+/// 返回被摘除会话的身份与资源释放结果供事件广播与日志；
 /// 无事可做（正常拆除 / 启动窗口内死亡且 handle 尚未装上——那条路
 /// agent_start 自己的 acp_send 会拿到同族错误并回报）返回 None。
 async fn clear_dead_handle(
     state: &AgentState,
     pump_cancel: &CancellationToken,
-) -> Result<Option<(String, String, usize)>, String> {
+) -> Option<DeadHandleCleanup> {
     let mut handle = state.handle.lock().await;
     if pump_cancel.is_cancelled() {
-        return Ok(None);
+        return None;
     }
-    let Some(live) = handle.as_ref() else {
-        return Ok(None);
-    };
+    let live = handle.as_ref()?;
     let session_id = live.session_id.0.to_string();
     let released_resources = state
         .resource_registry
         .release_all(&live.capability_lease)
-        .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"))?
-        .len();
+        .map(|released| released.len())
+        .map_err(|error| format!("RESOURCE_RELEASE_FAILED: {error}"));
     state.active_turns.lock().await.remove(&session_id);
     let cancelled_permissions = {
         let mut pending = state.pending_permissions.lock().await;
@@ -2643,11 +2732,11 @@ async fn clear_dead_handle(
         let _ = permission.sender.send(None);
     }
 
-    Ok(Some((
+    Some(DeadHandleCleanup {
         session_id,
-        dead.cwd.to_string_lossy().into_owned(),
+        cwd: dead.cwd.to_string_lossy().into_owned(),
         released_resources,
-    )))
+    })
 }
 /// `acp::Error` → 用户可见错误串。通道断开（send/recv 对端已亡 = 引擎线程
 /// 退出）时加结构化前缀 `ENGINE_DEAD`，前端据此展示「引擎已退出」而不是
@@ -3065,7 +3154,7 @@ pub async fn agent_prompt(
         capability_lease,
     ) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         h.capability_lease
             .validate()
             .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
@@ -3460,7 +3549,7 @@ pub(crate) async fn ext_call(
 ) -> Result<serde_json::Value, String> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
     bind_ext_session_params(method, &mut params, session_id.0.as_ref());
@@ -3472,7 +3561,7 @@ pub(crate) async fn ext_call(
             if !obj.contains_key("gitRoot") && !obj.contains_key("git_root") {
                 let root = {
                     let guard = state.handle.lock().await;
-                    let h = guard.as_ref().ok_or("会话未启动")?;
+                    let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
                     git2::Repository::discover(&h.cwd)
                         .ok()
                         .and_then(|r| r.workdir().map(|p| p.to_string_lossy().into_owned()))
@@ -3487,7 +3576,7 @@ pub(crate) async fn ext_call(
     if let Some((tool, maximum_risk)) = ext_method_capability(method) {
         let (lease, cwd) = {
             let guard = state.handle.lock().await;
-            let handle = guard.as_ref().ok_or("会话未启动")?;
+            let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
             (handle.capability_lease.clone(), handle.cwd.clone())
         };
         lease
@@ -3518,7 +3607,7 @@ pub(crate) async fn ext_call(
         None
     } else {
         let guard = state.handle.lock().await;
-        let handle = guard.as_ref().ok_or("会话未启动")?;
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         handle.capability_lease.validate()
             .map_err(|error| format!("CAPABILITY_LEASE_INVALID: {error}"))?;
         Some((handle.capability_lease.clone(), handle.session_id.0.to_string()))
@@ -3621,7 +3710,7 @@ pub(crate) async fn ext_notify(
 ) -> Result<(), String> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
     if let Some(obj) = params.as_object_mut() {
@@ -3638,7 +3727,7 @@ pub(crate) async fn ext_notify(
             let guard = state.handle.lock().await;
             guard
                 .as_ref()
-                .ok_or("会话未启动")?
+                .ok_or(SESSION_NOT_STARTED_ERROR)?
                 .capability_lease
                 .clone()
         };
@@ -3652,7 +3741,11 @@ pub(crate) async fn ext_notify(
         })?;
         let lease = {
             let guard = state.handle.lock().await;
-            guard.as_ref().ok_or("会话未启动")?.capability_lease.clone()
+            guard
+                .as_ref()
+                .ok_or(SESSION_NOT_STARTED_ERROR)?
+                .capability_lease
+                .clone()
         };
         state.authorize_live_resource(&lease, ResourceKind::Terminal, terminal_id)?;
     }
@@ -4019,7 +4112,7 @@ mod work_workspace_resume_tests {
 pub async fn agent_cancel(state: State<'_, AgentState>) -> Result<(), String> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
     acp_send(acp::CancelNotification::new(session_id), &acp_tx)

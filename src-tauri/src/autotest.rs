@@ -338,7 +338,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let rejected_at_gate = err_text.contains("SURFACE_NOT_LAUNCHABLE");
         // 后置条件：**没有任何 handle**（失败启动先拆旧会话、且绝不发布新
         // handle——首次实测由此纠正了我原先「旧 handle 应原样」的错误断言，
-        // 源码注释：「失败宁可『会话未启动』」），且没有新增 Work 工作区目录。
+        // 源码注释：「失败宁可 `SESSION_NOT_STARTED:`」），且没有新增 Work 工作区目录。
         let no_handle = after_handle.is_none();
         let ws_dirs_after = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let no_new_ws = ws_dirs_after == ws_dirs_before;

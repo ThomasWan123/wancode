@@ -6,7 +6,7 @@
 //! - session_git_root 客户端 git2 解析，绝不触发引擎回退。
 use tauri::State;
 
-use crate::agent::{ext_call, ext_ok, AgentState};
+use crate::agent::{ext_call, ext_ok, AgentState, SESSION_NOT_STARTED_ERROR};
 
 // ── P2.5 Git 补全 ───────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ pub async fn worktree_resume_session(
 ) -> Result<serde_json::Value, String> {
     let source = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.session_id.0.to_string()
     };
     let v = ext_call(
         &state,
@@ -143,7 +143,7 @@ pub async fn worktree_apply(
 ) -> Result<serde_json::Value, String> {
     let source = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.session_id.0.to_string()
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.session_id.0.to_string()
     };
     let v = ext_call(
         &state,
@@ -174,7 +174,7 @@ pub async fn worktree_precheck(
 ) -> Result<serde_json::Value, String> {
     let cwd = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
     };
     tokio::task::spawn_blocking(move || {
         fn changed_paths(repo_path: &std::path::Path) -> Result<Vec<String>, String> {
@@ -306,7 +306,7 @@ pub(crate) async fn session_git_root(state: &State<'_, AgentState>) -> Result<Op
         .await
         .as_ref()
         .map(|h| h.cwd.clone())
-        .ok_or("会话未启动")?;
+        .ok_or(SESSION_NOT_STARTED_ERROR)?;
     Ok(git2::Repository::discover(&cwd)
         .ok()
         .and_then(|r| r.workdir().map(|p| p.to_string_lossy().into_owned())))
@@ -420,7 +420,7 @@ pub async fn git_create_pr(
 ) -> Result<serde_json::Value, String> {
     let cwd = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
     };
     let run = move |program: &'static str, args: Vec<String>| {
         let cwd = cwd.clone();
@@ -491,7 +491,7 @@ pub async fn git_create_pr(
 pub async fn git_pr_status(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
     let cwd = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or("会话未启动")?.cwd.clone()
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
     };
     let out = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new("gh");
