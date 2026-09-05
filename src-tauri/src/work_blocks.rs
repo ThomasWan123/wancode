@@ -1,4 +1,4 @@
-//! 解析器输出契约 + 锚点铸造（v0.20 W3-b，PDF / DOCX）。
+//! 解析器输出契约 + 统一块路径锚点铸造（PDF / DOCX / XLSX / PPTX）。
 //!
 //! # 为什么先定契约再写解析器
 //!
@@ -24,11 +24,11 @@
 //!
 //! **本模块不直接解析文件**；PDF / DOCX 解析器只负责填充此契约。
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::work_anchor::{
-    utf16_len, utf16_slice, Anchor, AnchorError, DocKind, Locator,
-};
+use crate::work_anchor::{utf16_len, utf16_slice, Anchor, AnchorError, DocKind, Locator};
 use crate::work_staging::ImportId;
 
 /// 解析器产出的一个块（DOCX 段落或 PDF 页内文本块）。
@@ -116,7 +116,11 @@ impl std::fmt::Display for MintError {
                 write!(f, "块路径重复（解析器 bug）: {path}")
             }
             MintError::MalformedBlock { path } => write!(f, "块结构不自洽（解析器 bug）: {path}"),
-            MintError::BadRange { range, block_len, cause } => write!(
+            MintError::BadRange {
+                range,
+                block_len,
+                cause,
+            } => write!(
                 f,
                 "区间 [{}, {}) 在长度 {block_len} 的块内非法：{cause}",
                 range[0], range[1]
@@ -163,30 +167,18 @@ fn covered_run_ordinals(block: &WorkBlock, [start, end]: [usize; 2]) -> Vec<u32>
         .collect()
 }
 
-/// 在指定块的指定 UTF-16 区间上铸造 DOCX 锚点。
-///
-/// 摘录取自 `raw` 的该区间（`Anchor::new` 内部做归一化 + 截断）。
-pub fn mint_docx_anchor(
-    blocks: &[WorkBlock],
-    block_path: &str,
+fn mint_known_unique_block_anchor(
+    block: &WorkBlock,
     raw_range: [usize; 2],
     import_id: ImportId,
     source_sha256: &str,
+    kind: DocKind,
 ) -> Result<Anchor, MintError> {
-    let block = find_unique_block(blocks, block_path).map_err(|e| match e {
-        BlockLookupError::NotFound => MintError::BlockNotFound {
-            path: block_path.to_string(),
-        },
-        BlockLookupError::Ambiguous => MintError::AmbiguousBlockPath {
-            path: block_path.to_string(),
-        },
-    })?;
     if !block.is_well_formed() {
         return Err(MintError::MalformedBlock {
-            path: block_path.to_string(),
+            path: block.path.clone(),
         });
     }
-    // 区间合法性交给 utf16_slice——它同时管越界与代理对，语义与解析侧同源。
     let excerpt_raw = utf16_slice(&block.raw, raw_range[0], raw_range[1]).map_err(|cause| {
         MintError::BadRange {
             range: raw_range,
@@ -201,8 +193,8 @@ pub fn mint_docx_anchor(
     Ok(Anchor::new(
         import_id,
         source_sha256,
-        DocKind::Docx,
-        Locator::Docx {
+        kind,
+        Locator {
             block_path: block.path.clone(),
             run_ordinals,
             raw_range,
@@ -211,21 +203,64 @@ pub fn mint_docx_anchor(
     ))
 }
 
+/// 在指定文本型 Work 文档块的 UTF-16 区间上铸造统一锚点。
+///
+/// 摘录取自 `raw` 的该区间（`Anchor::new` 内部做归一化 + 截断）。
+pub fn mint_block_anchor(
+    blocks: &[WorkBlock],
+    block_path: &str,
+    raw_range: [usize; 2],
+    import_id: ImportId,
+    source_sha256: &str,
+    kind: DocKind,
+) -> Result<Anchor, MintError> {
+    let block = find_unique_block(blocks, block_path).map_err(|e| match e {
+        BlockLookupError::NotFound => MintError::BlockNotFound {
+            path: block_path.to_string(),
+        },
+        BlockLookupError::Ambiguous => MintError::AmbiguousBlockPath {
+            path: block_path.to_string(),
+        },
+    })?;
+    mint_known_unique_block_anchor(block, raw_range, import_id, source_sha256, kind)
+}
+
+/// Compatibility helper for existing DOCX parser probes. Product code should
+/// use [`mint_block_anchor`] and pass the actual document kind explicitly.
+pub fn mint_docx_anchor(
+    blocks: &[WorkBlock],
+    block_path: &str,
+    raw_range: [usize; 2],
+    import_id: ImportId,
+    source_sha256: &str,
+) -> Result<Anchor, MintError> {
+    mint_block_anchor(
+        blocks,
+        block_path,
+        raw_range,
+        import_id,
+        source_sha256,
+        DocKind::Docx,
+    )
+}
+
 /// 解析一个锚点回到它所指的块文本。
 ///
 /// 与 `work_anchor::resolve_anchor` 的区别：那个对着**一段** raw 文本解析，
 /// 这个先按 `block_path` 在块序列里定位。fail-closed 语义一致。
-pub fn resolve_docx_anchor(
+pub fn resolve_block_anchor(
     anchor: &Anchor,
     blocks: &[WorkBlock],
     doc_sha256: &str,
+    kind: DocKind,
 ) -> Result<String, AnchorErrorOrMissing> {
-    let (path, claimed_ordinals, raw_range) = match &anchor.locator {
-        Locator::Docx { block_path, run_ordinals, raw_range } => {
-            (block_path.as_str(), run_ordinals, *raw_range)
-        }
-        Locator::Pdf { .. } => return Err(AnchorErrorOrMissing::KindMismatch),
-    };
+    if anchor.kind != kind {
+        return Err(AnchorErrorOrMissing::DocumentKindMismatch {
+            expected: kind,
+            actual: anchor.kind,
+        });
+    }
+    let path = anchor.locator.block_path.as_str();
     let block = find_unique_block(blocks, path).map_err(|e| match e {
         BlockLookupError::NotFound => AnchorErrorOrMissing::BlockMissing {
             path: path.to_string(),
@@ -234,6 +269,33 @@ pub fn resolve_docx_anchor(
             path: path.to_string(),
         },
     })?;
+    resolve_known_unique_block_anchor(anchor, block, doc_sha256, kind)
+}
+
+fn resolve_known_unique_block_anchor(
+    anchor: &Anchor,
+    block: &WorkBlock,
+    doc_sha256: &str,
+    kind: DocKind,
+) -> Result<String, AnchorErrorOrMissing> {
+    if anchor.kind != kind {
+        return Err(AnchorErrorOrMissing::DocumentKindMismatch {
+            expected: kind,
+            actual: anchor.kind,
+        });
+    }
+    let Locator {
+        block_path,
+        run_ordinals: claimed_ordinals,
+        raw_range,
+    } = &anchor.locator;
+    let path = block_path.as_str();
+    let raw_range = *raw_range;
+    if block.path != path {
+        return Err(AnchorErrorOrMissing::BlockMissing {
+            path: path.to_string(),
+        });
+    }
     // 解析侧也必须校验块自洽（自审 F1）：铸造侧查了、解析侧不查，就是那种
     // 「一边强制、一边放行」的不对称——W2-c 栽过同一形状（不变量只在构造器
     // 里成立，信任边界上没强制）。runs 不自洽时下面的序号比对也无从谈起。
@@ -267,23 +329,81 @@ pub fn resolve_docx_anchor(
         .map_err(AnchorErrorOrMissing::Anchor)
 }
 
+/// Validate an entire parser output in O(n), minting and resolving one full
+/// anchor per block. This is the production bridge used by outbound citation
+/// verification; the one-off public mint/resolve APIs retain their strict
+/// unique-path lookup semantics for viewer/highlight callers.
+pub fn verified_block_anchors(
+    blocks: &[WorkBlock],
+    import_id: ImportId,
+    source_sha256: &str,
+    kind: DocKind,
+) -> Result<Vec<Anchor>, String> {
+    let mut paths = BTreeSet::new();
+    for block in blocks {
+        if !paths.insert(block.path.as_str()) {
+            return Err(format!("块路径重复，无法核验引用：{}", block.path));
+        }
+    }
+    let mut anchors = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let anchor = mint_known_unique_block_anchor(
+            block,
+            [0, block.len_utf16()],
+            import_id.clone(),
+            source_sha256,
+            kind,
+        )
+        .map_err(|error| format!("引用锚点 {} 铸造失败：{error}", block.path))?;
+        resolve_known_unique_block_anchor(&anchor, block, source_sha256, kind)
+            .map_err(|error| format!("引用锚点 {} 回源失败：{error}", block.path))?;
+        anchors.push(anchor);
+    }
+    Ok(anchors)
+}
+
+/// Compatibility helper for existing DOCX parser probes.
+pub fn resolve_docx_anchor(
+    anchor: &Anchor,
+    blocks: &[WorkBlock],
+    doc_sha256: &str,
+) -> Result<String, AnchorErrorOrMissing> {
+    resolve_block_anchor(anchor, blocks, doc_sha256, DocKind::Docx)
+}
+
 /// 块级解析的失败原因：锚点本身的失配，或块已不存在（文档被替换/重解析后
 /// 结构变了）——两者都让引用**不可点击**，但原因要能区分给用户看。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnchorErrorOrMissing {
     Anchor(AnchorError),
-    BlockMissing { path: String },
+    BlockMissing {
+        path: String,
+    },
     /// 同一 block_path 出现多次——歧义，不猜（自审 F2）。
-    AmbiguousBlockPath { path: String },
+    AmbiguousBlockPath {
+        path: String,
+    },
     /// 块自身不自洽（解析器 bug）——解析侧同样拦（自审 F1）。
-    MalformedBlock { path: String },
+    MalformedBlock {
+        path: String,
+    },
     /// 锚点声称的 run 序号与块内实际 runs 不符（自审 F1）。
-    RunOrdinalsMismatch { expected: Vec<u32>, claimed: Vec<u32> },
+    RunOrdinalsMismatch {
+        expected: Vec<u32>,
+        claimed: Vec<u32>,
+    },
     /// 锚点区间为空（或未覆盖任何 run）——引用必须落在实际文本上。
     /// 与 mint 侧的 `RangeCoversNoRun` 对称（z-code #51 R1-P1）。
-    EmptyAnchorRange { range: [usize; 2] },
-    KindMismatch,
+    EmptyAnchorRange {
+        range: [usize; 2],
+    },
+    /// The generic locator is shared, but a PDF anchor still cannot be
+    /// resolved against DOCX/XLSX/PPTX blocks.
+    DocumentKindMismatch {
+        expected: DocKind,
+        actual: DocKind,
+    },
 }
 
 impl std::fmt::Display for AnchorErrorOrMissing {
@@ -308,7 +428,12 @@ impl std::fmt::Display for AnchorErrorOrMissing {
                 f,
                 "来源已失效：run 序号不符（锚点声称 {claimed:?}，实际 {expected:?}）"
             ),
-            AnchorErrorOrMissing::KindMismatch => write!(f, "来源已失效：定位子类型不符"),
+            AnchorErrorOrMissing::DocumentKindMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "来源已失效：文档类型不符（期望 {expected:?}，实际 {actual:?}）"
+                )
+            }
         }
     }
 }
@@ -359,14 +484,9 @@ mod tests {
         let n = bs[1].len_utf16();
         // 覆盖整段 → 三个 run 全部记录。
         let a = mint_docx_anchor(&bs, "body/p[41]", [0, n], ImportId::mint(), &sha()).unwrap();
-        match &a.locator {
-            Locator::Docx { run_ordinals, block_path, raw_range } => {
-                assert_eq!(run_ordinals, &vec![0, 1, 2], "跨 run 必须记全");
-                assert_eq!(block_path, "body/p[41]");
-                assert_eq!(raw_range, &[0, n]);
-            }
-            _ => panic!("应为 DOCX 定位子"),
-        }
+        assert_eq!(a.locator.run_ordinals, vec![0, 1, 2], "跨 run 必须记全");
+        assert_eq!(a.locator.block_path, "body/p[41]");
+        assert_eq!(a.locator.raw_range, [0, n]);
         assert_eq!(resolve_docx_anchor(&a, &bs, &sha()).unwrap(), bs[1].raw);
     }
 
@@ -375,10 +495,7 @@ mod tests {
         let bs = blocks();
         // [2,4) 跨 run0([0,3)) 与 run1([3,6)) 的边界。
         let a = mint_docx_anchor(&bs, "body/p[41]", [2, 4], ImportId::mint(), &sha()).unwrap();
-        match &a.locator {
-            Locator::Docx { run_ordinals, .. } => assert_eq!(run_ordinals, &vec![0, 1]),
-            _ => panic!("应为 DOCX 定位子"),
-        }
+        assert_eq!(a.locator.run_ordinals, vec![0, 1]);
     }
 
     // ── fail-closed：铸造期 ──────────────────────────────────────────
@@ -509,19 +626,43 @@ mod tests {
     }
 
     #[test]
-    fn resolving_a_pdf_anchor_against_docx_blocks_fails_closed() {
-        let bs = blocks();
-        let pdf = Anchor::new(
+    fn pdf_uses_the_same_block_path_resolver() {
+        let bs = vec![WorkBlock {
+            path: "page[1]/chunk[0]".into(),
+            raw: "abc".into(),
+            runs: vec![[0, 3]],
+        }];
+        let pdf = mint_block_anchor(
+            &bs,
+            "page[1]/chunk[0]",
+            [0, 3],
             ImportId::mint(),
-            sha(),
+            &sha(),
             DocKind::Pdf,
-            Locator::Pdf { page: 1, chunk: 0, raw_range: [0, 3] },
-            "abc",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_block_anchor(&pdf, &bs, &sha(), DocKind::Pdf).unwrap(),
+            "abc"
         );
         assert!(matches!(
-            resolve_docx_anchor(&pdf, &bs, &sha()),
-            Err(AnchorErrorOrMissing::KindMismatch)
+            resolve_block_anchor(&pdf, &bs, &sha(), DocKind::Docx),
+            Err(AnchorErrorOrMissing::DocumentKindMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn full_catalog_validates_many_unique_blocks_without_pairwise_lookup() {
+        let bs = (0..5_000)
+            .map(|index| WorkBlock {
+                path: format!("body/p[{index}]"),
+                raw: "x".into(),
+                runs: vec![[0, 1]],
+            })
+            .collect::<Vec<_>>();
+        let anchors = verified_block_anchors(&bs, ImportId::mint(), &sha(), DocKind::Docx).unwrap();
+        assert_eq!(anchors.len(), bs.len());
+        assert_eq!(anchors.last().unwrap().locator.block_path, "body/p[4999]");
     }
 
     // ── 摘录截断后仍能解析（长段落）────────────────────────────────
@@ -536,7 +677,10 @@ mod tests {
         }];
         let a = mint_docx_anchor(&bs, "body/p[0]", [0, n], ImportId::mint(), &sha()).unwrap();
         assert!(utf16_len(&a.excerpt) <= MAX_EXCERPT_UTF16);
-        assert!(resolve_docx_anchor(&a, &bs, &sha()).is_ok(), "截断的摘录仍须解析成功");
+        assert!(
+            resolve_docx_anchor(&a, &bs, &sha()).is_ok(),
+            "截断的摘录仍须解析成功"
+        );
     }
 
     #[test]
@@ -555,9 +699,7 @@ mod tests {
     fn tampered_run_ordinals_fail_closed() {
         let bs = blocks();
         let mut a = mint_docx_anchor(&bs, "body/p[41]", [0, 3], ImportId::mint(), &sha()).unwrap();
-        if let Locator::Docx { run_ordinals, .. } = &mut a.locator {
-            *run_ordinals = vec![99];
-        }
+        a.locator.run_ordinals = vec![99];
         assert!(
             matches!(
                 resolve_docx_anchor(&a, &bs, &sha()),
@@ -589,8 +731,16 @@ mod tests {
     #[test]
     fn duplicate_block_paths_are_ambiguous_and_rejected_on_both_sides() {
         let dup = vec![
-            WorkBlock { path: "dup".into(), raw: "AAA".into(), runs: vec![[0, 3]] },
-            WorkBlock { path: "dup".into(), raw: "BBB".into(), runs: vec![[0, 3]] },
+            WorkBlock {
+                path: "dup".into(),
+                raw: "AAA".into(),
+                runs: vec![[0, 3]],
+            },
+            WorkBlock {
+                path: "dup".into(),
+                raw: "BBB".into(),
+                runs: vec![[0, 3]],
+            },
         ];
         assert!(matches!(
             mint_docx_anchor(&dup, "dup", [0, 3], ImportId::mint(), &sha()),
@@ -643,7 +793,7 @@ mod tests {
             ImportId::mint(),
             sha(),
             DocKind::Docx,
-            Locator::Docx {
+            Locator {
                 block_path: "body/p[0]".into(),
                 run_ordinals: vec![],
                 raw_range: [2, 2],
@@ -662,7 +812,7 @@ mod tests {
             ImportId::mint(),
             sha(),
             DocKind::Docx,
-            Locator::Docx {
+            Locator {
                 block_path: "body/p[0]".into(),
                 run_ordinals: vec![],
                 raw_range: [0, 2],

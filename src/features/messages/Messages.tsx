@@ -1,7 +1,7 @@
 /* v0.13 拆分：消息流渲染（用户/助手/思考/提示/工具卡片 + 内联审批 + 全局审批条）。
    P0: quiet transcript by default (collapsed outcome chips), review gate instead of naive DiffView,
    thinking as one-line duration stub, SVG icons replace emoji. */
-import { useState, useCallback, useEffect, useRef, type KeyboardEvent } from "react";
+import { lazy, Suspense, useState, useCallback, useEffect, useRef, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { IconCheck, IconChevron, IconCopy, IconGitBranch, IconShield } from "../../icons";
@@ -88,6 +88,8 @@ function ReviewChip({ diffs, onReview, t }: { diffs: any[]; onReview: () => void
     </div>
   );
 }
+
+const CitationChecks = lazy(() => import("./CitationChecks"));
 
 export function Messages(props: Record<string, any>) {
   const { bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptView, setTranscriptView, workspace, t, onOpenWorkbench } = props;
@@ -247,6 +249,11 @@ export function Messages(props: Record<string, any>) {
                       },
                     }}
                   >{it.text}</ReactMarkdown>
+                  {it.citationChecks?.length > 0 && (
+                    <Suspense fallback={null}>
+                      <CitationChecks checks={it.citationChecks} t={t} />
+                    </Suspense>
+                  )}
                 </div>
                 <div className="msg-actions">
                   <button
