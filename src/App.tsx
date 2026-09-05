@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
 import { resolveCrashRecovery } from "./crashRecovery";
+import { engineDeadMessage, engineEventTargetsSession } from "./engineDead";
 import { createRefreshGuard, createRosterCoordinator } from "./sessionRoster";
 import { buildSuggestions } from "./homeSuggestions";
 import { invoke } from "@tauri-apps/api/core";
@@ -523,6 +524,9 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const didAutoStart = useRef(false);
   const sessionIdRef = useRef("");
+  // 引擎线程意外退出（后端广播 agent://engine-dead 后置 true；新会话启动
+  // 时复位）。此后「会话未启动」错误统一翻成引擎退出文案（engineDead.ts）。
+  const engineDeadRef = useRef(false);
   // 所有启动入口（自动启动、层切换、侧栏恢复、发送前惰性启动）共用一条
   // 串行队列。同 key 复用同一个 Promise；较旧的排队请求在执行前作废。
   // 这同时覆盖 React StrictMode 双 effect 与 workspace/surface 连续变化。
@@ -1690,9 +1694,24 @@ function App() {
     );
 
     unsubs.push(
-      listen<any>("agent://turn-end", () => {
+      listen<any>("agent://turn-end", (e) => {
+        if (!engineEventTargetsSession(e.payload?.sessionId, sessionIdRef.current)) return;
         refreshTasks();
+        if (e.payload && e.payload.ok === false) {
+          const raw = String(e.payload.error ?? "Unknown error");
+          setError(engineDeadMessage(raw, engineDeadRef.current, t.engineDead) ?? raw);
+        }
         refreshCtx();
+      }),
+    );
+
+    // 引擎线程意外退出：后端已摘掉 handle（后续调用回「会话未启动」）。
+    // 这里只亮一条可读横幅——历史仍可读，重开/切换会话即恢复。
+    unsubs.push(
+      listen<any>("agent://engine-dead", (e) => {
+        if (!engineEventTargetsSession(e.payload?.sessionId, sessionIdRef.current)) return;
+        engineDeadRef.current = true;
+        setError(t.engineDead);
       }),
     );
 
@@ -1748,6 +1767,8 @@ function App() {
     }
     setStarting(true);
     setError("");
+    // 新会话启动 = 新引擎：上一个引擎的死亡标记不再适用。
+    engineDeadRef.current = false;
     const preserve = preserveTranscriptRef.current;
     preserveTranscriptRef.current = false;
     // Every session open invalidates completion callbacks owned by the prior
@@ -1800,6 +1821,9 @@ function App() {
       // 后端调用无法安全中断；若期间来了更新的启动意图，本次结果不得回写
       // 前端。新请求会在串行队列中接管后端 handle。
       if (!isCurrentRequest()) return "";
+      // 新会话确已上线：即便启动窗口里有旧引擎迟到的 engine-dead 事件把
+      // 标记置真，也在此复位——死亡标记只属于死掉的那个引擎。
+      engineDeadRef.current = false;
       // codex W2-fe-a R2:后端**已启动**会话并回传持久 surface。若是 Work 而
       // 前端 UI 未接线,**fail closed 不激活**——绝不把 Work 会话套进 Code UI、
       // 也不用 code 覆盖持久身份(那会制造跨层身份矛盾)。抛错走既有错误处理
@@ -2030,7 +2054,14 @@ function App() {
     } catch (e) {
       // 纵深防御:若仍被能力租约拒绝(如层恢复后的租约错位),给出可行动
       // 的指引而不是裸抛引擎错误码。
-      setError(isCapabilityDeniedError(e) ? t.wtNeedsCodeSurface : `worktree: ${String(e)}`);
+      if (isCapabilityDeniedError(e)) {
+        setError(t.wtNeedsCodeSurface);
+        return;
+      }
+      // 引擎退出后此调用必失败（在飞=ENGINE_DEAD，之后=会话未启动）——
+      // 翻成统一文案，别再弹 channel 天书；其余错误保留 worktree 上下文。
+      const raw = String(e);
+      setError(engineDeadMessage(raw, engineDeadRef.current, t.engineDead) ?? `worktree: ${raw}`);
     }
   }
 
