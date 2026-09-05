@@ -94,6 +94,9 @@ pub enum DocxError {
     /// 常见原因：前缀是别名但解析器按字面 `w:*` 匹配、或根本不是 Word 文档。
     /// 绝不能当成「空文档」成功返回——那会把合法正文静默吃掉。
     UnrecognizedWordprocessing,
+    /// XML 在开始标签仍未闭合时耗尽。已经抽出的前缀也不可信，因为文件可能
+    /// 缺少任意后续正文，必须整篇拒收。
+    TruncatedDocument { pending_chars: usize, open_paragraphs: usize, open_elements: usize },
 }
 
 impl std::fmt::Display for DocxError {
@@ -124,6 +127,10 @@ impl std::fmt::Display for DocxError {
             Self::UnrecognizedWordprocessing => write!(
                 f,
                 "document.xml 不含 WordprocessingML 标准命名空间元素，拒收（避免把合法正文当成空文档）"
+            ),
+            Self::TruncatedDocument { pending_chars, open_paragraphs, open_elements } => write!(
+                f,
+                "document.xml 在元素闭合前结束：未闭合元素 {open_elements} 个、段落 {open_paragraphs} 个、待定正文 {pending_chars} 字符"
             ),
         }
     }
@@ -255,11 +262,15 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
     // 是否见过绑定到 Word NS 的元素。未见过却返回 Ok([]) 就是把合法正文
     // 静默吃掉（#57 R1-P1）。
     let mut saw_word_ns = false;
+    // quick-xml 的 EOF 不等于 XML 结构完整；显式跟踪所有开始/结束元素，
+    // 防止截断文件把已解析前缀伪装成完整结果。
+    let mut open_elements = 0usize;
 
     loop {
         match reader.read_resolved_event_into(&mut buf) {
             Ok((_, Event::DocType(_))) => return Err(DocxError::DoctypeRejected),
             Ok((ns, Event::Start(e))) => {
+                open_elements += 1;
                 let name = e.local_name();
                 let local = name.as_ref();
                 if bound_wml(&ns) {
@@ -348,6 +359,9 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
                 );
             }
             Ok((ns, Event::End(e))) => {
+                open_elements = open_elements
+                    .checked_sub(1)
+                    .ok_or_else(|| DocxError::XmlError("结束标签没有对应的开始标签".into()))?;
                 let name = e.local_name();
                 let local = name.as_ref();
                 if bound_wml(&ns) {
@@ -385,6 +399,13 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
     if !saw_word_ns {
         return Err(DocxError::UnrecognizedWordprocessing);
     }
+    if open_elements > 0 {
+        return Err(DocxError::TruncatedDocument {
+            pending_chars: cur.as_ref().map_or(0, |block| block.raw.chars().count()),
+            open_paragraphs: p_depth,
+            open_elements,
+        });
+    }
     if dropped_outside_run > 0 {
         return Err(DocxError::TextOutsideRun {
             dropped_chars: dropped_outside_run,
@@ -396,6 +417,7 @@ pub fn parse_document_xml(xml: &str, limits: DocxLimits) -> Result<Vec<WorkBlock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn p(inner: &str) -> String {
         format!(
@@ -413,6 +435,67 @@ mod tests {
         assert_eq!(b[0].raw, "你好世界");
         assert_eq!(b[0].runs, vec![[0, 2], [2, 4]]);
         assert!(b[0].is_well_formed(), "runs 必须铺满 [0,len)");
+    }
+
+    fn docx_package(document_xml: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(document_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        file
+    }
+
+    #[test]
+    fn truncated_second_paragraph_is_rejected_instead_of_returning_prefix() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{WML_NS}"><w:body><w:p><w:r><w:t>完整段</w:t></w:r></w:p><w:p><w:r><w:t>尾段</w:t></w:r>"#
+        );
+        assert!(matches!(
+            parse_document_xml(&xml, DocxLimits::default()),
+            Err(DocxError::TruncatedDocument {
+                pending_chars: 2,
+                open_paragraphs: 1,
+                open_elements: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn truncated_only_paragraph_is_rejected_instead_of_empty_ok() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{WML_NS}"><w:body><w:p><w:r><w:t>全文唯一一段</w:t></w:r>"#
+        );
+        assert!(matches!(
+            parse_document_xml(&xml, DocxLimits::default()),
+            Err(DocxError::TruncatedDocument {
+                pending_chars: 6,
+                open_paragraphs: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn truncated_docx_package_is_rejected_instead_of_returning_prefix() {
+        let file = docx_package(&format!(
+            r#"<w:document xmlns:w="{WML_NS}"><w:body><w:p><w:r><w:t>完整段</w:t></w:r></w:p><w:p><w:r><w:t>丢失尾段</w:t></w:r>"#
+        ));
+        assert!(matches!(
+            parse_docx(file.path(), DocxLimits::default()),
+            Err(DocxError::TruncatedDocument { .. })
+        ));
+    }
+
+    #[test]
+    fn two_closed_paragraphs_remain_extractable() {
+        let xml = p(r#"<w:p><w:r><w:t>第一段</w:t></w:r></w:p><w:p><w:r><w:t>第二段</w:t></w:r></w:p>"#);
+        let blocks = parse_document_xml(&xml, DocxLimits::default()).unwrap();
+        assert_eq!(blocks.iter().map(|b| b.raw.as_str()).collect::<Vec<_>>(), ["第一段", "第二段"]);
     }
 
     /// 零宽 run 不该被记成 run（记了会破坏「每条非空」），但也不该造成缺口。
