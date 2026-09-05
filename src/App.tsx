@@ -525,7 +525,7 @@ function App() {
   const didAutoStart = useRef(false);
   const sessionIdRef = useRef("");
   // 引擎线程意外退出（后端广播 agent://engine-dead 后置 true；新会话启动
-  // 时复位）。此后「会话未启动」错误统一翻成引擎退出文案（engineDead.ts）。
+  // 时复位）。此后 `SESSION_NOT_STARTED:` 错误统一翻成引擎退出文案（engineDead.ts）。
   const engineDeadRef = useRef(false);
   // 所有启动入口（自动启动、层切换、侧栏恢复、发送前惰性启动）共用一条
   // 串行队列。同 key 复用同一个 Promise；较旧的排队请求在执行前作废。
@@ -1705,7 +1705,7 @@ function App() {
       }),
     );
 
-    // 引擎线程意外退出：后端已摘掉 handle（后续调用回「会话未启动」）。
+    // 引擎线程意外退出：后端已摘掉 handle（后续调用回 `SESSION_NOT_STARTED:`）。
     // 这里只亮一条可读横幅——历史仍可读，重开/切换会话即恢复。
     unsubs.push(
       listen<any>("agent://engine-dead", (e) => {
@@ -2058,7 +2058,7 @@ function App() {
         setError(t.wtNeedsCodeSurface);
         return;
       }
-      // 引擎退出后此调用必失败（在飞=ENGINE_DEAD，之后=会话未启动）——
+      // 引擎退出后此调用必失败（在飞=ENGINE_DEAD，之后=SESSION_NOT_STARTED）——
       // 翻成统一文案，别再弹 channel 天书；其余错误保留 worktree 上下文。
       const raw = String(e);
       setError(engineDeadMessage(raw, engineDeadRef.current, t.engineDead) ?? `worktree: ${raw}`);

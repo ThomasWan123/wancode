@@ -3,7 +3,7 @@ use tauri::State;
 use xai_acp_lib::acp_send;
 use agent_client_protocol as acp;
 
-use crate::agent::{ext_call, AgentState};
+use crate::agent::{ext_call, AgentState, SESSION_NOT_STARTED_ERROR};
 use crate::autotest::walkdir_find;
 use crate::git_ops::session_git_root;
 
@@ -20,7 +20,7 @@ pub async fn review_run(
 ) -> Result<serde_json::Value, String> {
     let (acp_tx, cwd, source_sid) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (h.acp_tx.clone(), h.cwd.clone(), h.session_id.0.to_string())
     };
 

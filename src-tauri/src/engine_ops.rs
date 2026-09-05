@@ -7,7 +7,9 @@ use agent_client_protocol as acp;
 use tauri::State;
 use xai_acp_lib::acp_send;
 
-use crate::agent::{ext_call, ext_notify, ext_ok, AgentState};
+use crate::agent::{
+    ext_call, ext_notify, ext_ok, AgentState, SESSION_NOT_STARTED_ERROR,
+};
 
 fn session_fork_workspace(live_cwd: &std::path::Path, _display_workspace: &str) -> PathBuf {
     live_cwd.to_path_buf()
@@ -475,7 +477,7 @@ pub async fn session_fork(
 ) -> Result<String, String> {
     let (source, live_cwd) = {
         let guard = state.handle.lock().await;
-        let handle = guard.as_ref().ok_or("会话未启动")?;
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (handle.session_id.0.to_string(), handle.cwd.clone())
     };
     // The visible Work folder and Chat's last Code folder are presentation
@@ -885,7 +887,7 @@ pub async fn agent_session_delete(
 pub async fn agent_set_mode(state: State<'_, AgentState>, mode: String) -> Result<(), String> {
     let (acp_tx, session_id) = {
         let guard = state.handle.lock().await;
-        let h = guard.as_ref().ok_or("会话未启动")?;
+        let h = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
         (h.acp_tx.clone(), h.session_id.clone())
     };
     let _: acp::SetSessionModeResponse = acp_send(
@@ -974,7 +976,7 @@ pub async fn agent_set_model(
     let (acp_tx, session_id, surface_kind) = {
         let guard = state.handle.lock().await;
         let h = guard.as_ref().ok_or_else(|| ModelSwitchError::Other {
-            message: "会话未启动".to_owned(),
+            message: SESSION_NOT_STARTED_ERROR.to_owned(),
         })?;
         (h.acp_tx.clone(), h.session_id.clone(), h.surface_kind)
     };
