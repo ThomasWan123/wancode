@@ -718,6 +718,7 @@ fn ext_method_policy(method: &str) -> ExtMethodPolicy {
             | "x.ai/git/serialize_changes"
             | "x.ai/git/status"
             | "x.ai/git/worktree/list"
+            | "x.ai/commands/list"
     ) {
         return read();
     }
@@ -771,7 +772,6 @@ fn ext_method_policy(method: &str) -> ExtMethodPolicy {
     // Explicit zero-capability allowlist.  Each entry carries its reason so a
     // reviewer can distinguish a deliberate protocol decision from omission.
     let no_capability = match method {
-        "x.ai/commands/list" => Some("read-only command metadata for the active session"),
         "x.ai/compact_conversation" => Some("rewrites conversation context, not workspace resources"),
         "x.ai/interject" => Some("adds user text to the active turn only"),
         "x.ai/permissions/reset" => Some("only revokes remembered permission grants"),
@@ -1814,6 +1814,10 @@ mod surface_launchable_tests {
         );
         assert_eq!(
             ext_method_policy("x.ai/fs/read_file"),
+            ExtMethodPolicy::Required("read", ToolRisk::ReadOnly)
+        );
+        assert_eq!(
+            ext_method_policy("x.ai/commands/list"),
             ExtMethodPolicy::Required("read", ToolRisk::ReadOnly)
         );
         assert_eq!(
