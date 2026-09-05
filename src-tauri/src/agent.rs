@@ -673,14 +673,27 @@ mod surface_visible_tools_tests {
     }
 }
 
-/// Capability required by a host-initiated ACP extension. These commands can
-/// reach the same engine resources as model tools, so a hidden Settings/Git/
-/// Terminal entry point must not bypass the live Surface lease.
-fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
-    let read = || Some(("read", ToolRisk::ReadOnly));
-    let write = || Some(("edit", ToolRisk::WorkspaceWrite));
+/// Authorization policy for a host-initiated ACP extension.
+///
+/// This is deliberately three-state: methods either consume a Surface
+/// capability, are explicitly safe without one, or are denied.  Unknown
+/// methods land in `Denied`, so adding a new extension can never silently
+/// bypass the live lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtMethodPolicy {
+    Required(&'static str, ToolRisk),
+    NoCapability(&'static str),
+    Denied(&'static str),
+}
+
+const UNKNOWN_EXT_METHOD: &str = "unregistered extension method";
+
+fn ext_method_policy(method: &str) -> ExtMethodPolicy {
+    let read = || ExtMethodPolicy::Required("read", ToolRisk::ReadOnly);
+    let write = || ExtMethodPolicy::Required("edit", ToolRisk::WorkspaceWrite);
+    let privileged = || ExtMethodPolicy::Required("other", ToolRisk::Privileged);
     if method.starts_with("x.ai/terminal/") || method.starts_with("x.ai/task/") {
-        return Some(("execute", ToolRisk::Process));
+        return ExtMethodPolicy::Required("execute", ToolRisk::Process);
     }
     if method.starts_with("x.ai/mcp/")
         || method.starts_with("x.ai/subagent/")
@@ -688,7 +701,7 @@ fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
         || method == "x.ai/scheduler/delete"
         || method == "x.ai/session/update_mcp_servers"
     {
-        return Some(("other", ToolRisk::Privileged));
+        return privileged();
     }
     if matches!(
         method,
@@ -705,6 +718,7 @@ fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
             | "x.ai/git/serialize_changes"
             | "x.ai/git/status"
             | "x.ai/git/worktree/list"
+            | "x.ai/commands/list"
     ) {
         return read();
     }
@@ -726,7 +740,89 @@ fn ext_method_capability(method: &str) -> Option<(&'static str, ToolRisk)> {
     ) {
         return write();
     }
-    None
+
+    if matches!(
+        method,
+        "x.ai/search/fuzzy/open"
+            | "x.ai/search/fuzzy/change"
+            | "x.ai/search/fuzzy/close"
+            | "x.ai/skills/list"
+            | "x.ai/skills/config"
+            | "x.ai/plugins/list"
+    ) {
+        return read();
+    }
+
+    if matches!(
+        method,
+        "x.ai/git/worktree/resume_session"
+            | "x.ai/skills/add"
+            | "x.ai/skills/remove"
+            | "x.ai/skills/reset"
+            | "x.ai/skills/toggle"
+            | "x.ai/skills/refresh-baseline"
+            | "x.ai/plugins/action"
+            | "x.ai/memory/flush"
+            | "x.ai/memory/rewrite"
+            | "x.ai/internal/reload_models"
+    ) {
+        return privileged();
+    }
+
+    // Explicit zero-capability allowlist.  Each entry carries its reason so a
+    // reviewer can distinguish a deliberate protocol decision from omission.
+    let no_capability = match method {
+        "x.ai/compact_conversation" => Some("rewrites conversation context, not workspace resources"),
+        "x.ai/interject" => Some("adds user text to the active turn only"),
+        "x.ai/permissions/reset" => Some("only revokes remembered permission grants"),
+        "x.ai/prompt_history" => Some("reads the user's local prompt history"),
+        "x.ai/queue/clear" => Some("edits only this client's queued prompts"),
+        "x.ai/queue/edit" => Some("edits only this client's queued prompts"),
+        "x.ai/queue/interject" => Some("promotes only this client's queued prompt"),
+        "x.ai/queue/remove" => Some("removes only this client's queued prompt"),
+        "x.ai/queue/reorder" => Some("reorders only this client's queued prompts"),
+        "x.ai/recap" => Some("returns conversation-derived recap metadata"),
+        "x.ai/rewind/points" => Some("lists conversation rewind metadata without applying it"),
+        "x.ai/session/close" => Some("closes a user-owned session record"),
+        "x.ai/session/delete" => Some("deletes a user-owned session record, not workspace files"),
+        "x.ai/session/fork" => Some("copies session history without changing workspace files"),
+        "x.ai/session/info" => Some("reads metadata for the active session"),
+        "x.ai/session/list" => Some("lists user-owned session metadata"),
+        "x.ai/session/load_history" => Some("reads user-owned session history"),
+        "x.ai/session/rename" => Some("renames a user-owned session record"),
+        "x.ai/session/repair" => Some("repairs the user-owned session ledger"),
+        "x.ai/session/search" => Some("searches user-owned session history"),
+        "x.ai/session/updates" => Some("reads active-session update metadata"),
+        "x.ai/session_summaries/session_list" => Some("lists user-owned session summaries"),
+        "x.ai/session_summaries/workspace_list" => Some("lists workspace labels from session history"),
+        "x.ai/session_summaries/workspace_list_recent" => Some("lists recent workspace labels from session history"),
+        "x.ai/sessions/list" => Some("lists user-owned session metadata"),
+        "x.ai/suggest" => Some("returns conversation-derived prompt suggestions"),
+        "x.ai/toggle_plan_mode" => Some("narrows or restores the active session mode"),
+        "x.ai/workspaces/list" => Some("lists workspace labels from session history"),
+        "x.ai/yolo_mode_changed" => Some("syncs UI policy but cannot expand the Surface lease"),
+        _ => None,
+    };
+    if let Some(reason) = no_capability {
+        return ExtMethodPolicy::NoCapability(reason);
+    }
+
+    // Engine-originated requests/notifications and ACP metadata keys are
+    // deliberately not callable through either host extension entrance.
+    let denied = match method {
+        "x.ai/ask_user_question" => Some("engine-to-client request"),
+        "x.ai/debug" => Some("engine-to-client diagnostic request"),
+        "x.ai/exit_plan_mode" => Some("engine-to-client request"),
+        "x.ai/folder_trust/request" => Some("engine-to-client trust request"),
+        "x.ai/folderTrust" => Some("ACP capability metadata key"),
+        "x.ai/localExtensionsDisabled" => Some("ACP capability metadata key"),
+        "x.ai/modelBlock" => Some("ACP session metadata key"),
+        "x.ai/rewind" => Some("engine-to-client rewind notification"),
+        "x.ai/session_notification" => Some("engine-to-client session notification"),
+        "x.ai/sessionConfig" => Some("ACP session metadata key"),
+        _ => None,
+    };
+    ExtMethodPolicy::Denied(denied.unwrap_or(UNKNOWN_EXT_METHOD))
 }
 
 pub(crate) fn provider_profile_for_catalog_key(
@@ -1632,7 +1728,8 @@ fn local_extensions_policy_applied(meta: Option<&serde_json::Map<String, serde_j
 #[cfg(test)]
 mod surface_launchable_tests {
     use super::{
-        ext_method_capability, issue_session_capability_lease, surface_launchable,
+        ext_method_policy, issue_session_capability_lease, surface_launchable, ExtMethodPolicy,
+        UNKNOWN_EXT_METHOD,
         surface_loads_configured_mcp, surface_requires_local_extension_isolation,
         terminal_id_from_response, terminal_resource_action, retain_owned_terminals,
         validate_pending_permission, PendingPermission, TerminalResourceAction,
@@ -1708,22 +1805,33 @@ mod surface_launchable_tests {
     #[test]
     fn extension_resource_commands_cannot_bypass_surface_capabilities() {
         assert_eq!(
-            ext_method_capability("x.ai/terminal/pty/create"),
-            Some(("execute", ToolRisk::Process))
+            ext_method_policy("x.ai/terminal/pty/create"),
+            ExtMethodPolicy::Required("execute", ToolRisk::Process)
         );
         assert_eq!(
-            ext_method_capability("x.ai/mcp/toggle_tool"),
-            Some(("other", ToolRisk::Privileged))
+            ext_method_policy("x.ai/mcp/toggle_tool"),
+            ExtMethodPolicy::Required("other", ToolRisk::Privileged)
         );
         assert_eq!(
-            ext_method_capability("x.ai/fs/read_file"),
-            Some(("read", ToolRisk::ReadOnly))
+            ext_method_policy("x.ai/fs/read_file"),
+            ExtMethodPolicy::Required("read", ToolRisk::ReadOnly)
         );
         assert_eq!(
-            ext_method_capability("x.ai/git/stage"),
-            Some(("edit", ToolRisk::WorkspaceWrite))
+            ext_method_policy("x.ai/commands/list"),
+            ExtMethodPolicy::Required("read", ToolRisk::ReadOnly)
         );
-        assert_eq!(ext_method_capability("x.ai/session/info"), None);
+        assert_eq!(
+            ext_method_policy("x.ai/git/stage"),
+            ExtMethodPolicy::Required("edit", ToolRisk::WorkspaceWrite)
+        );
+        assert!(matches!(
+            ext_method_policy("x.ai/session/info"),
+            ExtMethodPolicy::NoCapability(_)
+        ));
+        assert_eq!(
+            ext_method_policy(concat!("x.ai/", "not-registered")),
+            ExtMethodPolicy::Denied(UNKNOWN_EXT_METHOD)
+        );
 
         let root = tempfile::tempdir().unwrap();
         let code = issue_session_capability_lease(
@@ -1744,11 +1852,103 @@ mod surface_launchable_tests {
             &[],
         )
         .unwrap();
-        let (tool, risk) = ext_method_capability("x.ai/terminal/create").unwrap();
+        let ExtMethodPolicy::Required(tool, risk) = ext_method_policy("x.ai/terminal/create") else {
+            panic!("terminal create must require a capability")
+        };
         assert!(code.authorize_tool(tool, risk).is_ok());
         assert!(work.authorize_tool(tool, risk).is_err());
-        let (tool, risk) = ext_method_capability("x.ai/fs/read_file").unwrap();
+        let ExtMethodPolicy::Required(tool, risk) = ext_method_policy("x.ai/fs/read_file") else {
+            panic!("filesystem read must require a capability")
+        };
         assert!(work.authorize_tool(tool, risk).is_ok());
+    }
+
+    #[test]
+    fn every_extension_literal_in_rust_sources_has_an_explicit_policy() {
+        fn rust_files_below(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read Rust source directory") {
+                let path = entry.expect("read source entry").path();
+                if path.is_dir() {
+                    rust_files_below(&path, out);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        fn extension_literals(source: &str, out: &mut BTreeSet<String>) {
+            let mut rest = source;
+            while let Some(start) = rest.find("\"x.ai/") {
+                rest = &rest[start + 1..];
+                let Some(end) = rest.find('"') else { break };
+                let candidate = &rest[..end];
+                if candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+                {
+                    out.insert(candidate.to_owned());
+                }
+                rest = &rest[end + 1..];
+            }
+        }
+
+        let mut files = Vec::new();
+        rust_files_below(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut methods = BTreeSet::new();
+        for file in files {
+            extension_literals(
+                &std::fs::read_to_string(&file).expect("read Rust source"),
+                &mut methods,
+            );
+        }
+        // These are match prefixes/metadata namespaces, not callable methods.
+        for prefix in [
+            "x.ai/",
+            "x.ai/fs/",
+            "x.ai/git/",
+            "x.ai/git/worktree",
+            "x.ai/hooks/",
+            "x.ai/mcp/",
+            "x.ai/subagent/",
+            "x.ai/task/",
+            "x.ai/terminal/",
+        ] {
+            methods.remove(prefix);
+        }
+        let unknown: Vec<_> = methods
+            .iter()
+            .filter(|method| {
+                ext_method_policy(method) == ExtMethodPolicy::Denied(UNKNOWN_EXT_METHOD)
+            })
+            .cloned()
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "new x.ai method literals need an explicit Required/NoCapability/Denied policy: {unknown:?}"
+        );
+
+        for method in methods {
+            match ext_method_policy(&method) {
+                ExtMethodPolicy::NoCapability(reason) | ExtMethodPolicy::Denied(reason) => {
+                    assert!(!reason.trim().is_empty(), "{method} needs a reviewable rationale");
+                }
+                ExtMethodPolicy::Required(_, _) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn request_and_notification_entrances_share_one_authorization_preflight() {
+        let source = include_str!("agent.rs");
+        let call = concat!("authorize_ext_method(state, method, &params)", ".await?");
+        assert_eq!(
+            source.matches(call).count(),
+            2,
+            "ext_call and ext_notify must both use the shared preflight"
+        );
     }
 
     #[test]
@@ -3561,6 +3761,52 @@ mod ext_session_param_tests {
     }
 }
 
+/// One authorization preflight shared by request and notification entrances.
+/// Keeping the policy and path checks here makes it impossible for a future
+/// `ext_notify` call to gain weaker treatment than the equivalent `ext_call`.
+async fn authorize_ext_method(
+    state: &State<'_, AgentState>,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let (tool, maximum_risk) = match ext_method_policy(method) {
+        ExtMethodPolicy::Required(tool, risk) => (tool, risk),
+        ExtMethodPolicy::NoCapability(_reason) => return Ok(()),
+        ExtMethodPolicy::Denied(reason) => {
+            return Err(format!(
+                "CAPABILITY_EXTENSION_BLOCKED: {method}: {reason}"
+            ));
+        }
+    };
+    let (lease, cwd) = {
+        let guard = state.handle.lock().await;
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
+        (handle.capability_lease.clone(), handle.cwd.clone())
+    };
+    lease
+        .authorize_tool(tool, maximum_risk)
+        .map_err(|error| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: {error}"))?;
+    if method.starts_with("x.ai/fs/") {
+        let raw_path = params
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: missing path"))?;
+        let raw_path = std::path::Path::new(raw_path);
+        let target = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            cwd.join(raw_path)
+        };
+        let authorization = if maximum_risk == ToolRisk::ReadOnly {
+            lease.authorize_read(&target)
+        } else {
+            lease.authorize_write(&target)
+        };
+        authorization.map_err(|error| format!("CAPABILITY_PATH_BLOCKED: {method}: {error}"))?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn ext_call(
     state: &State<'_, AgentState>,
     method: &str,
@@ -3592,35 +3838,7 @@ pub(crate) async fn ext_call(
             }
         }
     }
-    if let Some((tool, maximum_risk)) = ext_method_capability(method) {
-        let (lease, cwd) = {
-            let guard = state.handle.lock().await;
-            let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
-            (handle.capability_lease.clone(), handle.cwd.clone())
-        };
-        lease
-            .authorize_tool(tool, maximum_risk)
-            .map_err(|error| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: {error}"))?;
-        if method.starts_with("x.ai/fs/") {
-            let raw_path = params
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: missing path"))?;
-            let raw_path = std::path::Path::new(raw_path);
-            let target = if raw_path.is_absolute() {
-                raw_path.to_path_buf()
-            } else {
-                cwd.join(raw_path)
-            };
-            let authorization = if maximum_risk == ToolRisk::ReadOnly {
-                lease.authorize_read(&target)
-            } else {
-                lease.authorize_write(&target)
-            };
-            authorization
-                .map_err(|error| format!("CAPABILITY_PATH_BLOCKED: {method}: {error}"))?;
-        }
-    }
+    authorize_ext_method(state, method, &params).await?;
     let terminal_action = terminal_resource_action(method);
     let terminal_binding = if terminal_action == TerminalResourceAction::None {
         None
@@ -3741,19 +3959,7 @@ pub(crate) async fn ext_notify(
         // 静默 no-op（用户实报"按钮没反应"）。与 yolo_mode_changed 同一教训：
         // 单客户端应用不传标识（None=匹配全部）才是正确姿势。
     }
-    if let Some((tool, maximum_risk)) = ext_method_capability(method) {
-        let lease = {
-            let guard = state.handle.lock().await;
-            guard
-                .as_ref()
-                .ok_or(SESSION_NOT_STARTED_ERROR)?
-                .capability_lease
-                .clone()
-        };
-        lease
-            .authorize_tool(tool, maximum_risk)
-            .map_err(|error| format!("CAPABILITY_EXTENSION_BLOCKED: {method}: {error}"))?;
-    }
+    authorize_ext_method(state, method, &params).await?;
     if terminal_resource_action(method) == TerminalResourceAction::Use {
         let terminal_id = terminal_id_from_params(&params).ok_or_else(|| {
             format!("RESOURCE_OWNERSHIP_BLOCKED: {method}: missing terminalId")
