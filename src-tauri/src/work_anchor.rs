@@ -29,10 +29,10 @@ use crate::work_staging::ImportId;
 
 /// 锚点 wire 格式版本。形状**或语义**变更都必须 bump。
 ///
-/// v1 → v2：`normalize_for_equality` 补上 NFC。形状没变，但**摘录相等性的
-/// 判定语义变了**——v1 铸造的 excerpt 是非 NFC 形态，拿 v2 语义去比会误判。
-/// 语义变更同样要 bump，否则旧锚点会被静默按新规则解读。
-pub const CURRENT_ANCHOR_SCHEMA: u32 = 2;
+/// v1 → v2：`normalize_for_equality` 补上 NFC。形状没变，但摘录相等性
+/// 语义改变。v2 → v3：删除从未接线且与实际块路径冲突的 PDF 数字定位子，
+/// PDF / DOCX / XLSX / PPTX 统一使用块路径定位子。
+pub const CURRENT_ANCHOR_SCHEMA: u32 = 3;
 
 /// excerpt 长度上限（UTF-16 code unit，与偏移单位一致）。
 pub const MAX_EXCERPT_UTF16: usize = 500;
@@ -43,43 +43,24 @@ pub const MAX_EXCERPT_UTF16: usize = 500;
 pub enum DocKind {
     Pdf,
     Docx,
+    Xlsx,
+    Pptx,
 }
 
-/// 定位子：按 kind 必填不同字段（设计 §1.2）。
+/// 所有文本型 Work 文档共用的块路径定位子。
 ///
-/// `raw_range` 两者都有——它才是**唯一消歧**手段：同页/同块里重复出现的
-/// 相同 excerpt，靠 raw_range 区分是第几次出现。
+/// 解析器已经为 PDF / DOCX / XLSX / PPTX 产出稳定且唯一的 `WorkBlock.path`。
+/// wire 层继续按文件格式拆定位子只会制造两套地址（旧 `Pdf { page, chunk }`
+/// 与实际 `page[N]/chunk[0]`），因此 schema 3 统一为路径 + run + raw 区间。
+/// `raw_range` 是块内的唯一消歧手段：相同 excerpt 靠它区分出现位置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub enum Locator {
-    Pdf {
-        page: u32,
-        chunk: u32,
-        raw_range: [usize; 2],
-    },
-    Docx {
-        /// 块路径，如 `body/p[41]`。
-        block_path: String,
-        /// 该块内被覆盖的 run 序号（DOCX 会把一句话拆进多个 run）。
-        run_ordinals: Vec<u32>,
-        raw_range: [usize; 2],
-    },
-}
-
-impl Locator {
-    pub fn raw_range(&self) -> [usize; 2] {
-        match self {
-            Locator::Pdf { raw_range, .. } | Locator::Docx { raw_range, .. } => *raw_range,
-        }
-    }
-
-    /// 定位子与文档类型是否自洽（PDF 锚不能带 DOCX 定位子，反之亦然）。
-    pub fn matches_kind(&self, kind: DocKind) -> bool {
-        matches!(
-            (self, kind),
-            (Locator::Pdf { .. }, DocKind::Pdf) | (Locator::Docx { .. }, DocKind::Docx)
-        )
-    }
+#[serde(deny_unknown_fields)]
+pub struct Locator {
+    /// 解析器产出的块路径，例如 `body/p[41]` 或 `page[3]/chunk[0]`。
+    pub block_path: String,
+    /// 该块内被覆盖的 run 序号。单块型解析器通常为 `[0]`。
+    pub run_ordinals: Vec<u32>,
+    pub raw_range: [usize; 2],
 }
 
 /// 锚点。`import_id` + 完整 `source_sha256` 联合定位文档——重导入同一文件会
@@ -140,12 +121,13 @@ pub enum AnchorError {
     UnsupportedSchema { found: u32, supported: u32 },
     /// 坐标系声明与本实现不符（例如别的运行时写了 utf8 偏移）。
     CoordinateSystemMismatch { field: &'static str, found: String },
-    /// 定位子与 kind 不自洽。
-    LocatorKindMismatch,
     /// 文档哈希与锚点记录的不符——原件已被替换/重导入。
     SourceHashMismatch { expected: String, actual: String },
     /// 区间非法（start > end）或越界。
-    RangeOutOfBounds { range: [usize; 2], doc_utf16_len: usize },
+    RangeOutOfBounds {
+        range: [usize; 2],
+        doc_utf16_len: usize,
+    },
     /// 区间端点落在 UTF-16 代理对中间（星平面字符被劈开）。
     RangeSplitsSurrogatePair { offset: usize },
     /// 归一后摘录与该区间的实际文本不符——映射已失效，不近似指向。
@@ -163,9 +145,11 @@ impl std::fmt::Display for AnchorError {
             AnchorError::CoordinateSystemMismatch { field, found } => {
                 write!(f, "坐标系字段 {field} 不符：{found}")
             }
-            AnchorError::LocatorKindMismatch => write!(f, "定位子与文档类型不符"),
             AnchorError::SourceHashMismatch { .. } => write!(f, "来源已失效：原件哈希不符"),
-            AnchorError::RangeOutOfBounds { range, doc_utf16_len } => write!(
+            AnchorError::RangeOutOfBounds {
+                range,
+                doc_utf16_len,
+            } => write!(
                 f,
                 "来源已失效：区间 [{}, {}) 越界（文档长度 {doc_utf16_len}）",
                 range[0], range[1]
@@ -226,7 +210,9 @@ fn truncate_utf16(s: &str, max_units: usize) -> String {
 
 /// 64 位小写 hex 判定（sha256 的形状）。
 fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// 文本的 UTF-16 长度（code unit 数）。
@@ -295,8 +281,16 @@ pub fn resolve_anchor(
     // 坐标系必须逐字相符——别的运行时若写了 utf8 偏移，这里必须拒而不是
     // 「凑合按 utf16 解释」（那正是高亮错位的来源）。
     for (field, actual, expected) in [
-        ("offset_unit", anchor.offset_unit.as_str(), OFFSET_UNIT_UTF16),
-        ("range_kind", anchor.range_kind.as_str(), RANGE_KIND_HALF_OPEN),
+        (
+            "offset_unit",
+            anchor.offset_unit.as_str(),
+            OFFSET_UNIT_UTF16,
+        ),
+        (
+            "range_kind",
+            anchor.range_kind.as_str(),
+            RANGE_KIND_HALF_OPEN,
+        ),
         ("range_space", anchor.range_space.as_str(), RANGE_SPACE_RAW),
     ] {
         if actual != expected {
@@ -305,9 +299,6 @@ pub fn resolve_anchor(
                 found: actual.to_string(),
             });
         }
-    }
-    if !anchor.locator.matches_kind(anchor.kind) {
-        return Err(AnchorError::LocatorKindMismatch);
     }
     if !is_sha256_hex(&anchor.source_sha256) {
         return Err(AnchorError::MalformedSourceHash {
@@ -320,7 +311,7 @@ pub fn resolve_anchor(
             actual: doc_sha256.to_string(),
         });
     }
-    let [start, end] = anchor.locator.raw_range();
+    let [start, end] = anchor.locator.raw_range;
     let raw = utf16_slice(raw_text, start, end)?;
     // 摘录相等性在**归一形态**下判定；定位已经在 raw 空间完成。
     // **必须逐字相等**（codex W3-a R1-F1）：曾用 `starts_with` 允许「摘录是
@@ -351,9 +342,9 @@ mod tests {
             ImportId::mint(),
             sha(0xab),
             DocKind::Pdf,
-            Locator::Pdf {
-                page: 3,
-                chunk: 7,
+            Locator {
+                block_path: "page[3]/chunk[7]".into(),
+                run_ordinals: vec![0],
                 raw_range: range,
             },
             raw_excerpt,
@@ -365,7 +356,10 @@ mod tests {
     fn wire_shape_round_trips_and_pins_the_coordinate_system() {
         let a = pdf_anchor([0, 5], "hello");
         let json = serde_json::to_value(&a).unwrap();
-        assert_eq!(json["anchor_schema"], CURRENT_ANCHOR_SCHEMA, "wire 上的 schema 必须跟随常量（NFC 落地时已由 1 提到 2）");
+        assert_eq!(
+            json["anchor_schema"], CURRENT_ANCHOR_SCHEMA,
+            "wire 上的 schema 必须跟随常量（统一块路径时已由 2 提到 3）"
+        );
         assert_eq!(json["offset_unit"], "utf16");
         assert_eq!(json["range_kind"], "half_open_zero_based");
         assert_eq!(json["range_space"], "raw");
@@ -379,18 +373,29 @@ mod tests {
         a.offset_unit = "utf8".into();
         assert!(matches!(
             resolve_anchor(&a, &sha(0xab), "hello world"),
-            Err(AnchorError::CoordinateSystemMismatch { field: "offset_unit", .. })
+            Err(AnchorError::CoordinateSystemMismatch {
+                field: "offset_unit",
+                ..
+            })
         ));
     }
 
     #[test]
-    fn locator_must_match_kind() {
-        let mut a = pdf_anchor([0, 5], "hello");
-        a.kind = DocKind::Docx; // PDF 定位子 + DOCX kind
-        assert!(matches!(
-            resolve_anchor(&a, &sha(0xab), "hello"),
-            Err(AnchorError::LocatorKindMismatch)
-        ));
+    fn every_text_kind_uses_the_same_block_path_locator() {
+        for kind in [DocKind::Pdf, DocKind::Docx, DocKind::Xlsx, DocKind::Pptx] {
+            let a = Anchor::new(
+                ImportId::mint(),
+                sha(0xab),
+                kind,
+                Locator {
+                    block_path: "format/specific/path[1]".into(),
+                    run_ordinals: vec![0],
+                    raw_range: [0, 5],
+                },
+                "hello",
+            );
+            assert_eq!(resolve_anchor(&a, &sha(0xab), "hello").unwrap(), "hello");
+        }
     }
 
     // ── fail-closed 四类失配（设计 §1.2）─────────────────────────────
@@ -520,7 +525,7 @@ mod tests {
             ImportId::mint(),
             sha(0xab),
             DocKind::Docx,
-            Locator::Docx {
+            Locator {
                 block_path: "body/p[41]".into(),
                 run_ordinals: vec![2, 3, 4],
                 raw_range: [0, utf16_len(block_raw)],
@@ -529,13 +534,8 @@ mod tests {
         );
         let got = resolve_anchor(&a, &sha(0xab), block_raw).expect("应解析成功");
         assert_eq!(got, block_raw);
-        match &a.locator {
-            Locator::Docx { run_ordinals, block_path, .. } => {
-                assert_eq!(run_ordinals, &vec![2, 3, 4]);
-                assert_eq!(block_path, "body/p[41]");
-            }
-            _ => panic!("应为 DOCX 定位子"),
-        }
+        assert_eq!(a.locator.run_ordinals, vec![2, 3, 4]);
+        assert_eq!(a.locator.block_path, "body/p[41]");
     }
 
     #[test]

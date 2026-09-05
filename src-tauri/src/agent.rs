@@ -3121,6 +3121,16 @@ pub struct PromptImage {
     pub mime: String,
 }
 
+/// Completion metadata belongs to the exact prompt invocation. In Work this
+/// carries the verified block catalog built from the same immutable snapshot
+/// that was sent to the provider, so a queued later prompt cannot replace the
+/// evidence used to verify an earlier answer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCompletion {
+    pub work_citation_sources: Vec<crate::work_context::WorkCitationSource>,
+}
+
 /// Read-only, already-redacted execution diagnostics for the timeline/export
 /// UI. The command never returns prompt bodies, tool arguments or tool output.
 #[tauri::command]
@@ -3142,7 +3152,7 @@ pub async fn agent_prompt(
     state: State<'_, AgentState>,
     text: String,
     images: Option<Vec<PromptImage>>,
-) -> Result<(), String> {
+) -> Result<PromptCompletion, String> {
     let (
         acp_tx,
         session_id,
@@ -3176,6 +3186,7 @@ pub async fn agent_prompt(
         )
     };
     let mut images = images.unwrap_or_default();
+    let mut work_citation_sources = Vec::new();
     let text = if surface_kind == crate::surface::SurfaceKind::Work {
         let workspace_id = work_workspace_id.ok_or("Work 会话缺少 workspace_id")?;
         let app_data = app
@@ -3191,6 +3202,7 @@ pub async fn agent_prompt(
             data: image.data,
             mime: image.mime,
         }));
+        work_citation_sources = context.citation_sources;
         context.text
     } else {
         text
@@ -3348,16 +3360,19 @@ pub async fn agent_prompt(
             "ok": false,
             "sessionId": session_id_string,
             "error": error,
+            "workCitationSources": &work_citation_sources,
         }),
         (Ok(resp), None) => serde_json::json!({
             "ok": true,
             "sessionId": session_id_string,
             "stopReason": serde_json::to_value(resp.stop_reason).unwrap_or(serde_json::Value::Null),
+            "workCitationSources": &work_citation_sources,
         }),
         (Err(e), None) => serde_json::json!({
             "ok": false,
             "sessionId": session_id_string,
             "error": map_acp_send_error(e),
+            "workCitationSources": &work_citation_sources,
         }),
     };
     let _ = app.emit("agent://turn-end", payload);
@@ -3366,7 +3381,11 @@ pub async fn agent_prompt(
     if let Some(error) = usage_validation_error {
         return Err(error);
     }
-    result.map(|_| ()).map_err(|e| map_acp_send_error(&e))
+    result
+        .map(|_| PromptCompletion {
+            work_citation_sources: work_citation_sources.clone(),
+        })
+        .map_err(|e| map_acp_send_error(&e))
 }
 
 /// Answer a pending permission request. `option_id = None` cancels/denies.

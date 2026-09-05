@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { activateOnKeyboard } from "./accessibility";
 import { resolveCrashRecovery } from "./crashRecovery";
 import { engineDeadMessage, engineEventTargetsSession } from "./engineDead";
@@ -9,7 +9,6 @@ import { OnboardingWizard } from "./features/onboarding/OnboardingWizard";
 import { SettingsModal } from "./features/settings/SettingsModal";
 import { GitPanel } from "./features/git/GitPanel";
 import { Composer } from "./features/composer/Composer";
-import { Messages } from "./features/messages/Messages";
 import { Dialogs } from "./features/dialogs/Dialogs";
 import { Home } from "./features/home/Home";
 import { Workbench } from "./features/workbench/Workbench";
@@ -82,6 +81,15 @@ import {
   type SurfaceSessionCache,
   uncachedSwitchStartsImmediately,
 } from "./surfaceSession";
+import {
+  attachWorkCitationChecks,
+  type WorkCitationCheck,
+  type WorkCitationSource,
+} from "./workCitations";
+
+const Messages = lazy(() =>
+  import("./features/messages/Messages").then((module) => ({ default: module.Messages })),
+);
 
 type SessionEntry = {
   session_id: string;
@@ -174,7 +182,7 @@ function TreeView({ node, onPick, depth = 0 }: { node: TreeNode; onPick: (p: str
 
 type ChatItem =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "assistant"; text: string; citationChecks?: WorkCitationCheck[] }
   | { kind: "thought"; text: string }
   | { kind: "note"; text: string }
   | { kind: "tool"; call: ToolCallInfo };
@@ -1304,6 +1312,11 @@ function App() {
   const primaryTurnGenerationRef = useRef(0);
   const rosterGuardRef = useRef(createRefreshGuard());
 
+  function verifyLatestWorkAnswer(sources: WorkCitationSource[]) {
+    if (surfaceRef.current !== "work") return;
+    setItems((prev) => attachWorkCitationChecks(prev, sources) as ChatItem[]);
+  }
+
   async function refreshSessions(ws: string) {
     const generation = rosterGuardRef.current.begin();
     try {
@@ -1696,6 +1709,9 @@ function App() {
     unsubs.push(
       listen<any>("agent://turn-end", (e) => {
         if (!engineEventTargetsSession(e.payload?.sessionId, sessionIdRef.current)) return;
+        if (e.payload?.ok === true && Array.isArray(e.payload?.workCitationSources)) {
+          verifyLatestWorkAnswer(e.payload.workCitationSources);
+        }
         refreshTasks();
         if (e.payload && e.payload.ok === false) {
           const raw = String(e.payload.error ?? "Unknown error");
@@ -2266,10 +2282,25 @@ function App() {
     }
     // 新发的 prompt 立刻进历史（引擎那份是启动时快照）
     if (t) historyRef.current = [t, ...historyRef.current.filter((h) => h !== t)];
-    const request = invoke("agent_prompt", {
+    const requestedSessionId = sessionIdRef.current;
+    const requestedSurface = surfaceRef.current;
+    const request = invoke<{ workCitationSources?: WorkCitationSource[] }>("agent_prompt", {
       text: t,
       images: imgs.length ? imgs.map((i) => ({ data: i.data, mime: i.mime })) : null,
     });
+    // `turn-end` is the low-latency path. The command response is the fallback
+    // when a renderer subscribed late and missed that event; only the newest,
+    // still-unverified assistant message can consume it, so the two paths are
+    // idempotent and stale sessions cannot decorate their successor.
+    void request.then((completion) => {
+      if (
+        requestedSurface === "work"
+        && sessionIdRef.current === requestedSessionId
+        && Array.isArray(completion?.workCitationSources)
+      ) {
+        verifyLatestWorkAnswer(completion.workCitationSources);
+      }
+    }, () => {});
     if (queueing) {
       request.catch((e) => setError(String(e)));
     } else {
@@ -2914,7 +2945,9 @@ function App() {
 
       <PlanDocument {...{ planApproval, planFeedback, setPlanFeedback, respondPlan, t }} />
 
-      <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptView, setTranscriptView: persistTranscriptView, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("diff"); } }} />
+      <Suspense fallback={null}>
+        <Messages {...{ bottomRef, busy, copiedIdx, copyMessage, error, forkFrom, items, openThoughts, permission, respondPermission, setOpenThoughts, transcriptView, setTranscriptView: persistTranscriptView, workspace, t, onOpenWorkbench: () => { setShowWorkbench(true); localStorage.setItem("wancode-wb-open", "1"); setWbTab("diff"); } }} />
+      </Suspense>
 
       {surface === "code" && <TerminalPanel {...{ lang, ptyOpened, sessionId, setError, setPtyOpened, setShowTerminal, setTermTab, setTerminalLines, showTerminal, termTab, terminalLines, theme, t }} />}
 

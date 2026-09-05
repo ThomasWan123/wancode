@@ -1041,6 +1041,49 @@ button.session-item {
   margin: 0.45em 0;
 }
 
+.citation-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.citation-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.citation-check > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-check strong {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.citation-check.verified {
+  border-color: color-mix(in srgb, #2f9d68 35%, var(--border));
+  color: #237a50;
+}
+
+.citation-check.unverifiable {
+  border-color: color-mix(in srgb, #d65a4a 45%, var(--border));
+  color: #b34034;
+  background: color-mix(in srgb, #d65a4a 7%, transparent);
+}
+
 .msg.assistant pre {
   position: relative;
   background: var(--bg0);
