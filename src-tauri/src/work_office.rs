@@ -36,9 +36,18 @@ impl Default for OfficeLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfficeError {
     NotAZip(String),
-    TooManyEntries { entries: usize, cap: usize },
-    DeclaredSizeOverCap { declared: u64, cap: u64 },
-    EntryTooLarge { name: String, cap: u64 },
+    TooManyEntries {
+        entries: usize,
+        cap: usize,
+    },
+    DeclaredSizeOverCap {
+        declared: u64,
+        cap: u64,
+    },
+    EntryTooLarge {
+        name: String,
+        cap: u64,
+    },
     UnsafeEntryName(String),
     MissingWorkbook,
     MissingSlides,
@@ -47,9 +56,17 @@ pub enum OfficeError {
     DoctypeRejected,
     InvalidCellReference(String),
     InvalidSharedStringIndex(String),
-    TooManyBlocks { cap: usize },
-    BlockTooLong { path: String, cap: usize },
-    TruncatedXml { part: &'static str, open_elements: usize },
+    TooManyBlocks {
+        cap: usize,
+    },
+    BlockTooLong {
+        path: String,
+        cap: usize,
+    },
+    TruncatedXml {
+        part: &'static str,
+        open_elements: usize,
+    },
     NoExtractableText,
 }
 
@@ -74,7 +91,10 @@ impl std::fmt::Display for OfficeError {
             Self::InvalidSharedStringIndex(v) => write!(f, "XLSX 共享字符串索引非法：{v}"),
             Self::TooManyBlocks { cap } => write!(f, "Office 文本块超过上限 {cap}"),
             Self::BlockTooLong { path, cap } => write!(f, "Office 文本块 {path} 超过上限 {cap}"),
-            Self::TruncatedXml { part, open_elements } => write!(
+            Self::TruncatedXml {
+                part,
+                open_elements,
+            } => write!(
                 f,
                 "Office XML {part} 在元素闭合前结束（未闭合元素 {open_elements} 个）"
             ),
@@ -84,6 +104,34 @@ impl std::fmt::Display for OfficeError {
 }
 
 impl std::error::Error for OfficeError {}
+
+fn track_xml_depth(
+    event: &Result<quick_xml::events::Event<'_>, quick_xml::Error>,
+    open_elements: &mut usize,
+) -> Result<(), OfficeError> {
+    use quick_xml::events::Event;
+    match event {
+        Ok(Event::Start(_)) => *open_elements += 1,
+        Ok(Event::End(_)) => {
+            *open_elements = open_elements
+                .checked_sub(1)
+                .ok_or_else(|| OfficeError::Xml("结束标签没有对应的开始标签".into()))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reject_truncated_xml(part: &'static str, open_elements: usize) -> Result<(), OfficeError> {
+    if open_elements > 0 {
+        Err(OfficeError::TruncatedXml {
+            part,
+            open_elements,
+        })
+    } else {
+        Ok(())
+    }
+}
 
 fn open_package(
     path: &Path,
@@ -203,8 +251,11 @@ fn parse_relationships(
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut relationships = HashMap::new();
+    let mut open_elements = 0usize;
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        track_xml_depth(&event, &mut open_elements)?;
+        match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(element) | Event::Empty(element))
                 if element.local_name().as_ref() == b"Relationship" =>
@@ -238,7 +289,10 @@ fn parse_relationships(
                     return Err(OfficeError::Xml(format!("Office 关系 Id 重复：{id}")));
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                reject_truncated_xml("relationships", open_elements)?;
+                break;
+            }
             Err(error) => return Err(OfficeError::Xml(error.to_string())),
             _ => {}
         }
@@ -250,8 +304,11 @@ fn parse_workbook_sheet_refs(xml: &str) -> Result<Vec<(String, String)>, OfficeE
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut sheets = Vec::new();
+    let mut open_elements = 0usize;
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        track_xml_depth(&event, &mut open_elements)?;
+        match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(element) | Event::Empty(element))
                 if element.local_name().as_ref() == b"sheet" =>
@@ -271,7 +328,10 @@ fn parse_workbook_sheet_refs(xml: &str) -> Result<Vec<(String, String)>, OfficeE
                         .ok_or_else(|| OfficeError::Xml("XLSX sheet 缺少 r:id".into()))?,
                 ));
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                reject_truncated_xml("workbook", open_elements)?;
+                break;
+            }
             Err(error) => return Err(OfficeError::Xml(error.to_string())),
             _ => {}
         }
@@ -283,8 +343,11 @@ fn parse_presentation_slide_refs(xml: &str) -> Result<Vec<String>, OfficeError> 
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut slides = Vec::new();
+    let mut open_elements = 0usize;
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        track_xml_depth(&event, &mut open_elements)?;
+        match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(element) | Event::Empty(element))
                 if element.local_name().as_ref() == b"sldId" =>
@@ -297,7 +360,10 @@ fn parse_presentation_slide_refs(xml: &str) -> Result<Vec<String>, OfficeError> 
                     .ok_or_else(|| OfficeError::Xml("PPTX sldId 缺少 r:id".into()))?;
                 slides.push(relationship_id);
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                reject_truncated_xml("presentation", open_elements)?;
+                break;
+            }
             Err(error) => return Err(OfficeError::Xml(error.to_string())),
             _ => {}
         }
@@ -369,13 +435,7 @@ fn parse_shared_strings(xml: &str) -> Result<Vec<String>, OfficeError> {
     let mut open_elements = 0usize;
     loop {
         let event = reader.read_event();
-        match &event {
-            Ok(Event::Start(_)) => open_elements += 1,
-            Ok(Event::End(_)) => open_elements = open_elements
-                .checked_sub(1)
-                .ok_or_else(|| OfficeError::Xml("结束标签没有对应的开始标签".into()))?,
-            _ => {}
-        }
+        track_xml_depth(&event, &mut open_elements)?;
         match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"si" => {
@@ -392,9 +452,7 @@ fn parse_shared_strings(xml: &str) -> Result<Vec<String>, OfficeError> {
                 append_event_text(current.as_mut().expect("in_text requires current"), event)?;
             }
             Ok(Event::Eof) => {
-                if open_elements > 0 {
-                    return Err(OfficeError::TruncatedXml { part: "sharedStrings", open_elements });
-                }
+                reject_truncated_xml("sharedStrings", open_elements)?;
                 break;
             }
             Err(e) => return Err(OfficeError::Xml(e.to_string())),
@@ -436,13 +494,7 @@ fn parse_sheet(
     let mut open_elements = 0usize;
     loop {
         let event = reader.read_event();
-        match &event {
-            Ok(Event::Start(_)) => open_elements += 1,
-            Ok(Event::End(_)) => open_elements = open_elements
-                .checked_sub(1)
-                .ok_or_else(|| OfficeError::Xml("结束标签没有对应的开始标签".into()))?,
-            _ => {}
-        }
+        track_xml_depth(&event, &mut open_elements)?;
         match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"c" => {
@@ -531,9 +583,7 @@ fn parse_sheet(
                 }
             }
             Ok(Event::Eof) => {
-                if open_elements > 0 {
-                    return Err(OfficeError::TruncatedXml { part: "worksheet", open_elements });
-                }
+                reject_truncated_xml("worksheet", open_elements)?;
                 break;
             }
             Err(e) => return Err(OfficeError::Xml(e.to_string())),
@@ -592,13 +642,7 @@ fn parse_slide(
     let mut open_elements = 0usize;
     loop {
         let event = reader.read_event();
-        match &event {
-            Ok(Event::Start(_)) => open_elements += 1,
-            Ok(Event::End(_)) => open_elements = open_elements
-                .checked_sub(1)
-                .ok_or_else(|| OfficeError::Xml("结束标签没有对应的开始标签".into()))?,
-            _ => {}
-        }
+        track_xml_depth(&event, &mut open_elements)?;
         match event {
             Ok(Event::DocType(_)) => return Err(OfficeError::DoctypeRejected),
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" => {
@@ -619,9 +663,7 @@ fn parse_slide(
                 append_event_text(&mut current, event)?
             }
             Ok(Event::Eof) => {
-                if open_elements > 0 {
-                    return Err(OfficeError::TruncatedXml { part: "slide", open_elements });
-                }
+                reject_truncated_xml("slide", open_elements)?;
                 break;
             }
             Err(e) => return Err(OfficeError::Xml(e.to_string())),
@@ -790,11 +832,17 @@ mod tests {
     fn truncated_xlsx_cell_rejects_the_whole_document() {
         let file = xlsx_package(
             &[("Budget", "rId1", "worksheets/sheet1.xml")],
-            &[("xl/worksheets/sheet1.xml", r#"<worksheet><c r="A1"><v>kept-prefix</v></c><c r="B1"><v>lost-tail</v>"#)],
+            &[(
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><c r="A1"><v>kept-prefix</v></c><c r="B1"><v>lost-tail</v>"#,
+            )],
         );
         assert!(matches!(
             parse_xlsx(file.path(), OfficeLimits::default()),
-            Err(OfficeError::TruncatedXml { part: "worksheet", .. })
+            Err(OfficeError::TruncatedXml {
+                part: "worksheet",
+                ..
+            })
         ));
     }
 
@@ -802,7 +850,10 @@ mod tests {
     fn truncated_pptx_text_rejects_the_whole_document() {
         let file = pptx_package(
             &[("rId1", "slides/slide1.xml")],
-            &[("ppt/slides/slide1.xml", r#"<p:sld><a:t>kept-prefix</a:t><a:t>lost-tail"#)],
+            &[(
+                "ppt/slides/slide1.xml",
+                r#"<p:sld><a:t>kept-prefix</a:t><a:t>lost-tail"#,
+            )],
         );
         assert!(matches!(
             parse_pptx(file.path(), OfficeLimits::default()),
@@ -814,7 +865,60 @@ mod tests {
     fn truncated_shared_string_table_is_rejected() {
         assert!(matches!(
             parse_shared_strings("<sst><si><t>lost-tail</t>"),
-            Err(OfficeError::TruncatedXml { part: "sharedStrings", .. })
+            Err(OfficeError::TruncatedXml {
+                part: "sharedStrings",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn truncated_workbook_index_is_rejected() {
+        assert!(matches!(
+            parse_workbook_sheet_refs(
+                r#"<workbook xmlns:r="r"><sheets><sheet name="kept" r:id="rId1"/><sheet name="lost" r:id="rId2">"#,
+            ),
+            Err(OfficeError::TruncatedXml {
+                part: "workbook",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn truncated_presentation_index_is_rejected() {
+        assert!(matches!(
+            parse_presentation_slide_refs(
+                r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/><p:sldId r:id="rId2">"#,
+            ),
+            Err(OfficeError::TruncatedXml {
+                part: "presentation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn truncated_relationship_index_is_rejected() {
+        assert!(matches!(
+            parse_relationships(
+                r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml">"#,
+                "xl",
+                "xl/worksheets/",
+                "/worksheet",
+            ),
+            Err(OfficeError::TruncatedXml {
+                part: "relationships",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unmatched_end_tag_remains_fail_closed() {
+        assert!(matches!(
+            parse_workbook_sheet_refs("</workbook>"),
+            Err(OfficeError::Xml(_))
         ));
     }
 
