@@ -54,14 +54,42 @@ describe("verifyWorkCitations", () => {
 });
 
 describe("attachWorkCitationChecks", () => {
-  it("decorates only the latest assistant reply and is idempotent across event/response paths", () => {
+  it("decorates every assistant segment in the current turn and is idempotent", () => {
     type Item = { kind: string; text?: string; citationChecks?: ReturnType<typeof verifyWorkCitations> };
     const earlier: Item = { kind: "assistant", text: "old [ghost.docx — body/p[1]]" };
-    const latest: Item = { kind: "assistant", text: "new [report.docx — body/p[41]]" };
-    const once = attachWorkCitationChecks([earlier, { kind: "tool" }, latest], sources);
+    const firstSegment: Item = {
+      kind: "assistant",
+      text: "grounded [report.docx — body/p[41]] invented [fake.docx — body/p[99]]",
+    };
+    const lastSegment: Item = { kind: "assistant", text: "final text without a citation" };
+    const once = attachWorkCitationChecks([
+      earlier,
+      { kind: "user", text: "new prompt" },
+      firstSegment,
+      { kind: "thought", text: "thinking" },
+      lastSegment,
+    ], sources);
     expect(once[0].citationChecks).toBeUndefined();
-    expect(once[2].citationChecks?.[0].status).toBe("verified");
+    expect(once[2].citationChecks?.map((check) => check.status)).toEqual([
+      "verified",
+      "unverifiable",
+    ]);
+    expect(once[4].citationChecks).toEqual([]);
     expect(attachWorkCitationChecks(once, [])).toBe(once);
+  });
+
+  it("still verifies the assistant segment when a thought ends the turn", () => {
+    const items: Array<{
+      kind: string;
+      text: string;
+      citationChecks?: ReturnType<typeof verifyWorkCitations>;
+    }> = [
+      { kind: "user", text: "question" },
+      { kind: "assistant", text: "answer [report.docx — body/p[41]]" },
+      { kind: "thought", text: "trailing thought" },
+    ];
+    const checked = attachWorkCitationChecks(items, sources);
+    expect(checked[1].citationChecks?.[0].status).toBe("verified");
   });
 
   it("does not attach a completion catalog to an older reply when the turn has no final assistant", () => {

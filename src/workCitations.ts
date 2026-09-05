@@ -50,13 +50,27 @@ export function attachWorkCitationChecks<T extends {
   text?: string;
   citationChecks?: WorkCitationCheck[];
 }>(items: readonly T[], sources: readonly WorkCitationSource[]): T[] | readonly T[] {
-  const index = items.length - 1;
-  const item = items[index];
-  if (!item || item.kind !== "assistant" || item.citationChecks !== undefined) return items;
-  const next = items.slice();
-  next[index] = {
-    ...item,
-    citationChecks: verifyWorkCitations(item.text ?? "", sources),
-  };
-  return next;
+  let turnStart = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind === "user") {
+      turnStart = index;
+      break;
+    }
+  }
+  // A completion catalog is valid only for a turn whose user boundary is
+  // present in this transcript. Never apply today's document snapshot to
+  // assistant messages loaded from an older or incomplete replay.
+  if (turnStart < 0) return items;
+
+  let next: T[] | undefined;
+  for (let index = turnStart + 1; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.kind !== "assistant" || item.citationChecks !== undefined) continue;
+    next ??= items.slice();
+    next[index] = {
+      ...item,
+      citationChecks: verifyWorkCitations(item.text ?? "", sources),
+    };
+  }
+  return next ?? items;
 }
