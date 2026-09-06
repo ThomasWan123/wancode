@@ -70,7 +70,7 @@ fn helper(mode: &str, dir: PathBuf) {
         std::thread::sleep(Duration::from_millis(25));
     }
     let pid = match mode {
-        // 走生产真实使用的 verified 入口（spawn + 原始句柄存活确认），
+        // 走生产真实使用的 breakaway + 存活确认入口，
         // 把这条链整段锁进测试。孙进程 ping 常驻 60s，300ms 存活检查必过。
         "breakaway" => updater_launch::win::spawn_breakaway_and_confirm_alive(
             std::path::Path::new(GRANDCHILD),
