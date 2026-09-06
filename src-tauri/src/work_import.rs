@@ -587,6 +587,12 @@ pub fn replace_work_snapshot(
 }
 
 fn validate_snapshot_preflight(sources: &[PathBuf]) -> Result<(), WorkImportError> {
+    if sources.len() > MAX_WORK_SNAPSHOT_DOCUMENTS {
+        return Err(WorkImportError::TooManySources {
+            count: sources.len(),
+            cap: MAX_WORK_SNAPSHOT_DOCUMENTS,
+        });
+    }
     let mut usage = SnapshotUsage::default();
     for source in sources {
         let (kind, bytes) = source_metadata(source)?;
