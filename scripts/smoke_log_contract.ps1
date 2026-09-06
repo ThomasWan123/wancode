@@ -20,6 +20,20 @@ function Assert-SmokeLogContract {
   if ($scenarios.Count -eq 0 -or @($scenarios | Select-Object -Unique).Count -ne $scenarios.Count) {
     throw "smoke contract: scenario set must be non-empty and unique"
   }
+  $reportedScenarios = @()
+  foreach ($line in @($lines | Where-Object { $_ -match '^SMOKE SCENARIO ' })) {
+    if ($line -notmatch '^SMOKE SCENARIO ([A-Za-z0-9-]+) (PASS|FAIL)$') {
+      throw "smoke contract: malformed scenario completion: $line"
+    }
+    if ($Matches[2] -ne 'PASS') {
+      throw "smoke contract: scenario $($Matches[1]) did not pass"
+    }
+    $reportedScenarios += $Matches[1]
+  }
+  if ($reportedScenarios.Count -ne $scenarios.Count -or
+      @(Compare-Object $scenarios $reportedScenarios).Count -ne 0) {
+    throw "smoke contract: reported scenario set does not exactly match expectation"
+  }
   foreach ($scenario in $scenarios) {
     $escaped = [regex]::Escape($scenario)
     $passLines = @($lines | Where-Object { $_ -match "^SMOKE SCENARIO $escaped PASS$" })

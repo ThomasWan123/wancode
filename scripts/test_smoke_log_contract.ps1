@@ -50,6 +50,14 @@ try {
 
   $zero = Write-Case 'zero' @('SMOKE EXPECT mode=full scenarios=S1-start', 'SMOKE DONE pass=0 fail=0')
   Must-Fail { Assert-SmokeLogContract -LogPath $zero -ExpectedMode full } 'zero-check pass'
+
+  $extra = Write-Case 'extra' @(
+    'SMOKE EXPECT mode=work scenarios=S7-work',
+    'SMOKE SCENARIO S7-work PASS',
+    'SMOKE SCENARIO S2-reply PASS',
+    'SMOKE DONE pass=11 fail=0'
+  )
+  Must-Fail { Assert-SmokeLogContract -LogPath $extra -ExpectedMode work } 'unexpected scenario'
   Write-Host 'smoke log contract positive and negative controls passed'
 } finally {
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
