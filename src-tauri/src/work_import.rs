@@ -149,6 +149,73 @@ fn image_mime_for_kind(kind: &str) -> Option<&'static str> {
     }
 }
 
+fn is_supported_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "docx" | "pdf" | "xlsx" | "pptx" | "png" | "jpeg" | "webp"
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct SnapshotUsage {
+    documents: usize,
+    bytes: u64,
+    image_bytes: u64,
+}
+
+impl SnapshotUsage {
+    fn with_added(self, kind: &str, bytes: u64) -> Result<Self, WorkImportError> {
+        let documents = self
+            .documents
+            .checked_add(1)
+            .ok_or(WorkImportError::TooManySources {
+                count: usize::MAX,
+                cap: MAX_WORK_SNAPSHOT_DOCUMENTS,
+            })?;
+        if documents > MAX_WORK_SNAPSHOT_DOCUMENTS {
+            return Err(WorkImportError::TooManySources {
+                count: documents,
+                cap: MAX_WORK_SNAPSHOT_DOCUMENTS,
+            });
+        }
+        let total = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or(WorkImportError::SnapshotTooLarge {
+                bytes: u64::MAX,
+                cap: MAX_WORK_SNAPSHOT_BYTES,
+            })?;
+        if total > MAX_WORK_SNAPSHOT_BYTES {
+            return Err(WorkImportError::SnapshotTooLarge {
+                bytes: total,
+                cap: MAX_WORK_SNAPSHOT_BYTES,
+            });
+        }
+        let image_bytes = if image_mime_for_kind(kind).is_some() {
+            let total_images = self.image_bytes.checked_add(bytes).ok_or(
+                WorkImportError::SnapshotImagesTooLarge {
+                    bytes: u64::MAX,
+                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                },
+            )?;
+            if total_images > MAX_TOTAL_WORK_IMAGE_BYTES as u64 {
+                return Err(WorkImportError::SnapshotImagesTooLarge {
+                    bytes: total_images,
+                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                });
+            }
+            total_images
+        } else {
+            self.image_bytes
+        };
+        Ok(Self {
+            documents,
+            bytes: total,
+            image_bytes,
+        })
+    }
+}
+
 pub fn validate_image_bytes(mime: &str, bytes: &[u8]) -> Result<(), &'static str> {
     let valid = match mime {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -177,9 +244,16 @@ pub fn import_document(
     std::fs::create_dir_all(&ws_dir).map_err(|e| WorkImportError::Io(e.to_string()))?;
     let _lock = acquire_workspace_lock(&ws_dir)?;
     let manifest_path = manifest_path_under(app_data_dir.to_path_buf(), workspace_id);
+    let mut manifest = read_manifest_or_new(&manifest_path, workspace_id)?;
+    let existing_usage = manifest_usage(&ws_dir, &manifest)?;
+    let (source_kind, source_bytes) = source_metadata(source)?;
+    existing_usage.with_added(source_kind, source_bytes)?;
+
     let staged = stage_source(&ws_dir, source)?;
     let result = (|| -> Result<(), WorkImportError> {
-        let mut manifest = read_manifest_or_new(&manifest_path, workspace_id)?;
+        // Recheck using bytes actually copied: the source may have changed after
+        // metadata preflight, while the workspace lock only serializes imports.
+        existing_usage.with_added(&staged.record.kind, staged.byte_len)?;
         manifest.imports.push(staged.record.clone());
         manifest.write_atomic(&manifest_path)?;
         Ok(())
@@ -189,6 +263,66 @@ pub fn import_document(
         return Err(error);
     }
     Ok(staged.record)
+}
+
+fn source_metadata(source: &Path) -> Result<(&'static str, u64), WorkImportError> {
+    let kind = kind_from_extension(source)?;
+    let metadata = std::fs::metadata(source)
+        .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
+    if !metadata.is_file() {
+        return Err(WorkImportError::SourceUnreadable(format!(
+            "{}: 不是普通文件",
+            source.display()
+        )));
+    }
+    let bytes = metadata.len();
+    let cap = import_byte_cap(kind);
+    if bytes > cap {
+        return Err(WorkImportError::InputTooLarge { bytes, cap });
+    }
+    Ok((kind, bytes))
+}
+
+fn manifest_usage(
+    ws_dir: &Path,
+    manifest: &WorkManifest,
+) -> Result<SnapshotUsage, WorkImportError> {
+    let mut usage = SnapshotUsage::default();
+    for record in &manifest.imports {
+        if !is_supported_kind(&record.kind) {
+            return Err(WorkImportError::UnsupportedKind(record.kind.clone()));
+        }
+        let expected_rel = format!(
+            "{}/{}",
+            record.import_id.as_str(),
+            staged_file_name(&record.kind)
+        );
+        if record.staging_rel_path != expected_rel {
+            return Err(WorkImportError::SourceUnreadable(format!(
+                "清单暂存路径不合法: {}",
+                record.staging_rel_path
+            )));
+        }
+        let staged_path = ws_dir
+            .join(record.import_id.as_str())
+            .join(staged_file_name(&record.kind));
+        let metadata = std::fs::metadata(&staged_path).map_err(|e| {
+            WorkImportError::SourceUnreadable(format!("{}: {e}", staged_path.display()))
+        })?;
+        if !metadata.is_file() {
+            return Err(WorkImportError::SourceUnreadable(format!(
+                "{}: 不是普通文件",
+                staged_path.display()
+            )));
+        }
+        let bytes = metadata.len();
+        let cap = import_byte_cap(&record.kind);
+        if bytes > cap {
+            return Err(WorkImportError::InputTooLarge { bytes, cap });
+        }
+        usage = usage.with_added(&record.kind, bytes)?;
+    }
+    Ok(usage)
 }
 
 struct StagedSource {
@@ -453,55 +587,10 @@ pub fn replace_work_snapshot(
 }
 
 fn validate_snapshot_preflight(sources: &[PathBuf]) -> Result<(), WorkImportError> {
-    if sources.len() > MAX_WORK_SNAPSHOT_DOCUMENTS {
-        return Err(WorkImportError::TooManySources {
-            count: sources.len(),
-            cap: MAX_WORK_SNAPSHOT_DOCUMENTS,
-        });
-    }
-    let mut total = 0u64;
-    let mut total_image_bytes = 0u64;
+    let mut usage = SnapshotUsage::default();
     for source in sources {
-        let kind = kind_from_extension(source)?;
-        let metadata = std::fs::metadata(source)
-            .map_err(|e| WorkImportError::SourceUnreadable(format!("{}: {e}", source.display())))?;
-        if !metadata.is_file() {
-            return Err(WorkImportError::SourceUnreadable(format!(
-                "{}: 不是普通文件",
-                source.display()
-            )));
-        }
-        let bytes = metadata.len();
-        let cap = import_byte_cap(kind);
-        if bytes > cap {
-            return Err(WorkImportError::InputTooLarge { bytes, cap });
-        }
-        total = total
-            .checked_add(bytes)
-            .ok_or(WorkImportError::SnapshotTooLarge {
-                bytes: u64::MAX,
-                cap: MAX_WORK_SNAPSHOT_BYTES,
-            })?;
-        if total > MAX_WORK_SNAPSHOT_BYTES {
-            return Err(WorkImportError::SnapshotTooLarge {
-                bytes: total,
-                cap: MAX_WORK_SNAPSHOT_BYTES,
-            });
-        }
-        if image_mime_for_kind(kind).is_some() {
-            total_image_bytes = total_image_bytes.checked_add(bytes).ok_or(
-                WorkImportError::SnapshotImagesTooLarge {
-                    bytes: u64::MAX,
-                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
-                },
-            )?;
-            if total_image_bytes > MAX_TOTAL_WORK_IMAGE_BYTES as u64 {
-                return Err(WorkImportError::SnapshotImagesTooLarge {
-                    bytes: total_image_bytes,
-                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
-                });
-            }
-        }
+        let (kind, bytes) = source_metadata(source)?;
+        usage = usage.with_added(kind, bytes)?;
     }
     Ok(())
 }
@@ -559,6 +648,46 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    fn seed_sparse_manifest(
+        app: &Path,
+        ws: &WorkspaceId,
+        kind: &str,
+        sizes: &[u64],
+    ) -> WorkManifest {
+        let ws_dir = workspace_dir_under(app.to_path_buf(), ws);
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let mut manifest = WorkManifest::new(ws.clone());
+        for (index, size) in sizes.iter().enumerate() {
+            let import_id = ImportId::mint();
+            let file_name = staged_file_name(kind);
+            let import_dir = ws_dir.join(import_id.as_str());
+            std::fs::create_dir(&import_dir).unwrap();
+            std::fs::File::create(import_dir.join(&file_name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+            manifest.imports.push(ImportRecord {
+                import_id: import_id.clone(),
+                source_sha256: "0".repeat(64),
+                display_name: format!("seed-{index}.{kind}"),
+                staging_rel_path: format!("{}/{file_name}", import_id.as_str()),
+                kind: kind.to_string(),
+            });
+        }
+        manifest
+            .write_atomic(&manifest_path_under(app.to_path_buf(), ws))
+            .unwrap();
+        manifest
+    }
+
+    fn import_dir_count(app: &Path, ws: &WorkspaceId) -> usize {
+        std::fs::read_dir(workspace_dir_under(app.to_path_buf(), ws))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("imp-"))
+            .count()
     }
 
     #[test]
@@ -773,6 +902,94 @@ mod tests {
                 ..
             } if cap == MAX_TOTAL_WORK_IMAGE_BYTES as u64
         ));
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn sequential_import_rejects_seventeenth_document_without_mutation() {
+        let app = tmp_dir("sequential-count-app");
+        let src_dir = tmp_dir("sequential-count-src");
+        let ws = WorkspaceId::mint();
+        let source = write_source(&src_dir, "small.docx", b"document");
+        for _ in 0..MAX_WORK_SNAPSHOT_DOCUMENTS {
+            import_document(&app, &ws, &source).unwrap();
+        }
+        let manifest_path = manifest_path_under(app.clone(), &ws);
+        let before = std::fs::read(&manifest_path).unwrap();
+
+        let error = import_document(&app, &ws, &source).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkImportError::TooManySources {
+                count,
+                cap
+            } if count == MAX_WORK_SNAPSHOT_DOCUMENTS + 1 && cap == MAX_WORK_SNAPSHOT_DOCUMENTS
+        ));
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+        assert_eq!(
+            list_imports(&app, &ws).unwrap().len(),
+            MAX_WORK_SNAPSHOT_DOCUMENTS
+        );
+        assert_eq!(import_dir_count(&app, &ws), MAX_WORK_SNAPSHOT_DOCUMENTS);
+
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn sequential_import_rejects_cumulative_image_budget_before_staging() {
+        let app = tmp_dir("sequential-image-app");
+        let src_dir = tmp_dir("sequential-image-src");
+        let ws = WorkspaceId::mint();
+        let manifest = seed_sparse_manifest(
+            &app,
+            &ws,
+            "png",
+            &[MAX_IMAGE_IMPORT_BYTES, MAX_IMAGE_IMPORT_BYTES],
+        );
+        let source = write_source(&src_dir, "next.png", b"\x89PNG\r\n\x1a\n");
+        let manifest_path = manifest_path_under(app.clone(), &ws);
+        let before = std::fs::read(&manifest_path).unwrap();
+
+        let error = import_document(&app, &ws, &source).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkImportError::SnapshotImagesTooLarge { cap, .. }
+                if cap == MAX_TOTAL_WORK_IMAGE_BYTES as u64
+        ));
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+        assert_eq!(list_imports(&app, &ws).unwrap(), manifest.imports);
+        assert_eq!(import_dir_count(&app, &ws), 2);
+
+        let _ = std::fs::remove_dir_all(&app);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn sequential_import_rejects_cumulative_total_budget_before_staging() {
+        let app = tmp_dir("sequential-total-app");
+        let src_dir = tmp_dir("sequential-total-src");
+        let ws = WorkspaceId::mint();
+        let manifest = seed_sparse_manifest(
+            &app,
+            &ws,
+            "pdf",
+            &[MAX_DOCUMENT_IMPORT_BYTES, MAX_DOCUMENT_IMPORT_BYTES],
+        );
+        let source = write_source(&src_dir, "next.docx", b"document");
+        let manifest_path = manifest_path_under(app.clone(), &ws);
+        let before = std::fs::read(&manifest_path).unwrap();
+
+        let error = import_document(&app, &ws, &source).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkImportError::SnapshotTooLarge { cap, .. } if cap == MAX_WORK_SNAPSHOT_BYTES
+        ));
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+        assert_eq!(list_imports(&app, &ws).unwrap(), manifest.imports);
+        assert_eq!(import_dir_count(&app, &ws), 2);
+
+        let _ = std::fs::remove_dir_all(&app);
         let _ = std::fs::remove_dir_all(&src_dir);
     }
 
