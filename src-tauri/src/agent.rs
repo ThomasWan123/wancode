@@ -746,8 +746,6 @@ fn ext_method_policy(method: &str) -> ExtMethodPolicy {
         "x.ai/search/fuzzy/open"
             | "x.ai/search/fuzzy/change"
             | "x.ai/search/fuzzy/close"
-            | "x.ai/skills/list"
-            | "x.ai/skills/config"
             | "x.ai/plugins/list"
     ) {
         return read();
@@ -756,11 +754,6 @@ fn ext_method_policy(method: &str) -> ExtMethodPolicy {
     if matches!(
         method,
         "x.ai/git/worktree/resume_session"
-            | "x.ai/skills/add"
-            | "x.ai/skills/remove"
-            | "x.ai/skills/reset"
-            | "x.ai/skills/toggle"
-            | "x.ai/skills/refresh-baseline"
             | "x.ai/plugins/action"
             | "x.ai/memory/flush"
             | "x.ai/memory/rewrite"
@@ -797,6 +790,13 @@ fn ext_method_policy(method: &str) -> ExtMethodPolicy {
         "x.ai/session_summaries/workspace_list" => Some("lists workspace labels from session history"),
         "x.ai/session_summaries/workspace_list_recent" => Some("lists recent workspace labels from session history"),
         "x.ai/sessions/list" => Some("lists user-owned session metadata"),
+        "x.ai/skills/add" => Some("user-invoked Skills settings control plane; not callable by the model"),
+        "x.ai/skills/config" => Some("shows Skills settings metadata to the local user; not model context"),
+        "x.ai/skills/list" => Some("shows discovered Skills metadata to the local user; not model context"),
+        "x.ai/skills/refresh-baseline" => Some("applies a user-invoked Skills settings change to future sessions"),
+        "x.ai/skills/remove" => Some("user-invoked Skills settings control plane; not callable by the model"),
+        "x.ai/skills/reset" => Some("user-invoked Skills settings control plane; not callable by the model"),
+        "x.ai/skills/toggle" => Some("user-invoked Skills settings control plane; not callable by the model"),
         "x.ai/suggest" => Some("returns conversation-derived prompt suggestions"),
         "x.ai/toggle_plan_mode" => Some("narrows or restores the active session mode"),
         "x.ai/workspaces/list" => Some("lists workspace labels from session history"),
@@ -1864,6 +1864,37 @@ mod surface_launchable_tests {
     }
 
     #[test]
+    fn skills_settings_are_an_explicit_user_control_plane_not_a_model_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = issue_session_capability_lease(
+            "chat-skills-settings",
+            SurfaceKind::Chat,
+            root.path(),
+            None,
+            Some("deepseek:chat"),
+            &[],
+        )
+        .unwrap();
+        assert!(chat.authorize_tool("read", ToolRisk::ReadOnly).is_err());
+        assert!(chat.authorize_tool("other", ToolRisk::Privileged).is_err());
+
+        for method in [
+            "x.ai/skills/add",
+            "x.ai/skills/config",
+            "x.ai/skills/list",
+            "x.ai/skills/refresh-baseline",
+            "x.ai/skills/remove",
+            "x.ai/skills/reset",
+            "x.ai/skills/toggle",
+        ] {
+            let ExtMethodPolicy::NoCapability(reason) = ext_method_policy(method) else {
+                panic!("{method} must be an explicit user-control-plane allowlist entry")
+            };
+            assert!(!reason.trim().is_empty(), "{method} needs a rationale");
+        }
+    }
+
+    #[test]
     fn every_extension_literal_in_rust_sources_has_an_explicit_policy() {
         fn rust_files_below(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).expect("read Rust source directory") {
@@ -1876,7 +1907,11 @@ mod surface_launchable_tests {
             }
         }
 
-        fn extension_literals(source: &str, out: &mut BTreeSet<String>) {
+        fn extension_literals(
+            source: &str,
+            out: &mut BTreeSet<String>,
+            invalid: &mut BTreeSet<String>,
+        ) {
             let mut rest = source;
             while let Some(start) = rest.find("\"x.ai/") {
                 rest = &rest[start + 1..];
@@ -1887,6 +1922,8 @@ mod surface_launchable_tests {
                     .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
                 {
                     out.insert(candidate.to_owned());
+                } else {
+                    invalid.insert(candidate.to_owned());
                 }
                 rest = &rest[end + 1..];
             }
@@ -1898,12 +1935,31 @@ mod surface_launchable_tests {
             &mut files,
         );
         let mut methods = BTreeSet::new();
+        let mut invalid = BTreeSet::new();
         for file in files {
             extension_literals(
                 &std::fs::read_to_string(&file).expect("read Rust source"),
                 &mut methods,
+                &mut invalid,
             );
         }
+        // These are diagnostic sentences, not callable method literals. Keep
+        // the allowlist exact: any new malformed-looking x.ai literal must be
+        // reviewed instead of disappearing from the completeness gate.
+        for diagnostic in [
+            "x.ai/hooks/list 调用失败",
+            "x.ai/hooks/list 超时",
+            "x.ai/plugins/action 调用失败",
+            "x.ai/plugins/action 超时",
+            "x.ai/plugins/list 调用失败",
+            "x.ai/plugins/list 超时：session actor / 初始化链有问题。{dbg} model_requests={}",
+        ] {
+            invalid.remove(diagnostic);
+        }
+        assert!(
+            invalid.is_empty(),
+            "malformed x.ai literals need explicit classification instead of being skipped: {invalid:?}"
+        );
         // These are match prefixes/metadata namespaces, not callable methods.
         for prefix in [
             "x.ai/",

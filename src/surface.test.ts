@@ -3,6 +3,7 @@ import {
   decideBackendSurface,
   parseSurface,
   resolveActiveSurface,
+  loadWorkspaceCommandsForSurface,
   runWorkspaceReadIfAllowed,
   surfaceCanReadWorkspace,
   surfaceLabel,
@@ -67,6 +68,24 @@ describe("surface navigation contract", () => {
     expect(await invokeRead("code")).toEqual({ invoked: true, value: { worktrees: [] } });
     expect(await invokeRead("work")).toEqual({ invoked: true, value: { worktrees: [] } });
     expect(calls).toEqual(["worktree_list", "worktree_list"]);
+  });
+
+  it("keeps Chat on local slash controls while Code/Work load workspace commands", async () => {
+    const calls: string[] = [];
+    const load = async () => {
+      calls.push("commands/list");
+      return { commands: [{ name: "project-command", description: "from workspace" }] };
+    };
+
+    expect(await loadWorkspaceCommandsForSurface("chat", load)).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(await loadWorkspaceCommandsForSurface("code", load)).toEqual([
+      { name: "project-command", description: "from workspace" },
+    ]);
+    expect(await loadWorkspaceCommandsForSurface("work", load)).toEqual([
+      { name: "project-command", description: "from workspace" },
+    ]);
+    expect(calls).toEqual(["commands/list", "commands/list"]);
   });
 
   // 激活门(W2-fe-a R1 引入,W2-fe-b 起 Work 已接线放行)。门的形状随

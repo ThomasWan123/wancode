@@ -42,6 +42,7 @@ import { checkPostUpdate, runUpdateFlow } from "./update";
 import { STRINGS, loadLang, type Lang } from "./i18n";
 import {
   decideBackendSurface,
+  loadWorkspaceCommandsForSurface,
   resolveActiveSurface,
   runWorkspaceReadIfAllowed,
   surfaceCanReadWorkspace,
@@ -1927,10 +1928,16 @@ function App() {
           histIdxRef.current = -1;
         })
         .catch(() => {});
-      // 斜杠命令来自引擎注册表：内置 + 技能 + 插件，而非界面硬编码
-      invoke<any>("agent_commands_list", { workspace: wsPath })
-        .then((r) => setEngineCommands(r?.commands ?? []))
-        .catch(() => {});
+      // 项目/技能/插件命令发现会读取 cwd。Chat 保留上方本地会话控制，
+      // 但不发起工作区命令发现；Code/Work 才读取完整引擎注册表。
+      void loadWorkspaceCommandsForSurface(decision.surface, () =>
+        invoke<any>("agent_commands_list", { workspace: wsPath }),
+      )
+        .then(setEngineCommands)
+        .catch((e) => {
+          setEngineCommands([]);
+          setError(`commands: ${String(e)}`);
+        });
       return r.session_id;
     } catch (e) {
       const msg = String(e);

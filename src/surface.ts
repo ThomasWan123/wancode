@@ -72,6 +72,21 @@ export async function runWorkspaceReadIfAllowed<T>(
   return { invoked: true, value: await read() };
 }
 
+export type EngineCommand = { name: string; description?: string };
+
+/**
+ * The engine command registry can include project skills and plugins, so it is
+ * a workspace read. Chat keeps its local session controls but must not perform
+ * that discovery; Code and Work load the full registry.
+ */
+export async function loadWorkspaceCommandsForSurface(
+  kind: SurfaceKind,
+  load: () => Promise<{ commands?: EngineCommand[] }>,
+): Promise<EngineCommand[]> {
+  const attempt = await runWorkspaceReadIfAllowed(kind, load);
+  return attempt.invoked ? attempt.value.commands ?? [] : [];
+}
+
 /** Localized top-bar label. Default language is zh (聊天 / 代码 / 工作). */
 export function surfaceLabel(
   kind: SurfaceKind,
