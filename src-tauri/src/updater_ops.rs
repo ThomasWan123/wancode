@@ -3,7 +3,7 @@
 //! 插件仍负责 check + 验签下载（这部分 2026-07-30 实证是好的：落盘文件
 //! 与官方 sha256 逐字节一致）；被替换的只有最后一跳：插件的 install() 用
 //! ShellExecuteW（无法 breakaway）且 exit(0) 前不检查启动结果。这里改为
-//! `spawn_breakaway_verified`：显式脱离 Job、确认存活、失败留在应用内报错。
+//! `spawn_breakaway_and_confirm_alive`：显式脱离 Job、确认存活、失败留在应用内报错。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -519,7 +519,7 @@ pub async fn updater_install(
         let mut args: Vec<&str> = vec!["/P", "/R", "/UPDATE", "/ARGS"];
         args.extend(current_args.iter().map(String::as_str));
 
-        let pid = crate::updater_launch::win::spawn_breakaway_verified(&path, &args, 1200)
+        let pid = crate::updater_launch::win::spawn_breakaway_and_confirm_alive(&path, &args, 1200)
             .map_err(|e| format!("安装器启动失败（应用未退出，可重试或手动安装）: {e}"))?;
         tracing::info!(pid, path = %path.display(), "updater: installer launched outside job, exiting app");
         app.exit(0);

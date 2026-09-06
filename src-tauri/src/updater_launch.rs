@@ -125,7 +125,7 @@ pub mod win {
     ///
     /// "短暂检查"不能证明安装一定成功（那由下次启动的版本对账负责，#121），
     /// 但能把这次事故的形状——**起来即死/根本没起来**——当场变成可见错误。
-    pub fn spawn_breakaway_verified(
+    pub fn spawn_breakaway_and_confirm_alive(
         exe: &Path,
         args: &[&str],
         settle_ms: u64,
@@ -197,7 +197,10 @@ pub mod win {
                 ("", "\"\""),
             ];
             for (orig, escaped) in cases {
-                assert_eq!(super::escape_nsis_current_exe_arg(OsStr::new(orig)), escaped);
+                assert_eq!(
+                    super::escape_nsis_current_exe_arg(OsStr::new(orig)),
+                    escaped
+                );
             }
         }
     }
