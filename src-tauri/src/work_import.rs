@@ -30,6 +30,10 @@ const MAX_DOCUMENT_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_WORK_SNAPSHOT_DOCUMENTS: usize = 16;
 pub const MAX_WORK_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+/// The image budget consumed by `work_context`. Enforcing the same budget at
+/// import preserves the cross-module invariant: an accepted snapshot can be
+/// assembled into a turn instead of becoming permanently unusable afterward.
+pub const MAX_TOTAL_WORK_IMAGE_BYTES: usize = 40 * 1024 * 1024;
 
 /// 导入结果错误(含底层暂存错误)。
 #[derive(Debug)]
@@ -50,6 +54,11 @@ pub enum WorkImportError {
     },
     /// 单回合来源文件累计过大。
     SnapshotTooLarge {
+        bytes: u64,
+        cap: u64,
+    },
+    /// Snapshot images exceed the amount a Work turn can assemble.
+    SnapshotImagesTooLarge {
         bytes: u64,
         cap: u64,
     },
@@ -78,6 +87,9 @@ impl std::fmt::Display for WorkImportError {
             }
             WorkImportError::SnapshotTooLarge { bytes, cap } => {
                 write!(f, "Work 单回合文件累计大小 {bytes} 超过上限 {cap}")
+            }
+            WorkImportError::SnapshotImagesTooLarge { bytes, cap } => {
+                write!(f, "Work 图片累计大小 {bytes} 超过单回合上限 {cap}")
             }
             WorkImportError::SignatureMismatch(s) => write!(f, "{s}"),
             WorkImportError::Staging(e) => write!(f, "暂存失败: {e}"),
@@ -384,6 +396,7 @@ pub fn replace_work_snapshot(
     let mut staged = Vec::with_capacity(sources.len());
     let stage_result = (|| -> Result<(), WorkImportError> {
         let mut total = 0u64;
+        let mut total_image_bytes = 0u64;
         for source in sources {
             let next = stage_source(&ws_dir, source)?;
             total = total
@@ -398,6 +411,21 @@ pub fn replace_work_snapshot(
                     bytes: total,
                     cap: MAX_WORK_SNAPSHOT_BYTES,
                 });
+            }
+            if image_mime_for_kind(&next.record.kind).is_some() {
+                total_image_bytes = total_image_bytes.checked_add(next.byte_len).ok_or(
+                    WorkImportError::SnapshotImagesTooLarge {
+                        bytes: u64::MAX,
+                        cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                    },
+                )?;
+                if total_image_bytes > MAX_TOTAL_WORK_IMAGE_BYTES as u64 {
+                    staged.push(next);
+                    return Err(WorkImportError::SnapshotImagesTooLarge {
+                        bytes: total_image_bytes,
+                        cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                    });
+                }
             }
             staged.push(next);
         }
@@ -432,6 +460,7 @@ fn validate_snapshot_preflight(sources: &[PathBuf]) -> Result<(), WorkImportErro
         });
     }
     let mut total = 0u64;
+    let mut total_image_bytes = 0u64;
     for source in sources {
         let kind = kind_from_extension(source)?;
         let metadata = std::fs::metadata(source)
@@ -458,6 +487,20 @@ fn validate_snapshot_preflight(sources: &[PathBuf]) -> Result<(), WorkImportErro
                 bytes: total,
                 cap: MAX_WORK_SNAPSHOT_BYTES,
             });
+        }
+        if image_mime_for_kind(kind).is_some() {
+            total_image_bytes = total_image_bytes.checked_add(bytes).ok_or(
+                WorkImportError::SnapshotImagesTooLarge {
+                    bytes: u64::MAX,
+                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                },
+            )?;
+            if total_image_bytes > MAX_TOTAL_WORK_IMAGE_BYTES as u64 {
+                return Err(WorkImportError::SnapshotImagesTooLarge {
+                    bytes: total_image_bytes,
+                    cap: MAX_TOTAL_WORK_IMAGE_BYTES as u64,
+                });
+            }
         }
     }
     Ok(())
@@ -709,6 +752,27 @@ mod tests {
         }
         let error = validate_snapshot_preflight(&sources).unwrap_err();
         assert!(matches!(error, WorkImportError::SnapshotTooLarge { .. }));
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    #[test]
+    fn snapshot_image_budget_is_rejected_during_preflight() {
+        let src_dir = tmp_dir("snapshot-image-total-src");
+        let each = MAX_TOTAL_WORK_IMAGE_BYTES as u64 / 3 + 1;
+        let mut sources = Vec::new();
+        for index in 0..3 {
+            let path = src_dir.join(format!("large-{index}.png"));
+            std::fs::File::create(&path).unwrap().set_len(each).unwrap();
+            sources.push(path);
+        }
+        let error = validate_snapshot_preflight(&sources).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkImportError::SnapshotImagesTooLarge {
+                cap,
+                ..
+            } if cap == MAX_TOTAL_WORK_IMAGE_BYTES as u64
+        ));
         let _ = std::fs::remove_dir_all(&src_dir);
     }
 

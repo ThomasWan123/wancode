@@ -176,7 +176,10 @@ impl FrozenRequestEvidence<'_> {
 
 /// Build stable evidence for the exact content sent to ACP without retaining
 /// the prompt or image payload. Length prefixes make the digest unambiguous
-/// across different text/image block boundaries.
+/// across different text/image block boundaries. `byte_len` counts the UTF-8
+/// prompt bytes plus the encoded image-string bytes supplied to ACP (currently
+/// base64), not decoded image bytes. `content_types` is a stable set in first-
+/// seen order; repeated images of one MIME type must not consume the type cap.
 pub fn prompt_evidence<'a>(
     text: &str,
     images: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -190,7 +193,10 @@ pub fn prompt_evidence<'a>(
     for (mime, data) in images {
         update_evidence_part(&mut digest, mime.as_bytes(), data.as_bytes());
         byte_len = byte_len.saturating_add(data.len() as u64);
-        content_types.push(LedgerRedactor::content_type(mime));
+        let content_type = LedgerRedactor::content_type(mime);
+        if !content_types.contains(&content_type) {
+            content_types.push(content_type);
+        }
     }
 
     PromptEvidence {
@@ -981,6 +987,23 @@ mod tests {
         assert_ne!(first.sha256, different_boundary.sha256);
         assert_eq!(first.byte_len, 8);
         assert_eq!(first.content_types, ["text/plain", "image/png"]);
+    }
+
+    #[test]
+    fn prompt_evidence_deduplicates_types_without_deduplicating_payload_evidence() {
+        let one = prompt_evidence("x", [("image/png", "YWJj")]);
+        let repeated = prompt_evidence("x", [("image/png", "YWJj"), ("image/png", "ZGVm")]);
+
+        assert_eq!(repeated.content_types, ["text/plain", "image/png"]);
+        assert_eq!(
+            repeated.byte_len,
+            1 + 4 + 4,
+            "image strings are base64 bytes"
+        );
+        assert_ne!(
+            one.sha256, repeated.sha256,
+            "every image remains in the digest"
+        );
     }
 
     #[test]
