@@ -18,7 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::work_anchor::DocKind as AnchorDocKind;
 use crate::work_blocks::{verified_block_anchors, WorkBlock};
-use crate::work_import::{validate_image_bytes, MAX_WORK_SNAPSHOT_DOCUMENTS};
+use crate::work_import::{
+    validate_image_bytes, MAX_TOTAL_WORK_IMAGE_BYTES, MAX_WORK_SNAPSHOT_DOCUMENTS,
+};
 use crate::work_parse_worker::{
     parse_in_worker, DocKind as ParseDocKind, ParseLimits, ParseRequest, ParsedDoc,
 };
@@ -26,7 +28,6 @@ use crate::work_staging::{manifest_path_under, workspace_dir_under, WorkManifest
 
 const MAX_CONTEXT_UTF16: usize = 48 * 1024;
 const MAX_WORK_IMAGE_BYTES: usize = 20 * 1024 * 1024;
-const MAX_TOTAL_WORK_IMAGE_BYTES: usize = 40 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkPromptImage {
@@ -376,7 +377,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_import::{import_document, validate_image_bytes};
+    use crate::execution_ledger::prompt_evidence;
+    use crate::work_import::{import_document, replace_work_snapshot, validate_image_bytes};
 
     fn block(path: &str, raw: &str) -> WorkBlock {
         WorkBlock {
@@ -552,6 +554,33 @@ mod tests {
         assert_eq!(context.images[0].data, base64_standard(bytes));
         assert!(context.text.contains("chart.PNG"));
         assert!(context.text.contains("attached_image_block"));
+    }
+
+    #[test]
+    fn maximum_document_snapshot_of_images_can_build_prompt_evidence() {
+        let app = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        let sources = (0..MAX_WORK_SNAPSHOT_DOCUMENTS)
+            .map(|index| {
+                let source = source_dir.path().join(format!("image-{index}.png"));
+                std::fs::write(&source, bytes).unwrap();
+                source
+            })
+            .collect::<Vec<_>>();
+        let workspace = WorkspaceId::mint();
+        replace_work_snapshot(app.path(), &workspace, &sources).unwrap();
+
+        let context = build_work_context(app.path(), &workspace, "Compare the images").unwrap();
+        assert_eq!(context.images.len(), MAX_WORK_SNAPSHOT_DOCUMENTS);
+        let evidence = prompt_evidence(
+            &context.text,
+            context
+                .images
+                .iter()
+                .map(|image| (image.mime.as_str(), image.data.as_str())),
+        );
+        assert_eq!(evidence.content_types, ["text/plain", "image/png"]);
     }
 
     #[test]
