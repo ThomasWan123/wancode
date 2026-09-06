@@ -3860,6 +3860,22 @@ async fn authorize_ext_method(
         };
         authorization.map_err(|error| format!("CAPABILITY_PATH_BLOCKED: {method}: {error}"))?;
     }
+    if matches!(
+        method,
+        "x.ai/git/worktree/apply" | "x.ai/git/worktree/remove"
+    ) {
+        let expected_source = params
+            .get("expectedSourceRepo")
+            .or_else(|| params.get("expected_source_repo"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "CAPABILITY_EXTENSION_BLOCKED: {method}: missing expected source repository"
+                )
+            })?;
+        crate::git_ops::validate_same_repository(&cwd, std::path::Path::new(expected_source))
+            .map_err(|error| format!("CAPABILITY_PATH_BLOCKED: {method}: {error}"))?;
+    }
     Ok(())
 }
 

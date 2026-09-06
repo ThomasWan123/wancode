@@ -18,6 +18,10 @@
 # 路径前缀统一为 crates/codegen/xai-grok-shell/
 
 [product]
+crates/codegen/xai-fast-worktree/src/db/mod.rs
+crates/codegen/xai-grok-shell/src/extensions/worktree.rs
+crates/codegen/xai-grok-workspace-types/src/rpc/worktree.rs
+crates/codegen/xai-grok-workspace/src/worktree/mod.rs
 crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 
 # ── 测试足场的 feature 声明 ──
@@ -89,6 +93,7 @@ crates/codegen/xai-grok-shell/src/extensions/hooks.rs
 crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
 
 [tests]
+crates/codegen/xai-fast-worktree/src/db/tests.rs
 
 # SessionHandle 字面量（+1 字段的机械更新）——实测全仓仅此两处
 crates/codegen/xai-grok-shell/src/agent/mvp_agent/tests.rs

@@ -119,6 +119,10 @@ pub async fn worktree_resume_session(
 /// List worktrees. See the casing note above — this one is snake_case.
 #[tauri::command]
 pub async fn worktree_list(state: State<'_, AgentState>) -> Result<serde_json::Value, String> {
+    let cwd = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
+    };
     let v = ext_call(
         &state,
         "x.ai/git/worktree/list",
@@ -128,7 +132,19 @@ pub async fn worktree_list(state: State<'_, AgentState>) -> Result<serde_json::V
     if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
         return Err(e.to_string());
     }
-    Ok(v.get("result").cloned().unwrap_or(v))
+    let mut result = v.get("result").cloned().unwrap_or(v);
+    if let Some(records) = result.as_array_mut() {
+        records.retain(|record| {
+            record
+                .get("path")
+                .or_else(|| record.get("worktree_path"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| {
+                    validate_same_repository(&cwd, std::path::Path::new(path)).is_ok()
+                })
+        });
+    }
+    Ok(result)
 }
 
 /// Merge a worktree's changes back into the main working directory.
@@ -141,9 +157,13 @@ pub async fn worktree_apply(
     state: State<'_, AgentState>,
     worktree_path: String,
 ) -> Result<serde_json::Value, String> {
-    let source = {
+    let (source, source_repo) = {
         let guard = state.handle.lock().await;
-        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.session_id.0.to_string()
+        let handle = guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?;
+        (
+            handle.session_id.0.to_string(),
+            handle.cwd.to_string_lossy().into_owned(),
+        )
     };
     let v = ext_call(
         &state,
@@ -151,6 +171,7 @@ pub async fn worktree_apply(
         serde_json::json!({
             "sessionId": source,
             "worktreePath": worktree_path,
+            "expectedSourceRepo": source_repo,
             // merge 而不是 overwrite：overwrite 是无条件把 worktree 的内容写进
             // 主目录，**从不报冲突**——用户在主目录里对同一文件的改动会被静默
             // 销毁。merge 只在主目录没动过时才应用，两边都改了就报冲突。
@@ -177,6 +198,7 @@ pub async fn worktree_precheck(
         guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
     };
     tokio::task::spawn_blocking(move || {
+        validate_same_repository(&cwd, std::path::Path::new(&worktree_path))?;
         fn changed_paths(repo_path: &std::path::Path) -> Result<Vec<String>, String> {
             let repo = git2::Repository::discover(repo_path)
                 .map_err(|e| format!("打不开仓库 {}: {e}", repo_path.display()))?;
@@ -212,7 +234,15 @@ pub async fn worktree_precheck(
 /// unified patch 存 ~/.grok/wancode-wt-snapshots/，返回路径；树干净返回 null。
 /// 有了它，force 删除才谈得上"可反悔"。
 #[tauri::command]
-pub async fn worktree_snapshot(worktree_path: String) -> Result<serde_json::Value, String> {
+pub async fn worktree_snapshot(
+    state: State<'_, AgentState>,
+    worktree_path: String,
+) -> Result<serde_json::Value, String> {
+    let cwd = {
+        let guard = state.handle.lock().await;
+        guard.as_ref().ok_or(SESSION_NOT_STARTED_ERROR)?.cwd.clone()
+    };
+    validate_same_repository(&cwd, std::path::Path::new(&worktree_path))?;
     let snapshot_dir =
         xai_grok_shell::util::grok_home::grok_home().join("wancode-wt-snapshots");
     worktree_snapshot_into(worktree_path, snapshot_dir).await
@@ -280,16 +310,53 @@ pub async fn worktree_remove(
     id_or_path: String,
     force: bool,
 ) -> Result<serde_json::Value, String> {
+    let source_repo = {
+        let guard = state.handle.lock().await;
+        guard
+            .as_ref()
+            .ok_or(SESSION_NOT_STARTED_ERROR)?
+            .cwd
+            .to_string_lossy()
+            .into_owned()
+    };
     let v = ext_call(
         &state,
         "x.ai/git/worktree/remove",
-        serde_json::json!({ "idOrPath": id_or_path, "force": force, "dryRun": false }),
+        serde_json::json!({
+            "idOrPath": id_or_path,
+            "expectedSourceRepo": source_repo,
+            "force": force,
+            "dryRun": false
+        }),
     )
     .await?;
     if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
         return Err(e.to_string());
     }
     Ok(v.get("result").cloned().unwrap_or(v))
+}
+
+pub(crate) fn validate_same_repository(
+    session_cwd: &std::path::Path,
+    worktree_path: &std::path::Path,
+) -> Result<(), String> {
+    fn common_dir(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        let repo = git2::Repository::discover(path)
+            .map_err(|e| format!("打不开 worktree 所属仓库 {}: {e}", path.display()))?;
+        std::fs::canonicalize(repo.commondir()).map_err(|e| {
+            format!(
+                "无法确认 worktree 所属仓库 {}: {e}",
+                repo.commondir().display()
+            )
+        })
+    }
+
+    let expected = common_dir(session_cwd)?;
+    let actual = common_dir(worktree_path)?;
+    if actual != expected {
+        return Err("WORKTREE_PATH_BLOCKED: target belongs to a different repository".into());
+    }
+    Ok(())
 }
 
 /// Resolve the session workspace's git root LOCALLY (git2 discover).
@@ -557,6 +624,43 @@ pub async fn git_pr_status(state: State<'_, AgentState>) -> Result<serde_json::V
 
 #[cfg(test)]
 mod worktree_safety_tests {
+    fn commit_one_file(repo: &git2::Repository, workdir: &std::path::Path) {
+        std::fs::write(workdir.join("tracked.txt"), "base\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+    }
+
+    #[test]
+    fn worktree_target_must_share_the_sessions_git_common_directory() {
+        let current_dir = std::env::current_dir().unwrap();
+        let temp = tempfile::TempDir::new_in(current_dir).unwrap();
+        let source = temp.path().join("source");
+        let linked = temp.path().join("linked");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let source_repo = git2::Repository::init(&source).unwrap();
+        commit_one_file(&source_repo, &source);
+        source_repo.worktree("linked", &linked, None).unwrap();
+        let other_repo = git2::Repository::init(&other).unwrap();
+        commit_one_file(&other_repo, &other);
+
+        super::validate_same_repository(&source, &linked)
+            .expect("a linked worktree from the current repository is allowed");
+        let error = super::validate_same_repository(&source, &other)
+            .expect_err("a target from another repository must be rejected");
+        assert!(error.contains("WORKTREE_PATH_BLOCKED"));
+        assert!(source.join("tracked.txt").exists());
+        assert!(linked.join("tracked.txt").exists());
+        assert!(other.join("tracked.txt").exists());
+    }
+
     /// v0.16 删除前快照：临时仓库 + 未提交改动 → 生成含 diff 的 patch 文件；
     /// 干净树 → 返回 null 不落文件。
     #[tokio::test]
