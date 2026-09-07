@@ -1,7 +1,7 @@
 # Git worktree target-boundary evidence
 
 Status: engine change merged to the durable `wancode-integration` commit below;
-WanCode re-audit and independent review remain pending.
+WanCode re-audit and candidate CI are complete; independent review remains pending.
 
 Scope: bind worktree apply/remove operations to a registered managed worktree
 owned by the current session repository. This document intentionally records
@@ -31,7 +31,7 @@ recursive-delete, or other destructive boundary probe was executed.
 | Windows managed-path lookup | PASS — the Unix-only permissions test is platform-gated and the focused Windows regression executed successfully |
 | Permanent engine boundary workflow | PASS — exact engine candidate ran the Windows path-lookup regression and both registered-target containment tests |
 | WanCode repository-boundary unit test | PASS — linked worktree accepted; separate temporary repository rejected; all tracked sentinel files remained present |
-| Combined WanCode + durable grok-build compilation/test | PENDING — exact-head GitHub CI will rerun against the merged engine input |
+| Combined WanCode + durable grok-build compilation/test | PASS — candidate head `d6092b8d43fffa3d1556c7052ffc2bbc73199f42`, CI run `34119616593`; rust passed in 51m57s |
 | Effective-tree manifest verification | PASS — durable engine commit, overlay hashes, porcelain set, and registered effective-tree digest match |
 | Intentional-delta migration audit | PASS — A1 through A6; seven engine differences within the cumulative whitelist or admitted as a new file; wiring and Cargo lock unchanged |
 | `git diff --check` | PASS |
@@ -51,4 +51,4 @@ recursive-delete, or other destructive boundary probe was executed.
 - No destructive or out-of-boundary apply/remove operation.
 - No packaged GUI smoke test.
 - No WanCode merge, release, tag, asset upload, updater change, or repository-setting change.
-- WanCode exact-head CI and independent CC re-review remain pending.
+- Candidate CI completed on `d6092b8d43fffa3d1556c7052ffc2bbc73199f42`; the evidence-only successor must also pass exact-head CI before independent CC re-review.
