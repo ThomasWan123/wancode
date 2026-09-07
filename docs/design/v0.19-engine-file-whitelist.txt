@@ -94,6 +94,7 @@ crates/codegen/xai-grok-shell/src/extensions/session_admin.rs
 
 [tests]
 crates/codegen/xai-fast-worktree/src/db/tests.rs
+crates/codegen/xai-fast-worktree/src/copy/cow.rs
 
 # SessionHandle 字面量（+1 字段的机械更新）——实测全仓仅此两处
 crates/codegen/xai-grok-shell/src/agent/mvp_agent/tests.rs
