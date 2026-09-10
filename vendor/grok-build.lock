@@ -27,7 +27,7 @@
 #   不适用，改由 intentional-delta 模式验证（见接口草案 §10）。
 repo=https://github.com/ThomasWan123/grok-build.git
 commit=dc46d96fa0460295cf96db86900530743d2197f5
-migration_audit_mode=intentional-delta
+migration_audit_mode=version-only
 declared_added_wancode_dependencies=semver
 #
 # 【dependency-delta · v0.20 W3】新增解析依赖
@@ -48,8 +48,8 @@ declared_added_wancode_dependencies=semver
 declared_added_packages=console_error_panic_hook 0.1.7,console_log 1.1.0,maybe-owned 0.3.4,pdfium-render 0.9.3,piston-float 1.0.1,quick-xml 0.37.5,utf16string 0.2.0,vecmath 1.0.0,zip 2.4.2,zopfli 0.8.3
 wiring_patch_sha256=9c671c0ae43f2e21ab90ff7b0fbb55d9ae0d4138e7ae747be4ec6b22f89da708
 emergency_patch_sha256=none
-cargo_lock_sha256=13d667db3047a5b759ed19ef2cf9e4b46e808d9fb76c69a39efe83ff653f0ebb
-effective_tree_sha256=2bbc139eebf5d205f8b32efe3885fffbaf1090dfe63f61536ed8b9d2f750a621
+cargo_lock_sha256=f1c0346f53887c9cb38da10c490cc478844517f6d3a0d0de3fb9b6be6985628d
+effective_tree_sha256=3ee4a052bf7bacb1c26f0fbafa2a6ec277a620b5156d9716fe0908260752e8c6
 
 # 【harness-kernel delta · v0.21 W3】真实工具执行调度
 #   引擎 commit 变、Cargo.lock/接线/紧急补丁均不变；差异仅为
