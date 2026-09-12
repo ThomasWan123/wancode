@@ -16,6 +16,13 @@
 param([switch]$SkipBuild, [string]$Only = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot "smoke_log_contract.ps1")
+
+$mode = $Only.ToLowerInvariant()
+if ($mode -eq "") { $mode = "full" }
+if ($mode -notin @("full", "work", "c1-escape")) {
+  throw "-Only 仅支持 work 或 c1-escape（收到: $Only）"
+}
 
 # 工具链环境（与 release.ps1 一致）。某些宿主会把 `Path` 与 `PATH`
 # 作为两个大小写不同的进程环境项传入；PowerShell 的 Start-Process 会把
@@ -68,9 +75,12 @@ Remove-Item $log -EA SilentlyContinue
 Set-Location $env:TEMP
 Write-Host "[smoke] launching with WANCODE_AUTOTEST=$fixture"
 $env:WANCODE_AUTOTEST = $fixture
-if ($Only -ne "") {
-  $env:WANCODE_AUTOTEST_ONLY = $Only
-  Write-Host "[smoke] WANCODE_AUTOTEST_ONLY=$Only"
+# Always set the child contract explicitly. A caller's stale subset variable
+# must never silently shrink a requested full run.
+$env:WANCODE_AUTOTEST_ONLY = $null
+if ($mode -ne "full") {
+  $env:WANCODE_AUTOTEST_ONLY = $mode
+  Write-Host "[smoke] WANCODE_AUTOTEST_ONLY=$mode"
 }
 # v0.19-2a 复核 P0：GROK_HOME 一并隔离——此前只隔了 sidecar，会话本体仍写
 # 真实 ~/.grok，每跑一次 smoke 就在真实现场铸一个无归属孤儿（迁移标记后
@@ -109,7 +119,7 @@ Get-Process wancode -EA SilentlyContinue |
 
 # C1-b：证据 JSON 在夹具删除前复制出来——档位裁定（codex 复核 + 用户裁定）
 # 依赖这份产物，不能随夹具销毁。
-if ($Only -eq "c1-escape") {
+if ($mode -eq "c1-escape") {
   $ev = Join-Path $fixture "c1-escape\c1-escape-evidence.json"
   if (Test-Path $ev) {
     $out = Join-Path $env:TEMP "wancode-c1-evidence.json"
@@ -122,7 +132,15 @@ if ($Only -eq "c1-escape") {
 Remove-Item -Recurse -Force $fixture -EA SilentlyContinue
 
 if (-not $done) { Write-Host "[smoke] 超时或未完成"; exit 1 }
-$fail = (Select-String -Path $log -Pattern "SMOKE DONE pass=\d+ fail=(\d+)").Matches[0].Groups[1].Value
-if ([int]$fail -gt 0) { Write-Host "[smoke] FAIL x$fail"; exit 1 }
-Write-Host "[smoke] ALL PASS"
+try {
+  $contract = Assert-SmokeLogContract -LogPath $log -ExpectedMode $mode
+} catch {
+  Write-Host "[smoke] CONTRACT FAIL: $($_.Exception.Message)"
+  exit 1
+}
+if ($mode -eq "full") {
+  Write-Host "[smoke] ALL PASS (mode=full, checks=$($contract.Pass), scenarios=$($contract.Scenarios.Count))"
+} else {
+  Write-Host "[smoke] SUBSET PASS (mode=$mode, checks=$($contract.Pass), scenarios=$($contract.Scenarios.Count))"
+}
 exit 0

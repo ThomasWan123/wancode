@@ -27,6 +27,9 @@ jobs:
       # 脚本同时跑 CRLF/LF 正对照与正文漂移负对照，先证明门能真失败。
       - name: Agent 指令镜像门（全文，换行归一）
         run: node scripts/test-agent-instruction-mirrors.mjs
+      - name: Smoke 场景完整性合同（含负向对照）
+        shell: pwsh
+        run: pwsh -File scripts/test_smoke_log_contract.ps1
       - run: npm ci
       - run: npx tsc --noEmit
       # 阻塞载荷的解析必须 fail-closed：读不懂 ≠ 没有阻塞。
