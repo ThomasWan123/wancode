@@ -1,8 +1,8 @@
 //! v0.18-4 步 B：WANCODE_AUTOTEST 无头 smoke 套件（v0.13-1）。
 //! 断言全部落磁盘/git2 层；scripts/smoke.ps1 轮询日志取结果。
+use agent_client_protocol as acp;
 use tauri::{AppHandle, Manager, State};
 use xai_acp_lib::acp_send;
-use agent_client_protocol as acp;
 
 use crate::agent::{ext_call, AgentState};
 use crate::git_ops::{git_stash, git_status_ext, session_git_root};
@@ -21,7 +21,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     // move 持有路径：闭包由此 'static，C1 逃逸探针分支要把它 Arc 进独立任务。
     let write = move |s: &str| {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
             let _ = writeln!(f, "{s}");
         }
     };
@@ -30,8 +34,26 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     macro_rules! check {
         ($name:expr, $ok:expr, $detail:expr) => {{
             let ok: bool = $ok;
-            if ok { pass += 1 } else { fail += 1 }
-            write(&format!("SMOKE {} {}: {}", $name, if ok { "PASS" } else { "FAIL" }, $detail));
+            if ok {
+                pass += 1
+            } else {
+                fail += 1
+            }
+            write(&format!(
+                "SMOKE {} {}: {}",
+                $name,
+                if ok { "PASS" } else { "FAIL" },
+                $detail
+            ));
+        }};
+    }
+    macro_rules! scenario_done {
+        ($name:expr, $fail_before:expr) => {{
+            write(&format!(
+                "SMOKE SCENARIO {} {}",
+                $name,
+                if fail == $fail_before { "PASS" } else { "FAIL" }
+            ));
         }};
     }
 
@@ -49,7 +71,21 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     let only_c1 = std::env::var("WANCODE_AUTOTEST_ONLY")
         .map(|v| v.eq_ignore_ascii_case("c1-escape"))
         .unwrap_or(false);
+    let (mode, expected_scenarios) = if only_c1 {
+        ("c1-escape", "S8-c1-escape")
+    } else if only_work {
+        ("work", "S7-work")
+    } else {
+        (
+            "full",
+            "S7-work,S1-start,S2-reply,S3-queue,S4-interject,S5-git,S6-resume,S9-memory",
+        )
+    };
+    write(&format!(
+        "SMOKE EXPECT mode={mode} scenarios={expected_scenarios}"
+    ));
     if only_c1 {
+        let fail_before = fail;
         write("SMOKE S8-c1-escape BEGIN");
         // Arc 化：逃逸探针的每个回合在独立任务里跑（断栈——嵌套 poll 在
         // debug 构建下压爆过 tokio worker 栈），spawn 要求 'static。
@@ -63,6 +99,10 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         .await;
         pass += p2;
         fail += f2;
+        write_arc.as_ref()(&format!(
+            "SMOKE SCENARIO S8-c1-escape {}",
+            if fail == fail_before { "PASS" } else { "FAIL" }
+        ));
         write_arc.as_ref()(&format!("SMOKE DONE pass={pass} fail={fail}"));
         std::process::exit(if fail > 0 { 1 } else { 0 });
     }
@@ -70,10 +110,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     // 这一段走的是**生产入口** start_inner_with_intent(..., Work)，不是把
     // 副作用手工摆出来：新建 → 持久 binding 读回 → 经 work_import 命令边界
     // 导入 → 带对立意图恢复 → 被拒启动不留 handle/binding。
+    let s7_fail_before = fail;
     write("SMOKE S7-work BEGIN");
     {
         use crate::surface_policy::NewSurfaceIntent;
-        use crate::work_staging::{manifest_path_under, workspace_dir_under, WorkManifest, WorkspaceId};
+        use crate::work_staging::{
+            manifest_path_under, workspace_dir_under, WorkManifest, WorkspaceId,
+        };
         use tauri::Manager;
 
         let app_data = app.path().app_data_dir().expect("app_data_dir");
@@ -86,6 +129,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             Err(e) => {
                 let why = format!("{e:#}");
                 check!("S7-work-start", false, why);
+                scenario_done!("S7-work", s7_fail_before);
                 write(&format!("SMOKE DONE pass={pass} fail={fail}"));
                 std::process::exit(1);
             }
@@ -103,7 +147,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         check!(
             "S7-work-start",
             kind_ok && id_ok && cwd_ok,
-            format!("kind={:?} ws={ws_id} cwd={} expect={}", r.surface_kind, r.cwd, expect_cwd.display())
+            format!(
+                "kind={:?} ws={ws_id} cwd={} expect={}",
+                r.surface_kind,
+                r.cwd,
+                expect_cwd.display()
+            )
         );
 
         // ② 持久 binding 读回：盘上的身份必须与返回值一致。
@@ -141,9 +190,9 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let renamed_in_true_roster = crate::agent::agent_list_sessions(r.cwd.clone())
             .await
             .map(|entries| {
-                entries.iter().any(|entry| {
-                    entry.session_id == r.session_id && entry.title == renamed_title
-                })
+                entries
+                    .iter()
+                    .any(|entry| entry.session_id == r.session_id && entry.title == renamed_title)
             })
             .unwrap_or(false);
         check!(
@@ -166,13 +215,19 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // 导入前快照：项目目录清单 + 原件字节/权限。
         let proj_before = dir_entry_names(std::path::Path::new(&workspace));
         let src_bytes_before = std::fs::read(&src).unwrap_or_default();
-        let src_ro_before = std::fs::metadata(&src).map(|m| m.permissions().readonly()).unwrap_or(false);
+        let src_ro_before = std::fs::metadata(&src)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false);
         let expect_sha = {
             use sha2::{Digest, Sha256};
             let d = Sha256::digest(&src_bytes_before);
             d.iter().map(|b| format!("{b:02x}")).collect::<String>()
         };
-        let ws_from_binding = bound.ok().and_then(|b| b.workspace_id).map(|w| w.as_str().to_string()).unwrap_or_default();
+        let ws_from_binding = bound
+            .ok()
+            .and_then(|b| b.workspace_id)
+            .map(|w| w.as_str().to_string())
+            .unwrap_or_default();
         let imported = crate::work_import::work_import(
             app.clone(),
             ws_from_binding.clone(),
@@ -185,21 +240,30 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                     .join(rec.import_id.as_str())
                     .join("original.docx");
                 let staged_bytes = std::fs::read(&staged).unwrap_or_default();
-                let staged_ro = std::fs::metadata(&staged).map(|m| m.permissions().readonly()).unwrap_or(false);
+                let staged_ro = std::fs::metadata(&staged)
+                    .map(|m| m.permissions().readonly())
+                    .unwrap_or(false);
                 // 暂存字节必须与原件**逐字节相同**，记录的 sha256 必须与实算相同。
                 let bytes_match = staged_bytes == src_bytes_before;
                 let sha_match = rec.source_sha256 == expect_sha;
                 // 原件字节与权限不得变。
-                let src_intact = std::fs::read(&src).map(|b| b == src_bytes_before).unwrap_or(false)
-                    && std::fs::metadata(&src).map(|m| m.permissions().readonly()).unwrap_or(!src_ro_before) == src_ro_before;
+                let src_intact = std::fs::read(&src)
+                    .map(|b| b == src_bytes_before)
+                    .unwrap_or(false)
+                    && std::fs::metadata(&src)
+                        .map(|m| m.permissions().readonly())
+                        .unwrap_or(!src_ro_before)
+                        == src_ro_before;
                 // 清单必须**恰好**等于返回的那一条（不接受多出记录）。
-                let manifest = WorkManifest::read(&manifest_path_under(app_data.clone(), &ws_parsed));
+                let manifest =
+                    WorkManifest::read(&manifest_path_under(app_data.clone(), &ws_parsed));
                 let manifest_exact = manifest
                     .as_ref()
                     .map(|m| m.imports.len() == 1 && m.imports[0] == *rec)
                     .unwrap_or(false);
                 // 调用方项目目录不得被改动。
-                let proj_untouched = dir_entry_names(std::path::Path::new(&workspace)) == proj_before;
+                let proj_untouched =
+                    dir_entry_names(std::path::Path::new(&workspace)) == proj_before;
                 (
                     staged_ro && bytes_match && sha_match && src_intact && manifest_exact && proj_untouched,
                     format!(
@@ -247,7 +311,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         let mcp_empty = mcp_live
             .as_ref()
             .ok()
-            .and_then(|v| v.get("result").and_then(|r| r.get("servers")).or_else(|| v.get("servers")))
+            .and_then(|v| {
+                v.get("result")
+                    .and_then(|r| r.get("servers"))
+                    .or_else(|| v.get("servers"))
+            })
             .and_then(|s| s.as_array())
             .map(|a| a.is_empty());
         // The capability broker is allowed to enforce Work's zero-MCP contract
@@ -264,9 +332,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         check!(
             "S7-work-live-session-zero-mcp",
             mcp_empty == Some(true) || mcp_blocked,
-            format!(
-                "servers_empty={mcp_empty:?} broker_blocked={mcp_blocked} raw={mcp_live:?}"
-            )
+            format!("servers_empty={mcp_empty:?} broker_blocked={mcp_blocked} raw={mcp_live:?}")
         );
 
         // ⑥b 删除也走同一条 target-id + trusted-cwd 生产路径。仍故意传错
@@ -289,7 +355,6 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                 r.cwd, workspace
             )
         );
-
 
         // ⑦ 被拒启动不留残留。**必须真的到达 launchability 门**（codex R2-F2：
         // 伪造一个不存在的 session id 会让 ACP LoadSession 先失败，根本没走到
@@ -317,7 +382,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         .to_string();
         let sidecar = surface.gate().store().path_for(&blocked_sid);
         let pre = std::fs::write(&sidecar, cowork_json.as_bytes());
-        let ws_dirs_before = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
+        let ws_dirs_before =
+            dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let blocked = spawn_start(
             app.clone(),
             workspace.clone(),
@@ -340,7 +406,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         // handle——首次实测由此纠正了我原先「旧 handle 应原样」的错误断言，
         // 源码注释：「失败宁可 `SESSION_NOT_STARTED:`」），且没有新增 Work 工作区目录。
         let no_handle = after_handle.is_none();
-        let ws_dirs_after = dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
+        let ws_dirs_after =
+            dir_entry_names(&crate::work_staging::work_root_under(app_data.clone()));
         let no_new_ws = ws_dirs_after == ws_dirs_before;
         // ⑦b 新建 Work 启动在 **binding 写入之后** 失败时的后置状态
         //    （codex R3-F1：上面那条走的是 resumed 路径，只能证明「已存在身份
@@ -349,7 +416,8 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         //    使崩溃标记写入必失败——那正是「写 binding 之后、发布 handle 之前」
         //    的唯一确定性失败点（agent.rs：603 写 binding → 637 门 → 648 标记
         //    → 697 handle）。
-        let marker_path = xai_grok_shell::util::grok_home::grok_home().join("wancode-last-session.json");
+        let marker_path =
+            xai_grok_shell::util::grok_home::grok_home().join("wancode-last-session.json");
         let _ = std::fs::remove_file(&marker_path);
         let blocked_marker = std::fs::create_dir_all(&marker_path).is_ok();
         let bindings_before = dir_entry_names(surface.gate().store().root_dir());
@@ -388,7 +456,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             format!("at_gate={rejected_at_gate} no_handle={no_handle} no_new_ws={no_new_ws} err={err_text}")
         );
     }
-
+    scenario_done!("S7-work", s7_fail_before);
 
     if only_work {
         write(&format!("SMOKE DONE pass={pass} fail={fail}"));
@@ -397,6 +465,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
 
     // ── S1 会话启动（默认模型）──────────────────────────────────────
     write("SMOKE S1-start BEGIN");
+    let s1_fail_before = fail;
     let started = spawn_start(
         app.clone(),
         workspace.clone(),
@@ -411,10 +480,12 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         }
         Err(e) => {
             check!("S1-start", false, format!("{e:#}"));
+            scenario_done!("S1-start", s1_fail_before);
             write(&format!("SMOKE DONE pass={pass} fail={fail}"));
             std::process::exit(1);
         }
     };
+    scenario_done!("S1-start", s1_fail_before);
     let sessions_base = xai_grok_shell::util::grok_home::grok_home().join("sessions");
     let chat_text = || -> String {
         walkdir_find(&sessions_base, &sid)
@@ -440,6 +511,7 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     };
 
     // ── S2 基本回复 ────────────────────────────────────────────────
+    let s2_fail_before = fail;
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         send("reply with exactly: SMOKE-BASIC".into()),
@@ -452,9 +524,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     };
     let ok = matches!(&r, Ok(Ok(_))) && chat_text().contains("SMOKE-BASIC");
     check!("S2-reply", ok, detail);
+    scenario_done!("S2-reply", s2_fail_before);
 
     // ── S3 忙时排队（长任务 + 两条排队，全部完成且顺序保留）────────
-    let long = tauri::async_runtime::spawn(send("Run the command ping -n 8 127.0.0.1 once, then reply SMOKE-LONG".into()));
+    let s3_fail_before = fail;
+    let long = tauri::async_runtime::spawn(send(
+        "Run the command ping -n 8 127.0.0.1 once, then reply SMOKE-LONG".into(),
+    ));
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let qa = tauri::async_runtime::spawn(send("reply with exactly: SMOKE-QA".into()));
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -472,9 +548,13 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         text.contains("SMOKE-LONG") && order_ok,
         format!("long={} order={order_ok}", text.contains("SMOKE-LONG"))
     );
+    scenario_done!("S3-queue", s3_fail_before);
 
     // ── S4 回合中插话 ──────────────────────────────────────────────
-    let long2 = tauri::async_runtime::spawn(send("Run the command ping -n 20 127.0.0.1 once, then reply SMOKE-D".into()));
+    let s4_fail_before = fail;
+    let long2 = tauri::async_runtime::spawn(send(
+        "Run the command ping -n 20 127.0.0.1 once, then reply SMOKE-D".into(),
+    ));
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let ij = ext_call(
         &state,
@@ -486,14 +566,17 @@ pub async fn autotest(app: AppHandle, workspace: String) {
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let ok = ij.is_ok() && chat_text().contains("SMOKE-IJ");
     check!("S4-interject", ok, format!("call={}", ij.is_ok()));
+    scenario_done!("S4-interject", s4_fail_before);
 
     // ── S5 Git 状态 + 贮藏（git2 断言，不依赖 git CLI）────────────
+    let s5_fail_before = fail;
     let fixture = (|| -> Result<(), String> {
         let repo = git2::Repository::init(&cwd).map_err(|e| e.to_string())?;
         let f = std::path::Path::new(&cwd).join("smoke.txt");
         std::fs::write(&f, "base").map_err(|e| e.to_string())?;
         let mut idx = repo.index().map_err(|e| e.to_string())?;
-        idx.add_path(std::path::Path::new("smoke.txt")).map_err(|e| e.to_string())?;
+        idx.add_path(std::path::Path::new("smoke.txt"))
+            .map_err(|e| e.to_string())?;
         idx.write().map_err(|e| e.to_string())?;
         let tree_id = idx.write_tree().map_err(|e| e.to_string())?;
         let tree = repo.find_tree(tree_id).map_err(|e| e.to_string())?;
@@ -509,7 +592,9 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             // 被回退）：先确认客户端解析的 gitRoot 就是 fixture，不是就
             // FAIL 并拒绝执行任何写操作。探针同时落日志供根因分析。
             let resolved = session_git_root(&state).await.ok().flatten();
-            write(&format!("SMOKE S5 resolved gitRoot={resolved:?} fixture={cwd}"));
+            write(&format!(
+                "SMOKE S5 resolved gitRoot={resolved:?} fixture={cwd}"
+            ));
             let fixture_ok = resolved
                 .as_deref()
                 .map(|r| {
@@ -518,51 +603,60 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                 })
                 .unwrap_or(false);
             if !fixture_ok {
-                check!("S5-git-stash", false, format!("resolved root 不是 fixture：{resolved:?}——拒绝执行 stash"));
+                check!(
+                    "S5-git-stash",
+                    false,
+                    format!("resolved root 不是 fixture：{resolved:?}——拒绝执行 stash")
+                );
             } else {
-            let st = git_status_ext(state.clone()).await;
-            let has_change = st
-                .as_ref()
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/result/unstaged")
-                        .or_else(|| v.pointer("/result/data/unstaged"))
-                })
-                .and_then(|u| u.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-            let stash = git_stash(state.clone(), None).await;
-            let clean_after = git2::Repository::open(&cwd)
-                .ok()
-                .map(|mut r| {
-                    let mut n = 0;
-                    let _ = r.stash_foreach(|_, _, _| {
-                        n += 1;
-                        true
-                    });
-                    let dirty = r
-                        .statuses(None)
-                        .map(|s| {
-                            s.iter().any(|e| {
-                                let st = e.status();
-                                st != git2::Status::CURRENT && st != git2::Status::WT_NEW
+                let st = git_status_ext(state.clone()).await;
+                let has_change = st
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/result/unstaged")
+                            .or_else(|| v.pointer("/result/data/unstaged"))
+                    })
+                    .and_then(|u| u.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                let stash = git_stash(state.clone(), None).await;
+                let clean_after = git2::Repository::open(&cwd)
+                    .ok()
+                    .map(|mut r| {
+                        let mut n = 0;
+                        let _ = r.stash_foreach(|_, _, _| {
+                            n += 1;
+                            true
+                        });
+                        let dirty = r
+                            .statuses(None)
+                            .map(|s| {
+                                s.iter().any(|e| {
+                                    let st = e.status();
+                                    st != git2::Status::CURRENT && st != git2::Status::WT_NEW
+                                })
                             })
-                        })
-                        .unwrap_or(true);
-                    n == 1 && !dirty
-                })
-                .unwrap_or(false);
-            check!(
-                "S5-git-stash",
-                has_change && stash.is_ok() && clean_after,
-                format!("change={has_change} stash={} clean={clean_after}", stash.is_ok())
-            );
+                            .unwrap_or(true);
+                        n == 1 && !dirty
+                    })
+                    .unwrap_or(false);
+                check!(
+                    "S5-git-stash",
+                    has_change && stash.is_ok() && clean_after,
+                    format!(
+                        "change={has_change} stash={} clean={clean_after}",
+                        stash.is_ok()
+                    )
+                );
             }
         }
         Err(e) => check!("S5-git-stash", false, format!("fixture: {e}")),
     }
+    scenario_done!("S5-git", s5_fail_before);
 
     // ── S6 会话恢复（同 id 续接，历史保留）────────────────────────
+    let s6_fail_before = fail;
     let before_len = chat_text().lines().count();
     let resumed = spawn_start(
         app.clone(),
@@ -571,19 +665,24 @@ pub async fn autotest(app: AppHandle, workspace: String) {
         crate::surface_policy::NewSurfaceIntent::Code,
     )
     .await;
-    let same_id = resumed.as_ref().map(|r| r.session_id == sid).unwrap_or(false);
+    let same_id = resumed
+        .as_ref()
+        .map(|r| r.session_id == sid)
+        .unwrap_or(false);
     let after_len = chat_text().lines().count();
     check!(
         "S6-resume",
         same_id && after_len >= before_len,
         format!("same_id={same_id} lines {before_len}->{after_len}")
     );
+    scenario_done!("S6-resume", s6_fail_before);
 
     // ── S9 记忆回路（C3 验收：flush 真实引擎往返）───────────────
     // 隔离 GROK_HOME 的 config 副本里显式开 [memory].enabled——引擎在
     // **会话启动时**解析该开关，所以先写配置再起新会话并做真实 flush。
     // rewrite 暂不纳入产品入口/验收：锁定引擎把模型硬编码为 `grok-build`，
     // 第三方端点不可用；G26 引擎例外获批前，不能把该失败当 PASS。
+    let s9_fail_before = fail;
     write("SMOKE S9-memory BEGIN");
     {
         let cfg_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
@@ -599,7 +698,11 @@ pub async fn autotest(app: AppHandle, workspace: String) {
             }
         };
         if !enabled {
-            check!("S9-memory-roundtrip", false, "无法开启 [memory].enabled（隔离配置缺失/不可写）");
+            check!(
+                "S9-memory-roundtrip",
+                false,
+                "无法开启 [memory].enabled（隔离配置缺失/不可写）"
+            );
         } else {
             // 新会话（spawn_start 与 start_inner 一样会拆掉 S6 的会话——
             // 套件尾声，无后续依赖）。
@@ -623,11 +726,15 @@ pub async fn autotest(app: AppHandle, workspace: String) {
                 check!(
                     "S9-memory-flush",
                     flush.is_ok(),
-                    format!("flush_err={}", flush.as_ref().err().cloned().unwrap_or_default())
+                    format!(
+                        "flush_err={}",
+                        flush.as_ref().err().cloned().unwrap_or_default()
+                    )
                 );
             }
         }
     }
+    scenario_done!("S9-memory", s9_fail_before);
 
     write(&format!("SMOKE DONE pass={pass} fail={fail}"));
     std::process::exit(if fail > 0 { 1 } else { 0 });
