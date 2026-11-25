@@ -1,6 +1,7 @@
 # PR Review Protocol (CC ⇄ Codex, direct on GitHub)
 
 Status: active since 2026-08-10. Supersedes the manual copy-paste relay between agents.
+Amended 2026-11-25: ZCode added as a third actor with no default seat (user decision).
 
 ## Why
 
@@ -22,6 +23,7 @@ unchanged either way.
 | **Codex** | Implementer. Opens Draft PRs, responds to findings, pushes fixes. | Branches, commits, PR body, comments prefixed `[codex]` |
 | **CC** (Claude Code) | Reviewer. Reviews every Draft PR labeled `needs-codex-review`. | PR review comments prefixed `[cc]` |
 | **User** | Arbiter. Intervenes only at the authorization points below. | Merge/release approvals, deadlock rulings |
+| **ZCode** | No default seat. Implements or reviews only on PRs where the user assigns it; the opening comment states the seat. | Comments prefixed `[zcode]` |
 
 **The comment prefix always identifies the actor, never the role.** Both agents
 post through the same GitHub account, so the prefix is the *only* way a later
@@ -39,12 +41,19 @@ PR's label history for no functional gain.
 Roles may still swap per-PR — the opening comment states who holds which role
 for that PR when it differs from the default above.
 
+**ZCode is a third actor with no default seat** (added by the user on
+2026-11-25). On a PR where the user assigns it, ZCode may hold the implementer
+seat or the reviewer seat, and that PR's opening comment states the seat it
+holds. Its comments are prefixed `[zcode]`. Every rule below applies to it
+unchanged: the prefix identifies the actor, a reviewer must be independent of
+the implementer, and only the user authorizes a merge.
+
 **A merge executor cannot be that change's reviewer.** Whoever pushed the merge
 button has a stake in the outcome; an independent verdict must come from the
 other agent. This is not about which seat is assigned — it is about not being
 both the actor and the auditor of the same act.
 
-Both agents operate through the same GitHub account, so GitHub's formal
+All three actors operate through the same GitHub account, so GitHub's formal
 Approve/Request-changes cannot distinguish them and self-approval is blocked.
 Identity and verdicts are therefore carried by **comment conventions and labels**,
 which are authoritative under this protocol.
