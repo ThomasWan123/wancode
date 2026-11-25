@@ -97,35 +97,67 @@ pub async fn model_upsert(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let key = key.trim().to_string();
+    model_upsert_at(&user_config_path(), &key, &name, &model, &base_url, api_key.as_deref())?;
+    // 配置世代切换：能力快照原子换新（#127-2）
+    caps_state.reload();
+    Ok(())
+}
+
+/// Path-injectable core of [`model_upsert`], so the write can be exercised
+/// against a temp file. `api_key = None` never touches the keyring, which is
+/// what the tests pass.
+pub(crate) fn model_upsert_at(
+    config_path: &std::path::Path,
+    key: &str,
+    name: &str,
+    model: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<(), String> {
+    let key = key.trim();
     if key.is_empty() || model.trim().is_empty() || base_url.trim().is_empty() {
         return Err("名称、模型 ID、base_url 都不能为空".into());
     }
-    let env_key = wancode_env_key(&key);
-    if let Some(k) = api_key.as_ref().filter(|k| !k.trim().is_empty()) {
-        keyring::Entry::new(KEYRING_SERVICE, &key)
-            .and_then(|e| e.set_password(k.trim()))
-            .map_err(|e| format!("保存密钥到钥匙串失败: {e}"))?;
-    }
-    let path = user_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    // Work out the new file first: a config that fails to parse must not
+    // leave a freshly stored key behind.
+    let text = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
     let models = doc["model"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .ok_or("model 段类型异常")?;
-    let mut entry = toml_edit::Table::new();
+    // The form models these fields only. A protocol or a context window the
+    // user set by hand is left alone, and the defaults are written for a new
+    // entry alone. Otherwise fixing a base URL from the page would silently
+    // reset `api_backend` and `context_window`.
+    let mut entry = match models.get(key).and_then(|item| item.as_table()) {
+        Some(existing) => existing.clone(),
+        None => toml_edit::Table::new(),
+    };
+    // The key moves under the managed name only when this save stores one. A
+    // hand-written `env_key = "DEEPSEEK_API_KEY"` therefore still resolves
+    // after the page edits the entry without pasting a key.
+    let stores_a_key = api_key.is_some_and(|k| !k.trim().is_empty());
+    if stores_a_key || entry.get("env_key").is_none() {
+        entry["env_key"] = toml_edit::value(wancode_env_key(key));
+    }
     entry["model"] = toml_edit::value(model.trim());
     entry["name"] = toml_edit::value(name.trim());
     entry["base_url"] = toml_edit::value(base_url.trim());
-    entry["env_key"] = toml_edit::value(&env_key);
-    entry["api_backend"] = toml_edit::value("chat_completions");
-    entry["context_window"] = toml_edit::value(128000i64);
-    models.insert(&key, toml_edit::Item::Table(entry));
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
-    // 配置世代切换：能力快照原子换新（#127-2）
-    caps_state.reload();
-    Ok(())
+    if entry.get("api_backend").is_none() {
+        entry["api_backend"] = toml_edit::value("chat_completions");
+    }
+    if entry.get("context_window").is_none() {
+        entry["context_window"] = toml_edit::value(128000i64);
+    }
+    models.insert(key, toml_edit::Item::Table(entry));
+    let rendered = doc.to_string();
+    if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
+        keyring::Entry::new(KEYRING_SERVICE, key)
+            .and_then(|e| e.set_password(k.trim()))
+            .map_err(|e| format!("保存密钥到钥匙串失败: {e}"))?;
+    }
+    write_config_atomic(config_path, &rendered)
 }
 
 /// One-click provider setup for novice users: pick a preset, paste ONE key.
@@ -297,7 +329,7 @@ pub async fn model_remove(
             }
         }
     }
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+    write_config_atomic(&path, &doc.to_string())?;
     // 配置世代切换：能力快照原子换新（#127-2）
     caps_state.reload();
     Ok(())
@@ -677,7 +709,7 @@ pub async fn migrate_env_keys() -> Result<usize, String> {
         }
     }
     if moved > 0 {
-        std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))?;
+        write_config_atomic(&path, &doc.to_string())?;
     }
     Ok(moved)
 }
@@ -729,47 +761,121 @@ pub async fn mcp_config_upsert(
     args: Vec<String>,
     url: Option<String>,
 ) -> Result<(), String> {
-    if name.trim().is_empty() {
+    mcp_config_upsert_at(&user_config_path(), &name, command.as_deref(), &args, url.as_deref())
+}
+
+/// Which transport an `[mcp_servers.<name>]` entry uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum McpTransport {
+    Stdio,
+    Http,
+}
+
+/// Keys that belong to a transport (engine `McpServerTransportConfig`). The
+/// settings form models `command`, `args` and `url` only; every other key of a
+/// server entry (env, headers, timeouts, oauth, …) is the user's.
+const MCP_STDIO_KEYS: [&str; 4] = ["command", "args", "env", "cwd"];
+const MCP_HTTP_KEYS: [&str; 7] = [
+    "url",
+    "type",
+    "bearer_token_env_var",
+    "headers",
+    "oauth_client_id",
+    "oauth_client_secret_env_var",
+    "oauth_scopes",
+];
+
+fn is_transport_key(key: &str) -> bool {
+    MCP_STDIO_KEYS.contains(&key) || MCP_HTTP_KEYS.contains(&key)
+}
+
+/// `None` when the entry is missing or is neither stdio nor HTTP.
+fn mcp_transport_of(entry: Option<&toml_edit::Table>) -> Option<McpTransport> {
+    let entry = entry?;
+    if entry.get("command").is_some() {
+        Some(McpTransport::Stdio)
+    } else if entry.get("url").is_some() {
+        Some(McpTransport::Http)
+    } else {
+        None
+    }
+}
+
+/// Path-injectable core of [`mcp_config_upsert`].
+///
+/// The page offers "add / update", so an update must not read as "replace".
+/// Saving over an existing server keeps every field the form has no input for.
+pub(crate) fn mcp_config_upsert_at(
+    config_path: &std::path::Path,
+    name: &str,
+    command: Option<&str>,
+    args: &[String],
+    url: Option<&str>,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
         return Err("名称不能为空".into());
     }
-    let path = user_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let command = command.map(str::trim).filter(|c| !c.is_empty());
+    let url = url.map(str::trim).filter(|u| !u.is_empty());
+    // A command wins over a URL when the form supplies both, as it always has.
+    let transport = match (command, url) {
+        (Some(_), _) => McpTransport::Stdio,
+        (None, Some(_)) => McpTransport::Http,
+        (None, None) => return Err("command 与 url 至少填一个".into()),
+    };
+    let text = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
     let servers = doc["mcp_servers"]
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .ok_or("mcp_servers 段类型异常")?;
-    let mut entry = toml_edit::Table::new();
-    match (&command, &url) {
-        (Some(cmd), _) if !cmd.trim().is_empty() => {
-            entry["command"] = toml_edit::value(cmd.trim());
+    let existing = servers.get(name).and_then(|item| item.as_table());
+    // Same transport: edit the entry where it is, so what the user added by
+    // hand (env, headers, timeouts) survives. A new entry, or one switching
+    // transport, starts from the keys that belong to no transport.
+    let mut entry = match existing {
+        Some(table) if mcp_transport_of(Some(table)) == Some(transport) => table.clone(),
+        Some(table) => table
+            .iter()
+            .filter(|(key, _)| !is_transport_key(key))
+            .map(|(key, value)| (key.to_owned(), value.clone()))
+            .collect(),
+        None => toml_edit::Table::new(),
+    };
+    match transport {
+        McpTransport::Stdio => {
+            entry["command"] = toml_edit::value(command.unwrap());
+            // An empty args field means "no arguments", not "keep the old ones".
+            entry.remove("args");
             if !args.is_empty() {
                 let mut arr = toml_edit::Array::new();
-                for a in &args {
+                for a in args {
                     arr.push(a.as_str());
                 }
                 entry["args"] = toml_edit::value(arr);
             }
         }
-        (_, Some(u)) if !u.trim().is_empty() => {
-            entry["url"] = toml_edit::value(u.trim());
-        }
-        _ => return Err("command 与 url 至少填一个".into()),
+        McpTransport::Http => entry["url"] = toml_edit::value(url.unwrap()),
     }
-    servers.insert(name.trim(), toml_edit::Item::Table(entry));
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+    servers.insert(name, toml_edit::Item::Table(entry));
+    write_config_atomic(config_path, &doc.to_string())
 }
 
 /// Remove an MCP server from the user config.
 #[tauri::command]
 pub async fn mcp_config_remove(name: String) -> Result<(), String> {
-    let path = user_config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    mcp_config_remove_at(&user_config_path(), &name)
+}
+
+/// Path-injectable core of [`mcp_config_remove`].
+pub(crate) fn mcp_config_remove_at(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("配置解析失败: {e}"))?;
     if let Some(servers) = doc.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) {
-        servers.remove(&name);
+        servers.remove(name);
     }
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("写入配置失败: {e}"))
+    write_config_atomic(config_path, &doc.to_string())
 }
 
 /// Inject managed model keys from keyring into the process env so the engine's
@@ -2806,5 +2912,270 @@ mod model_option_meta_tests {
         for leak in ["s3cret", "user:", "/api", "k=v"] {
             assert!(!label.contains(leak), "端点标签泄漏 {leak}: {label}");
         }
+    }
+}
+
+/// 设置页三个写入命令的持久化契约：多次写入后的最终状态、失败时不损坏原文件、
+/// 原子替换、以及"表单不管的字段不能被保存动作抹掉"。
+#[cfg(test)]
+mod config_write_tests {
+    use super::*;
+
+    /// 每个用例一个独立的临时目录；返回的 TempDir 在用例结束时删除目录。
+    fn temp_config(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("wancode-cfgwrite-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("config.toml");
+        (dir, path)
+    }
+
+    fn read(path: &std::path::Path) -> toml_edit::DocumentMut {
+        std::fs::read_to_string(path).unwrap().parse().unwrap()
+    }
+
+    /// `write_config_atomic` 的临时文件名形如 `config.tmp-<pid>`；成功或失败后都不该留下。
+    fn temp_residue(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn model_upsert_twice_persists_the_final_state_and_leaves_no_temp_file() {
+        let (_dir, cfg) = temp_config("model-state");
+        model_upsert_at(&cfg, "mine", "Mine", "m1", "https://x/v1", None).unwrap();
+        model_upsert_at(&cfg, "mine", "Mine", "m2", "https://x/v1", None).unwrap();
+        model_upsert_at(&cfg, "other", "Other", "o1", "https://y/v1", None).unwrap();
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(text.matches("[model.mine]").count(), 1, "同一条目只能出现一次: {text}");
+        assert!(text.contains("model = \"m2\"") && !text.contains("\"m1\""), "{text}");
+        assert!(text.contains("[model.other]"), "{text}");
+        assert!(temp_residue(&cfg).is_empty(), "{:?}", temp_residue(&cfg));
+    }
+
+    #[test]
+    fn mcp_upsert_then_remove_persists_the_final_state_and_leaves_no_temp_file() {
+        let (_dir, cfg) = temp_config("mcp-state");
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &["-y".into(), "srv".into()], None).unwrap();
+        mcp_config_upsert_at(&cfg, "remote", None, &[], Some("https://mcp.example.com/mcp")).unwrap();
+        mcp_config_remove_at(&cfg, "fs").unwrap();
+        let doc = read(&cfg);
+        let servers = doc["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(servers.contains_key("remote") && !servers.contains_key("fs"));
+        assert_eq!(servers["remote"]["url"].as_str(), Some("https://mcp.example.com/mcp"));
+        assert!(temp_residue(&cfg).is_empty(), "{:?}", temp_residue(&cfg));
+    }
+
+    #[test]
+    fn a_missing_config_is_created_by_the_first_write() {
+        let (_dir, cfg) = temp_config("create");
+        assert!(!cfg.exists());
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &[], None).unwrap();
+        assert_eq!(read(&cfg)["mcp_servers"]["fs"]["command"].as_str(), Some("npx"));
+    }
+
+    #[test]
+    fn unrelated_configuration_survives_a_write() {
+        let (_dir, cfg) = temp_config("keep");
+        std::fs::write(
+            &cfg,
+            "# 手写注释\n[ui]\nwancode_mcp_seeded = true\n\n[model.keep]\nmodel = \"k\"\nname = \"K\"\nbase_url = \"https://k\"\n",
+        )
+        .unwrap();
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &[], None).unwrap();
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        for kept in ["# 手写注释", "wancode_mcp_seeded = true", "[model.keep]", "base_url = \"https://k\""] {
+            assert!(text.contains(kept), "无关配置丢失: {kept}\n{text}");
+        }
+    }
+
+    // 反向：解析失败时原文件必须一个字节都不动，也不留临时文件。
+    // 正向对照在同一条用例里——同样的调用对合法配置确实会改写文件。
+    #[test]
+    fn a_broken_config_is_left_untouched_while_a_valid_one_is_rewritten() {
+        let (_dir, broken) = temp_config("broken");
+        let original = "[model.x\nmodel = \"oops\"\n";
+        std::fs::write(&broken, original).unwrap();
+        let err = model_upsert_at(&broken, "a", "A", "m", "https://x", None).unwrap_err();
+        assert!(err.contains("配置解析失败"), "{err}");
+        let err = mcp_config_upsert_at(&broken, "fs", Some("npx"), &[], None).unwrap_err();
+        assert!(err.contains("配置解析失败"), "{err}");
+        let err = mcp_config_remove_at(&broken, "fs").unwrap_err();
+        assert!(err.contains("配置解析失败"), "{err}");
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), original);
+        assert!(temp_residue(&broken).is_empty(), "{:?}", temp_residue(&broken));
+
+        let (_dir2, valid) = temp_config("valid");
+        model_upsert_at(&valid, "a", "A", "m", "https://x", None).unwrap();
+        assert!(std::fs::read_to_string(&valid).unwrap().contains("[model.a]"));
+    }
+
+    // 原子写可观察的差别：目标文件正被别的进程以"允许读写、但不允许替换"的方式
+    // 打开时，原子替换会失败并保留原文件；普通写入照样截断重写，读者在那一刻
+    // 会读到半截文件（编辑器、同步盘、杀毒软件都可能这样占着 config.toml）。
+    #[cfg(windows)]
+    fn hold_open_for_reading(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        // 不带 FILE_SHARE_DELETE：目标不能被重命名覆盖
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_config_held_open_by_a_reader_is_never_partially_rewritten() {
+        let (_dir, cfg) = temp_config("held");
+        let original = "[model.a]\nmodel = \"old\"\nname = \"A\"\nbase_url = \"https://old\"\n";
+        std::fs::write(&cfg, original).unwrap();
+        let reader = hold_open_for_reading(&cfg);
+
+        let err = model_upsert_at(&cfg, "a", "A", "new", "https://new", None)
+            .expect_err("文件被读者占着，原子替换必须失败");
+        assert!(err.contains("原子替换配置失败"), "{err}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original, "读者眼里的文件不能变");
+        assert!(temp_residue(&cfg).is_empty(), "失败的替换不能留下临时文件: {:?}", temp_residue(&cfg));
+
+        // 读者放手后，同一次保存就能成功
+        drop(reader);
+        model_upsert_at(&cfg, "a", "A", "new", "https://new", None).unwrap();
+        assert!(std::fs::read_to_string(&cfg).unwrap().contains("\"new\""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removing_a_server_held_open_by_a_reader_is_refused_the_same_way() {
+        let (_dir, cfg) = temp_config("held-remove");
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &[], None).unwrap();
+        let before = std::fs::read_to_string(&cfg).unwrap();
+        let reader = hold_open_for_reading(&cfg);
+
+        let err = mcp_config_remove_at(&cfg, "fs").expect_err("文件被读者占着，原子替换必须失败");
+        assert!(err.contains("原子替换配置失败"), "{err}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
+        assert!(temp_residue(&cfg).is_empty(), "{:?}", temp_residue(&cfg));
+
+        drop(reader);
+        mcp_config_remove_at(&cfg, "fs").unwrap();
+        assert!(read(&cfg)["mcp_servers"].as_table().unwrap().is_empty());
+    }
+
+    // ── 表单不管的字段 ────────────────────────────────────────────────
+
+    #[test]
+    fn updating_a_model_keeps_the_fields_the_form_does_not_model() {
+        let (_dir, cfg) = temp_config("model-keep");
+        std::fs::write(
+            &cfg,
+            "[model.mine]\nmodel = \"m1\"\nname = \"Mine\"\nbase_url = \"https://old\"\napi_backend = \"messages\"\ncontext_window = 200000\nmax_completion_tokens = 8192\n",
+        )
+        .unwrap();
+        model_upsert_at(&cfg, "mine", "Mine", "m1", "https://new", None).unwrap();
+        let entry = &read(&cfg)["model"]["mine"];
+        assert_eq!(entry["base_url"].as_str(), Some("https://new"));
+        assert_eq!(entry["api_backend"].as_str(), Some("messages"));
+        assert_eq!(entry["context_window"].as_integer(), Some(200000));
+        assert_eq!(entry["max_completion_tokens"].as_integer(), Some(8192));
+    }
+
+    #[test]
+    fn a_new_model_gets_the_default_protocol_and_window() {
+        let (_dir, cfg) = temp_config("model-new");
+        model_upsert_at(&cfg, "a", "A", "m", "https://x", None).unwrap();
+        let entry = &read(&cfg)["model"]["a"];
+        assert_eq!(entry["api_backend"].as_str(), Some("chat_completions"));
+        assert_eq!(entry["context_window"].as_integer(), Some(128000));
+        assert_eq!(entry["env_key"].as_str(), Some("WANCODE_KEY_A"));
+        assert_eq!(entry["name"].as_str(), Some("A"));
+    }
+
+    // 手写条目靠环境变量取密钥。设置页不带密钥保存它时，引用必须保持有效——
+    // 改成托管名而钥匙串里没有对应的密钥，这个模型就悄悄变成"未设密钥"。
+    // 把环境变量密钥迁进钥匙串是"迁移"按钮的职责，不是普通保存的副作用。
+    #[test]
+    fn saving_without_a_key_keeps_the_env_var_a_hand_written_model_points_to() {
+        let (_dir, cfg) = temp_config("model-envkey");
+        std::fs::write(
+            &cfg,
+            "[model.ds]\nmodel = \"deepseek-chat\"\nname = \"DS\"\nbase_url = \"https://old\"\nenv_key = \"DEEPSEEK_API_KEY\"\n",
+        )
+        .unwrap();
+        model_upsert_at(&cfg, "ds", "My DeepSeek", "deepseek-chat", "https://api.deepseek.com", None).unwrap();
+        let entry = &read(&cfg)["model"]["ds"];
+        assert_eq!(entry["env_key"].as_str(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(entry["name"].as_str(), Some("My DeepSeek"));
+        assert_eq!(entry["base_url"].as_str(), Some("https://api.deepseek.com"));
+    }
+
+    #[test]
+    fn updating_a_server_keeps_env_timeouts_and_enabled_state() {
+        let (_dir, cfg) = temp_config("mcp-keep");
+        std::fs::write(
+            &cfg,
+            "[mcp_servers.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"old\"]\nenabled = false\nstartup_timeout_sec = 30\n\n[mcp_servers.fs.env]\nAPI_KEY = \"secret\"\n",
+        )
+        .unwrap();
+        mcp_config_upsert_at(&cfg, "fs", Some("node"), &["srv".into()], None).unwrap();
+        let fs = &read(&cfg)["mcp_servers"]["fs"];
+        assert_eq!(fs["command"].as_str(), Some("node"));
+        assert_eq!(fs["args"].as_array().unwrap().len(), 1);
+        assert_eq!(fs["env"]["API_KEY"].as_str(), Some("secret"));
+        assert_eq!(fs["enabled"].as_bool(), Some(false));
+        assert_eq!(fs["startup_timeout_sec"].as_integer(), Some(30));
+    }
+
+    #[test]
+    fn clearing_the_args_field_removes_the_old_args() {
+        let (_dir, cfg) = temp_config("mcp-noargs");
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &["-y".into(), "old".into()], None).unwrap();
+        mcp_config_upsert_at(&cfg, "fs", Some("npx"), &[], None).unwrap();
+        let fs = &read(&cfg)["mcp_servers"]["fs"];
+        assert!(fs.get("args").is_none(), "清空参数后旧参数必须消失: {fs}");
+        assert_eq!(fs["command"].as_str(), Some("npx"));
+    }
+
+    #[test]
+    fn switching_transport_drops_the_old_transports_fields_and_keeps_the_rest() {
+        let (_dir, cfg) = temp_config("mcp-to-http");
+        std::fs::write(
+            &cfg,
+            "[mcp_servers.fs]\ncommand = \"npx\"\nargs = [\"-y\"]\ncwd = \"D:\\\\work\"\nenabled = false\nstartup_timeout_sec = 30\n\n[mcp_servers.fs.env]\nAPI_KEY = \"secret\"\n",
+        )
+        .unwrap();
+        mcp_config_upsert_at(&cfg, "fs", None, &[], Some("https://mcp.example.com/mcp")).unwrap();
+        let fs = &read(&cfg)["mcp_servers"]["fs"];
+        assert_eq!(fs["url"].as_str(), Some("https://mcp.example.com/mcp"));
+        for stale in ["command", "args", "cwd", "env"] {
+            assert!(fs.get(stale).is_none(), "换成 HTTP 后仍残留 stdio 字段 {stale}: {fs}");
+        }
+        assert_eq!(fs["enabled"].as_bool(), Some(false));
+        assert_eq!(fs["startup_timeout_sec"].as_integer(), Some(30));
+    }
+
+    #[test]
+    fn switching_back_to_stdio_drops_the_http_fields() {
+        let (_dir, cfg) = temp_config("mcp-to-stdio");
+        std::fs::write(
+            &cfg,
+            "[mcp_servers.remote]\nurl = \"https://old.example.com/mcp\"\nbearer_token_env_var = \"TOKEN\"\nenabled = false\n\n[mcp_servers.remote.headers]\nX-Trace = \"1\"\n",
+        )
+        .unwrap();
+        mcp_config_upsert_at(&cfg, "remote", Some("node"), &["server.js".into()], None).unwrap();
+        let remote = &read(&cfg)["mcp_servers"]["remote"];
+        assert_eq!(remote["command"].as_str(), Some("node"));
+        for stale in ["url", "bearer_token_env_var", "headers"] {
+            assert!(remote.get(stale).is_none(), "换成 stdio 后仍残留 HTTP 字段 {stale}: {remote}");
+        }
+        assert_eq!(remote["enabled"].as_bool(), Some(false));
     }
 }
