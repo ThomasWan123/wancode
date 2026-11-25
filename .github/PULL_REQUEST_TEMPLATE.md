@@ -1,5 +1,5 @@
 <!-- PR Review Protocol: docs/pr-review-protocol.md -->
-<!-- Roles for this PR (state explicitly): implementer = [cc|codex], reviewer = [cc|codex] -->
+<!-- Roles for this PR (state explicitly): implementer = [cc|codex|zcode], reviewer = [cc|codex|zcode] -->
 
 ## Purpose
 

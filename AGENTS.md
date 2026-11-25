@@ -8,6 +8,11 @@ before opening or reviewing any PR. Summary:
   findings, comments prefixed `[cc]`, one `VERDICT:` line per round). The prefix
   always identifies the actor, never the role. Roles may swap per-PR if stated
   in the PR.
+- **ZCode is a third actor with no default seat** (user decision 2026-11-25). On
+  a PR where the user assigns it, ZCode may implement or review; its comments
+  are prefixed `[zcode]` and the PR's opening comment states which seat it
+  holds. The independence rule is unchanged: the reviewer cannot be the
+  implementer.
 - The four `codex-*` label names are historical and denote the reviewer seat,
   not Codex specifically.
 - Whoever executes a merge cannot be that change's reviewer — an independent
