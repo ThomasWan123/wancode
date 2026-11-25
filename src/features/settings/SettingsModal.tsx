@@ -2,12 +2,129 @@
    步 B 将把仅设置页使用的状态与处理器迁入本文件）。 */
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-import { saveLang, type Lang } from "../../i18n";
+import { saveLang, type Lang, type Strings } from "../../i18n";
 import { IconX, IconPencil } from "../../icons";
+import type { SurfaceKind } from "../../surface";
 import { ModalDialog } from "../dialogs/ModalDialog";
 
 import { parseResolvedCaps, type Cap } from "../../caps";
+import { parseMcpArgs } from "./mcpArgs";
 import { MemoryPanel } from "./MemoryPanel";
+
+/* 设置页的 wire 形状只在这里出现一次（与 caps.ts / modelOption.ts 同一纪律）。
+   此前整个组件的 props 是 Record<string, any>：App 少传或传错一个键，编译器
+   不会报错，运行时才炸（v0.13 拆分时就漏传过 showSettings）。 */
+
+export type SettingsTab = "general" | "models" | "mcp" | "skills" | "hooks" | "memory" | "about";
+
+/** `model_list` 的一条（provider_ops.rs `ModelEntry`，snake_case）。 */
+export type SettingsModelEntry = {
+  key: string;
+  name: string;
+  model: string;
+  base_url: string;
+  env_key: string | null;
+  has_key: boolean;
+  managed: boolean;
+  /** 未解析的能力快照，经 parseResolvedCaps 收窄。 */
+  caps: unknown;
+};
+
+/** `mcp_config_list` 的一条（provider_ops.rs `McpServerEntry`）。 */
+export type SettingsMcpServer = {
+  name: string;
+  command?: string | null;
+  args: string[];
+  url?: string | null;
+  enabled: boolean;
+};
+
+/** 实时目录 `x.ai/mcp/list` 的一条（引擎 `McpServerEntry`，camelCase）。
+   这里只列本组件读取的字段。 */
+export type SettingsMcpLiveTool = { name: string; description?: string | null; enabled?: boolean };
+export type SettingsMcpLiveServer = {
+  name: string;
+  displayName?: string | null;
+  sourceLabel?: string | null;
+  session?: {
+    enabled?: boolean;
+    status?: string | null;
+    authRequired?: boolean;
+    tools?: SettingsMcpLiveTool[];
+  } | null;
+};
+
+/** App 侧映射后的技能条目。 */
+export type SettingsSkill = { name: string; description: string; path: string; enabled?: boolean; scope?: string };
+
+export type SettingsHook = { event: string; command: string };
+
+export interface SettingsModalProps {
+  showSettings: boolean;
+  settingsTab: SettingsTab;
+  setSettingsTab: (tab: SettingsTab) => void;
+  setShowSettings: (show: boolean) => void;
+  lang: Lang;
+  setLang: (lang: Lang) => void;
+  theme: "dark" | "light";
+  setTheme: (theme: "dark" | "light") => void;
+  hookForm: SettingsHook;
+  setHookForm: (form: SettingsHook) => void;
+  hooks: SettingsHook[];
+  saveHooks: (next: SettingsHook[]) => void;
+  mcpForm: { name: string; command: string; args: string; url: string };
+  mcpList: SettingsMcpServer[];
+  mcpLive: SettingsMcpLiveServer[];
+  setMcpForm: (form: { name: string; command: string; args: string; url: string }) => void;
+  refreshMcpConfig: () => void;
+  refreshMcpLive: (fresh?: boolean) => void;
+  refreshSessions: (workspace: string) => void;
+  migrateMsg: string;
+  setMigrateMsg: (msg: string) => void;
+  modelForm: { key: string; name: string; model: string; base_url: string; api_key: string };
+  modelList: SettingsModelEntry[];
+  modelTestMsg: string;
+  setModelForm: (form: { key: string; name: string; model: string; base_url: string; api_key: string }) => void;
+  refreshModels: () => void;
+  saveModel: () => void;
+  testModel: () => void;
+  openSkillEditor: (name: string, path: string) => void;
+  quickPreset: string;
+  quickKey: string;
+  quickBusy: boolean;
+  quickResult: string;
+  setQuickPreset: (preset: string) => void;
+  setQuickKey: (key: string) => void;
+  setQuickBusy: (busy: boolean) => void;
+  setQuickResult: (result: string) => void;
+  skills: SettingsSkill[];
+  skillForm: { name: string; description: string };
+  setSkills: (skills: SettingsSkill[]) => void;
+  setSkillForm: (form: { name: string; description: string }) => void;
+  refreshSkills: () => void;
+  sessionId: string;
+  surface: SurfaceKind;
+  workspace: string;
+  setError: (error: string) => void;
+  version: string;
+  updateMsg: string;
+  runUpdate: () => void;
+  t: Strings;
+}
+
+/** `provider_quick_setup` 的返回（provider_ops.rs）。 */
+type QuickSetupResult = { models?: { name: string }[]; mcpSeeded?: boolean };
+
+/** 一条 `x.ai/skills/toggle` 的技能（外层 camelCase，内层 SkillInfo snake_case）。 */
+type EngineSkill = {
+  name: string;
+  short_description?: string | null;
+  description?: string | null;
+  path: string;
+  enabled?: boolean;
+  scope?: unknown;
+};
+type EngineSkillsResult = { skills?: EngineSkill[] };
 
 /* #127-3 能力徽章：三态三色。unknown 灰 "?" ——不虚标。 */
 function CapBadge({ label, cap }: { label: string; cap: Cap }) {
@@ -38,7 +155,7 @@ type ExecutionDiagnostics = {
   duplicate_event_ids: string[];
 };
 
-function ExecutionIntegrityPanel({ t, setError }: { t: any; setError: (error: string) => void }) {
+function ExecutionIntegrityPanel({ t, setError }: { t: Strings; setError: (error: string) => void }) {
   const [diagnostics, setDiagnostics] = useState<ExecutionDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -85,7 +202,7 @@ function ExecutionIntegrityPanel({ t, setError }: { t: any; setError: (error: st
   );
 }
 
-export function SettingsModal(props: Record<string, any>) {
+export function SettingsModal(props: SettingsModalProps) {
   const { showSettings, hookForm, lang, mcpForm, mcpList, mcpLive, migrateMsg, modelForm, modelList, modelTestMsg, openSkillEditor, quickBusy, quickKey, quickPreset, quickResult, refreshMcpConfig, refreshMcpLive, refreshModels, refreshSessions, refreshSkills, runUpdate, saveHooks, saveModel, sessionId, setError, setHookForm, setLang, setMcpForm, setMigrateMsg, setModelForm, setQuickBusy, setQuickKey, setQuickPreset, setQuickResult, setSettingsTab, setShowSettings, setSkillForm, setSkills, setTheme, settingsTab, skillForm, skills, surface, testModel, theme, updateMsg, version, workspace, hooks, t } = props;
   return (
     <>
@@ -174,11 +291,11 @@ export function SettingsModal(props: Record<string, any>) {
                       setQuickBusy(true);
                       setQuickResult("");
                       try {
-                        const r = await invoke<any>("provider_quick_setup", {
+                        const r = await invoke<QuickSetupResult>("provider_quick_setup", {
                           preset: quickPreset,
                           apiKey: quickKey,
                         });
-                        const names = (r.models ?? []).map((m: any) => m.name).join("、");
+                        const names = (r.models ?? []).map((m) => m.name).join("、");
                         setQuickResult(
                           `✅ ${t.quickDone}${names}${r.mcpSeeded ? ` · ${t.quickMcpSeeded}` : ""}`,
                         );
@@ -200,7 +317,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="modal-label">{t.modelsSection}</div>
               <div className="mcp-list">
                 {modelList.length === 0 && <div className="sidebar-empty">{t.modelsEmpty}</div>}
-                {modelList.map((m: any) => (
+                {modelList.map((m) => (
                   <div key={m.key} className="mcp-item">
                     <div className="mcp-info">
                       <b>
@@ -329,7 +446,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="modal-label">{t.mcpLiveSection}</div>
               <div className="mcp-list">
                 {mcpLive.length === 0 && <div className="sidebar-empty">{t.mcpLiveEmpty}</div>}
-                {mcpLive.map((s: any) => {
+                {mcpLive.map((s) => {
                   const st = s.session ?? {};
                   const on = st.enabled !== false;
                   return (
@@ -367,7 +484,7 @@ export function SettingsModal(props: Record<string, any>) {
                       </div>
                       {on && (st.tools ?? []).length > 0 && (
                         <div className="mcp-tools">
-                          {st.tools.map((tool: any) => (
+                          {(st.tools ?? []).map((tool) => (
                             <button
                               key={tool.name}
                               className={`mcp-tool ${tool.enabled === false ? "off" : ""}`}
@@ -394,7 +511,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="modal-label">{t.mcpSection}</div>
               <div className="mcp-list">
                 {mcpList.length === 0 && <div className="sidebar-empty">{t.notConfigured}</div>}
-                {mcpList.map((s: any) => (
+                {mcpList.map((s) => (
                   <div key={s.name} className="mcp-item">
                     <div className="mcp-info">
                       <b>{s.name}</b>
@@ -443,7 +560,7 @@ export function SettingsModal(props: Record<string, any>) {
                       await invoke("mcp_config_upsert", {
                         name: mcpForm.name,
                         command: mcpForm.command || null,
-                        args: mcpForm.args.trim() ? mcpForm.args.trim().split(/\s+/) : [],
+                        args: parseMcpArgs(mcpForm.args),
                         url: mcpForm.url || null,
                       });
                       setMcpForm({ name: "", command: "", args: "", url: "" });
@@ -464,7 +581,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="modal-label">{t.skillsSection}</div>
               <div className="mcp-list">
                 {skills.length === 0 && <div className="sidebar-empty">{t.skillsEmpty}</div>}
-                {skills.map((sk: any) => (
+                {skills.map((sk) => (
                   <div
                     key={sk.path}
                     className={`mcp-item clickable ${sk.enabled === false ? "off" : ""}`}
@@ -481,13 +598,13 @@ export function SettingsModal(props: Record<string, any>) {
                       onClick={async (ev) => {
                         ev.stopPropagation();
                         try {
-                          const r = await invoke<any>("skills_toggle", {
+                          const r = await invoke<EngineSkillsResult>("skills_toggle", {
                             name: sk.name,
                             enabled: sk.enabled === false,
                             workspace,
                           });
                           setSkills(
-                            (r?.skills ?? []).map((x: any) => ({
+                            (r?.skills ?? []).map((x) => ({
                               name: x.name,
                               description: x.short_description ?? x.description ?? "",
                               path: x.path,
@@ -549,7 +666,7 @@ export function SettingsModal(props: Record<string, any>) {
               <div className="modal-label">{t.hooksSection}</div>
               <div className="mcp-list">
                 {hooks.length === 0 && <div className="sidebar-empty">{t.hooksEmpty}</div>}
-                {hooks.map((h: any, i: any) => (
+                {hooks.map((h, i) => (
                   <div key={i} className="mcp-item">
                     <div className="mcp-info">
                       <b>{h.event}</b>
@@ -558,7 +675,7 @@ export function SettingsModal(props: Record<string, any>) {
                     <button
                       className="ghost small"
                       title={t.mcpDelete}
-                      onClick={() => saveHooks(hooks.filter((_: any, j: any) => j !== i))}
+                      onClick={() => saveHooks(hooks.filter((_, j) => j !== i))}
                     >
                       <IconX size={13} />
                     </button>
@@ -570,7 +687,7 @@ export function SettingsModal(props: Record<string, any>) {
                   value={hookForm.event}
                   onChange={(e) => setHookForm({ ...hookForm, event: e.currentTarget.value })}
                 >
-                  {["PreToolUse", "PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"].map((ev: any) => (
+                  {["PreToolUse", "PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"].map((ev) => (
                     <option key={ev} value={ev}>
                       {ev}
                     </option>

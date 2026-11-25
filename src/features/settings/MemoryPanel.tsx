@@ -2,8 +2,15 @@
    App 的 prop 袋加码。开关/flush/追加全部直打 Tauri 命令边界。 */
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { Strings } from "../../i18n";
+import type { SurfaceKind } from "../../surface";
 
-export function MemoryPanel(props: { sessionId: string; surface: string; workspace: string; t: any }) {
+export function MemoryPanel(props: {
+  sessionId: string;
+  surface: SurfaceKind;
+  workspace: string;
+  t: Strings;
+}) {
   const { sessionId, surface, workspace, t } = props;
   const [enabled, setEnabled] = useState(false);
   const [globalMem, setGlobalMem] = useState("");
@@ -20,7 +27,7 @@ export function MemoryPanel(props: { sessionId: string; surface: string; workspa
     catch (e) { errors.push(String(e)); }
     if (!workspace) setWorkspaceMem(null);
     else {
-      try { setWorkspaceMem(await invoke<any>("memory_read_workspace", { workspace })); }
+      try { setWorkspaceMem(await invoke<{ dir_name: string; content: string }>("memory_read_workspace", { workspace })); }
       catch (e) { errors.push(String(e)); }
     }
     if (errors.length > 0) setMsg(errors[0]);
