@@ -429,7 +429,7 @@ ${p}
   mcpSection: "MCP 服务器（保存后重开会话生效）",
   mcpName: "名称，如 filesystem",
   mcpCommand: "命令，如 npx",
-  mcpArgs: "参数（空格分隔），如 -y @modelcontextprotocol/server-filesystem D:\\proj",
+  mcpArgs: "参数（空格分隔；带空格的用双引号括起），如 -y server-filesystem \"D:\\My Projects\"",
   mcpUrl: "或 HTTP/SSE URL（与命令二选一）",
   mcpAdd: "添加 / 更新",
   mcpDelete: "删除",
@@ -881,7 +881,7 @@ Remove the worktree?`,
   mcpSection: "MCP servers (takes effect on next session)",
   mcpName: "Name, e.g. filesystem",
   mcpCommand: "Command, e.g. npx",
-  mcpArgs: "Args (space-separated), e.g. -y @modelcontextprotocol/server-filesystem D:\\proj",
+  mcpArgs: "Args (space-separated; double-quote any with spaces), e.g. -y server-filesystem \"D:\\My Projects\"",
   mcpUrl: "or HTTP/SSE URL (instead of command)",
   mcpAdd: "Add / Update",
   mcpDelete: "Delete",
@@ -907,6 +907,9 @@ Remove the worktree?`,
 };
 
 export const STRINGS: Record<Lang, typeof zh> = { zh, en };
+
+/** One locale's string table (the shape of `zh`; `en` is checked against it). */
+export type Strings = typeof zh;
 
 const LEGACY_UNTITLED_TITLES = new Set(["(未命名会话)", "(untitled session)"]);
 
