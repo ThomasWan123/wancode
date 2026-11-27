@@ -149,7 +149,7 @@ pub fn validate_startup_models_at(path: &std::path::Path) -> StartupModels {
         if let Some(models_tbl) = doc.get_mut("models").and_then(|v| v.as_table_mut()) {
             models_tbl["default"] = toml_edit::value(fixed.as_str());
         }
-        if let Err(e) = std::fs::write(path, doc.to_string()) {
+        if let Err(e) = write_config_atomic(path, &doc.to_string()) {
             return StartupModels::Invalid(format!("default 悬空且写回修复失败: {e}"));
         }
         return StartupModels::RepairedDefault(fixed);
@@ -297,6 +297,63 @@ telemetry = false
 model = \"x\""));
         assert!(matches!(validate_startup_models_at(&p), StartupModels::Invalid(_)));
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// 以"允许读写、但不允许替换"的共享方式占住目标文件——编辑器、同步盘、
+    /// 杀毒软件都可能这样占着 config.toml。此时重命名覆盖必然失败。
+    #[cfg(windows)]
+    fn hold_open_for_reading(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(path)
+            .unwrap()
+    }
+
+    // 正向对照：这套"占住目标"的手法确实能区分原子替换与普通写入——
+    // 对 write_config_atomic 本身断言，调用方的那几条同型测试才有依据。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_refuses_while_a_reader_holds_the_target() {
+        let p = tmp("held", Some("old"));
+        let reader = hold_open_for_reading(&p);
+        let err = write_config_atomic(&p, "new").expect_err("目标被占住时原子替换必须失败");
+        assert!(err.contains("原子替换配置失败"), "{err}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        assert!(!p.with_extension(format!("tmp-{}", std::process::id())).exists(), "失败后不留临时文件");
+        drop(reader);
+        write_config_atomic(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // 启动修复写不回去时必须如实报告失败，而不是声称"已修复"——
+    // 声称修复等于把悬空的 default 放到下一次启动去崩。
+    #[cfg(windows)]
+    #[test]
+    fn dangling_default_repair_refuses_to_rewrite_a_file_a_reader_holds_open() {
+        let p = tmp("held-dangling", Some(DANGLING));
+        let reader = hold_open_for_reading(&p);
+        match validate_startup_models_at(&p) {
+            StartupModels::Invalid(msg) => assert!(msg.contains("写回修复失败"), "{msg}"),
+            other => panic!("写不回去时不得报告成功: {}", describe(&other)),
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), DANGLING, "原文件不能被动了半截");
+        drop(reader);
+        assert!(matches!(validate_startup_models_at(&p), StartupModels::RepairedDefault(f) if f == "glm-5.2"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    fn describe(outcome: &StartupModels) -> &'static str {
+        match outcome {
+            StartupModels::Ok => "Ok",
+            StartupModels::NoModels => "NoModels",
+            StartupModels::RepairedDefault(_) => "RepairedDefault",
+            StartupModels::Invalid(_) => "Invalid",
+        }
     }
 }
 
